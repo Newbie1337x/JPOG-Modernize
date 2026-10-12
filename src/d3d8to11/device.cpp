@@ -1,0 +1,1489 @@
+// device.cpp - IDirect3DDevice8 on D3D11: state tracking, draws, clears and presentation.
+#include "device.h"
+#include <math.h>
+#include <d3d11sdklayers.h>
+
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
+
+namespace {
+
+const char* kHelperVS =
+    "cbuffer Helper : register(b0) { float4 color; float4 misc; };\n"
+    "struct O { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
+    "O main(uint id : SV_VertexID) {\n"
+    "  O o; o.uv = float2((id << 1) & 2, id & 2);\n"
+    "  o.pos = float4(o.uv * float2(2, -2) + float2(-1, 1), misc.x, 1);\n"
+    "  return o; }\n";
+
+const char* kClearPS =
+    "cbuffer Helper : register(b0) { float4 color; float4 misc; };\n"
+    "float4 main(float4 pos : SV_Position) : SV_Target { return color; }\n";
+
+const char* kPresentPS =
+    "cbuffer Helper : register(b0) { float4 color; float4 misc; };\n"
+    "Texture2D src : register(t0); Texture1D lut : register(t1);\n"
+    "SamplerState smp : register(s0); SamplerState pt : register(s1);\n"
+    "float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {\n"
+    "  float4 c = src.Sample(smp, uv);\n"
+    "  if (misc.y > 0.5) {\n"
+    "    float3 t = saturate(c.rgb) * (255.0 / 256.0) + 0.5 / 256.0;\n"
+    "    c.r = lut.Sample(pt, t.r).r; c.g = lut.Sample(pt, t.g).g; c.b = lut.Sample(pt, t.b).b;\n"
+    "  }\n"
+    "  return float4(c.rgb, 1.0); }\n";
+
+struct HelperConstants { float color[4]; float misc[4]; };
+
+D3D11_BLEND MapBlend(DWORD b, bool alpha)
+{
+    switch (b) {
+    case 1: return D3D11_BLEND_ZERO;
+    case 2: return D3D11_BLEND_ONE;
+    case 3: return alpha ? D3D11_BLEND_SRC_ALPHA : D3D11_BLEND_SRC_COLOR;
+    case 4: return alpha ? D3D11_BLEND_INV_SRC_ALPHA : D3D11_BLEND_INV_SRC_COLOR;
+    case 5: return D3D11_BLEND_SRC_ALPHA;
+    case 6: return D3D11_BLEND_INV_SRC_ALPHA;
+    case 7: return D3D11_BLEND_DEST_ALPHA;
+    case 8: return D3D11_BLEND_INV_DEST_ALPHA;
+    case 9: return alpha ? D3D11_BLEND_DEST_ALPHA : D3D11_BLEND_DEST_COLOR;
+    case 10: return alpha ? D3D11_BLEND_INV_DEST_ALPHA : D3D11_BLEND_INV_DEST_COLOR;
+    case 11: return D3D11_BLEND_SRC_ALPHA_SAT;
+    default: return D3D11_BLEND_ONE;
+    }
+}
+
+D3D11_COMPARISON_FUNC MapCmp(DWORD f) { return (f >= 1 && f <= 8) ? (D3D11_COMPARISON_FUNC)f : D3D11_COMPARISON_ALWAYS; }
+
+D3D11_TEXTURE_ADDRESS_MODE MapAddress(DWORD a) { return (a >= 1 && a <= 5) ? (D3D11_TEXTURE_ADDRESS_MODE)a : D3D11_TEXTURE_ADDRESS_WRAP; }
+
+DXGI_FORMAT DeclFormat(int type)
+{
+    switch (type) {
+    case 0: return DXGI_FORMAT_R32_FLOAT;
+    case 1: return DXGI_FORMAT_R32G32_FLOAT;
+    case 2: return DXGI_FORMAT_R32G32B32_FLOAT;
+    case 3: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+    case 4: return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case 5: return DXGI_FORMAT_R8G8B8A8_UINT;
+    case 6: return DXGI_FORMAT_R16G16_SINT;
+    case 7: return DXGI_FORMAT_R16G16B16A16_SINT;
+    default: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+    }
+}
+
+template <class T> void SetRef(T*& slot, T* value)
+{
+    if (value) value->AddRef();
+    if (slot) slot->Release();
+    slot = value;
+}
+
+} // namespace
+
+// ---- construction --------------------------------------------------------------------------------
+
+Device::Device(Direct3D8* d3d, HWND focus, DWORD flags, D3D8PresentParameters* pp)
+    : m_d3d(d3d), m_focus(focus), m_window(nullptr), m_flags(flags), m_pp(*pp)
+{
+    d3d->AddRef();
+    m_window = m_pp.hDeviceWindow ? m_pp.hDeviceWindow : focus;
+    memset(m_rs, 0, sizeof(m_rs));
+    memset(m_tss, 0, sizeof(m_tss));
+    memset(m_vsConst, 0, sizeof(m_vsConst));
+    memset(m_transforms, 0, sizeof(m_transforms));
+    for (auto& m : m_transforms) m.m[0][0] = m.m[1][1] = m.m[2][2] = m.m[3][3] = 1.0f;
+    for (int i = 0; i < 256; i++) m_gamma.red[i] = m_gamma.green[i] = m_gamma.blue[i] = (WORD)(i * 257);
+
+    // D3D8 default render states.
+    m_rs[RS_ZENABLE] = m_pp.EnableAutoDepthStencil ? 1 : 0;
+    m_rs[RS_FILLMODE] = 3;
+    m_rs[RS_SHADEMODE] = 2;
+    m_rs[RS_ZWRITEENABLE] = 1;
+    m_rs[RS_SRCBLEND] = 2;
+    m_rs[RS_DESTBLEND] = 1;
+    m_rs[RS_CULLMODE] = 3;
+    m_rs[RS_ZFUNC] = 4;
+    m_rs[RS_ALPHAFUNC] = 8;
+    m_rs[RS_FOGEND] = 0x3f800000;
+    m_rs[RS_FOGDENSITY] = 0x3f800000;
+    m_rs[RS_STENCILFAIL] = m_rs[RS_STENCILZFAIL] = m_rs[RS_STENCILPASS] = 1;
+    m_rs[RS_STENCILFUNC] = 8;
+    m_rs[RS_STENCILMASK] = m_rs[RS_STENCILWRITEMASK] = 0xFFFFFFFF;
+    m_rs[RS_TEXTUREFACTOR] = 0xFFFFFFFF;
+    m_rs[RS_LIGHTING] = 1;
+    m_rs[RS_COLORWRITEENABLE] = 0xF;
+    m_rs[RS_BLENDOP] = 1;
+    for (int s = 0; s < kMaxStages; s++) {
+        DWORD* t = m_tss[s];
+        t[TSS_COLOROP] = s == 0 ? 4 : 1;
+        t[TSS_COLORARG1] = 2;
+        t[TSS_COLORARG2] = 1;
+        t[TSS_ALPHAOP] = s == 0 ? 2 : 1;
+        t[TSS_ALPHAARG1] = 2;
+        t[TSS_ALPHAARG2] = 1;
+        t[TSS_TEXCOORDINDEX] = s;
+        t[TSS_ADDRESSU] = t[TSS_ADDRESSV] = t[TSS_ADDRESSW] = 1;
+        t[TSS_MAGFILTER] = t[TSS_MINFILTER] = 1;
+        t[TSS_MIPFILTER] = 0;
+        t[TSS_MAXANISOTROPY] = 1;
+        t[TSS_COLORARG0] = t[TSS_ALPHAARG0] = 1;
+    }
+    for (int i = 0; i < 4; i++) m_psConst.textureFactor[i] = 1.0f;
+    m_psConst.alphaRef[0] = 0.0f;
+    QueryPerformanceFrequency(&m_qpcFreq);
+    QueryPerformanceCounter(&m_lastFrame);
+}
+
+Device::~Device()
+{
+    for (auto& t : m_textures) SetRef(t, (ID8BaseTexture*)nullptr);
+    for (auto& s : m_streams) SetRef(s.vb, (VertexBuffer*)nullptr);
+    SetRef(m_indices, (IndexBuffer*)nullptr);
+    SetRef(m_rt, (Surface*)nullptr);
+    SetRef(m_ds, (Surface*)nullptr);
+    if (m_backBuffer) { m_backBuffer->m_holdsDeviceRef = false; m_backBuffer->Release(); }
+    if (m_autoDepth) { m_autoDepth->m_holdsDeviceRef = false; m_autoDepth->Release(); }
+    for (auto* v : m_vertexShaders) delete v;
+    for (auto* p : m_pixelShaders) delete p;
+    m_d3d->Release();
+}
+
+bool Device::Init()
+{
+    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    if (g_config.debugLayer) flags |= D3D11_CREATE_DEVICE_DEBUG;
+    D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+    D3D_FEATURE_LEVEL got;
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, levels, 2,
+                                   D3D11_SDK_VERSION, &m_device, &got, &m_ctx);
+    if (FAILED(hr)) {
+        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, levels + 1, 1,
+                               D3D11_SDK_VERSION, &m_device, &got, &m_ctx);
+    }
+    if (FAILED(hr)) { Log("D3D11CreateDevice failed 0x%08lx", hr); return false; }
+    m_ctx.As(&m_ctx1);
+    Log("D3D11 device created (feature level 0x%x)", got);
+    if (!CreatePresentResources()) return false;
+    if (!CreateSunResources()) { Log("Sun resource creation failed"); return false; }
+    if (!CreateSwapChainAndBackBuffer()) return false;
+    return true;
+}
+
+bool Device::CreatePresentResources()
+{
+    auto vs = CompileHLSL(kHelperVS, "vs_4_0", "helper_vs");
+    auto cps = CompileHLSL(kClearPS, "ps_4_0", "clear_ps");
+    auto pps = CompileHLSL(kPresentPS, "ps_4_0", "present_ps");
+    if (!vs || !cps || !pps) return false;
+    m_device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &m_fullscreenVS);
+    m_device->CreatePixelShader(cps->GetBufferPointer(), cps->GetBufferSize(), nullptr, &m_clearPS);
+    m_device->CreatePixelShader(pps->GetBufferPointer(), pps->GetBufferSize(), nullptr, &m_presentPS);
+
+    auto makeCB = [&](UINT size, ComPtr<ID3D11Buffer>& out) {
+        D3D11_BUFFER_DESC bd = { (size + 15) & ~15u, D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER,
+                                 D3D11_CPU_ACCESS_WRITE, 0, 0 };
+        return SUCCEEDED(m_device->CreateBuffer(&bd, nullptr, &out));
+    };
+    if (!makeCB(sizeof(m_vsConst), m_vsCB) || !makeCB(sizeof(VSExtraConstants), m_vsExtraCB) ||
+        !makeCB(sizeof(PSConstants), m_psCB) || !makeCB(sizeof(HelperConstants), m_clearCB))
+        return false;
+
+    D3D11_SAMPLER_DESC sd = {};
+    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sd.MaxLOD = D3D11_FLOAT32_MAX;
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    m_device->CreateSamplerState(&sd, &m_linearClamp);
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    m_device->CreateSamplerState(&sd, &m_pointClamp);
+
+    D3D11_BLEND_DESC bd = {};
+    bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    m_device->CreateBlendState(&bd, &m_noBlend);
+    D3D11_DEPTH_STENCIL_DESC dd = {};
+    m_device->CreateDepthStencilState(&dd, &m_noDepth);
+    D3D11_RASTERIZER_DESC rd = {};
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_NONE;
+    rd.DepthClipEnable = TRUE;
+    m_device->CreateRasterizerState(&rd, &m_noCull);
+    rd.ScissorEnable = TRUE;
+    m_device->CreateRasterizerState(&rd, &m_noCullScissor);
+
+    D3D11_TEXTURE1D_DESC gd = { 256, 1, 1, DXGI_FORMAT_R16G16B16A16_UNORM, D3D11_USAGE_DEFAULT,
+                                D3D11_BIND_SHADER_RESOURCE, 0, 0 };
+    if (FAILED(m_device->CreateTexture1D(&gd, nullptr, &m_gammaTex))) return false;
+    m_device->CreateShaderResourceView(m_gammaTex.Get(), nullptr, &m_gammaSRV);
+    return true;
+}
+
+bool Device::CreateSwapChainAndBackBuffer()
+{
+    m_sunReady = m_sunStarted = false;
+    m_shadowDraws = 0;
+    RECT rc = {};
+    GetClientRect(m_window, &rc);
+    UINT w = rc.right - rc.left, h = rc.bottom - rc.top;
+    if (!m_pp.BackBufferWidth || !m_pp.BackBufferHeight) { m_pp.BackBufferWidth = w; m_pp.BackBufferHeight = h; }
+    if (!w || !h) { w = m_pp.BackBufferWidth; h = m_pp.BackBufferHeight; }
+    if (m_pp.BackBufferFormat == D8FMT_UNKNOWN) m_pp.BackBufferFormat = D8FMT_X8R8G8B8;
+
+    if (!m_swap) {
+        ComPtr<IDXGIDevice> dxgiDev;
+        ComPtr<IDXGIAdapter> adapter;
+        ComPtr<IDXGIFactory2> factory;
+        m_device.As(&dxgiDev);
+        dxgiDev->GetAdapter(&adapter);
+        adapter->GetParent(IID_PPV_ARGS(&factory));
+        DXGI_SWAP_CHAIN_DESC1 sd = {};
+        sd.Width = w;
+        sd.Height = h;
+        sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        sd.SampleDesc.Count = 1;
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.BufferCount = 2;
+        sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        sd.Scaling = DXGI_SCALING_STRETCH;
+        sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+        HRESULT hr = factory->CreateSwapChainForHwnd(m_device.Get(), m_window, &sd, nullptr, nullptr, &m_swap);
+        if (FAILED(hr)) { Log("CreateSwapChainForHwnd failed 0x%08lx", hr); return false; }
+        factory->MakeWindowAssociation(m_window, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+        m_swapW = w;
+        m_swapH = h;
+    }
+
+    if (m_backBuffer) { m_backBuffer->m_holdsDeviceRef = false; m_backBuffer->Release(); m_backBuffer = nullptr; }
+    if (m_autoDepth) { m_autoDepth->m_holdsDeviceRef = false; m_autoDepth->Release(); m_autoDepth = nullptr; }
+    m_backBuffer = new Surface(this, nullptr, 0, m_pp.BackBufferWidth, m_pp.BackBufferHeight, m_pp.BackBufferFormat,
+                               D8USAGE_RENDERTARGET, D8POOL_DEFAULT);
+    if (!m_backBuffer->CreateStandalone()) { Log("back buffer creation failed"); return false; }
+    if (m_pp.EnableAutoDepthStencil) {
+        m_autoDepth = new Surface(this, nullptr, 0, m_pp.BackBufferWidth, m_pp.BackBufferHeight,
+                                  m_pp.AutoDepthStencilFormat, D8USAGE_DEPTHSTENCIL, D8POOL_DEFAULT);
+        if (!m_autoDepth->CreateStandalone()) { Log("depth buffer creation failed"); return false; }
+    }
+    SetRef(m_rt, m_backBuffer);
+    SetRef(m_ds, m_autoDepth);
+    m_rtDirty = true;
+    m_viewport = { 0, 0, m_pp.BackBufferWidth, m_pp.BackBufferHeight, 0.0f, 1.0f };
+    m_viewportDirty = true;
+    Log("back buffer %ux%u fmt %lu, depth %s, window %ux%u", m_pp.BackBufferWidth, m_pp.BackBufferHeight,
+        m_pp.BackBufferFormat, m_autoDepth ? "yes" : "no", w, h);
+    return true;
+}
+
+HRESULT Device::QueryInterface(REFIID, void** out)
+{
+    if (!out) return E_POINTER;
+    *out = this;
+    AddRef();
+    return S_OK;
+}
+
+ULONG Device::Release()
+{
+    ULONG r = InterlockedDecrement(&m_ref);
+    if (r == 0) delete this;
+    return r;
+}
+
+HRESULT Device::GetDirect3D(ID8Direct3D** out)
+{
+    if (!out) return D8ERR_INVALIDCALL;
+    *out = m_d3d;
+    m_d3d->AddRef();
+    return S_OK;
+}
+
+HRESULT Device::GetDeviceCaps(void* caps)
+{
+    if (!caps) return D8ERR_INVALIDCALL;
+    Direct3D8::FillCaps(caps);
+    return S_OK;
+}
+
+HRESULT Device::GetDisplayMode(D3D8DisplayMode* mode)
+{
+    return m_d3d->GetAdapterDisplayMode(0, mode);
+}
+
+HRESULT Device::GetCreationParameters(void* params)
+{
+    struct P { UINT adapter; DWORD type; HWND focus; DWORD flags; };
+    if (!params) return D8ERR_INVALIDCALL;
+    *(P*)params = { 0, 1, m_focus, m_flags };
+    return S_OK;
+}
+
+HRESULT Device::Reset(D3D8PresentParameters* pp)
+{
+    if (!pp) return D8ERR_INVALIDCALL;
+    m_pp = *pp;
+    if (pp->hDeviceWindow) m_window = pp->hDeviceWindow;
+    Log("Reset %ux%u", pp->BackBufferWidth, pp->BackBufferHeight);
+    return CreateSwapChainAndBackBuffer() ? S_OK : D8ERR_INVALIDCALL;
+}
+
+HRESULT Device::GetBackBuffer(UINT, DWORD, ID8Surface** out)
+{
+    if (!out || !m_backBuffer) return D8ERR_INVALIDCALL;
+    *out = m_backBuffer;
+    m_backBuffer->AddRef();
+    return S_OK;
+}
+
+HRESULT Device::GetRasterStatus(D3D8RasterStatus* st)
+{
+    if (!st) return D8ERR_INVALIDCALL;
+    st->InVBlank = FALSE;
+    st->ScanLine = 0;
+    return S_OK;
+}
+
+void Device::SetGammaRamp(DWORD, const D3D8GammaRamp* ramp)
+{
+    if (!ramp || memcmp(ramp, &m_gamma, sizeof(m_gamma)) == 0) return;
+    m_gamma = *ramp;
+    m_gammaDirty = true;
+    m_gammaIdentity = true;
+    for (int i = 0; i < 256 && m_gammaIdentity; i++)
+        if (m_gamma.red[i] != i * 257 || m_gamma.green[i] != i * 257 || m_gamma.blue[i] != i * 257) m_gammaIdentity = false;
+}
+
+// ---- resource creation ---------------------------------------------------------------------------
+
+HRESULT Device::CreateTexture(UINT w, UINT h, UINT levels, DWORD usage, DWORD fmt, DWORD pool, ID8Texture** out)
+{
+    if (!out || !w || !h) return D8ERR_INVALIDCALL;
+    Texture* t = new Texture(this, w, h, levels, usage, fmt, pool);
+    if (!t->Create()) { t->Release(); return D8ERR_INVALIDCALL; }
+    *out = t;
+    return S_OK;
+}
+
+HRESULT Device::CreateVolumeTexture(UINT w, UINT h, UINT d, UINT levels, DWORD usage, DWORD fmt, DWORD pool, ID8VolumeTexture** out)
+{
+    if (!out || !w || !h || !d) return D8ERR_INVALIDCALL;
+    VolumeTexture* t = new VolumeTexture(this, w, h, d, levels, usage, fmt, pool);
+    if (!t->Create()) { t->Release(); return D8ERR_INVALIDCALL; }
+    *out = t;
+    return S_OK;
+}
+
+HRESULT Device::CreateCubeTexture(UINT, UINT, DWORD, DWORD fmt, DWORD, void**)
+{
+    LogOnce("cube", "CreateCubeTexture (fmt %lu) not supported", fmt);
+    return D8ERR_NOTAVAILABLE;
+}
+
+HRESULT Device::CreateVertexBuffer(UINT len, DWORD usage, DWORD fvf, DWORD pool, ID8VertexBuffer** out)
+{
+    if (!out) return D8ERR_INVALIDCALL;
+    VertexBuffer* vb = new VertexBuffer(this, fvf);
+    AddRef();
+    if (!vb->m_impl.Create(this, len, usage, pool, D3D11_BIND_VERTEX_BUFFER)) { vb->Release(); return D8ERR_OUTOFVIDEOMEMORY; }
+    *out = vb;
+    return S_OK;
+}
+
+HRESULT Device::CreateIndexBuffer(UINT len, DWORD usage, DWORD fmt, DWORD pool, ID8IndexBuffer** out)
+{
+    if (!out) return D8ERR_INVALIDCALL;
+    IndexBuffer* ib = new IndexBuffer(this, fmt);
+    AddRef();
+    if (!ib->m_impl.Create(this, len, usage, pool, D3D11_BIND_INDEX_BUFFER)) { ib->Release(); return D8ERR_OUTOFVIDEOMEMORY; }
+    *out = ib;
+    return S_OK;
+}
+
+HRESULT Device::CreateRenderTarget(UINT w, UINT h, DWORD fmt, DWORD, BOOL, ID8Surface** out)
+{
+    if (!out) return D8ERR_INVALIDCALL;
+    Surface* s = new Surface(this, nullptr, 0, w, h, fmt, D8USAGE_RENDERTARGET, D8POOL_DEFAULT);
+    AddRef();
+    s->m_holdsDeviceRef = true;
+    if (!s->CreateStandalone()) { s->Release(); return D8ERR_INVALIDCALL; }
+    *out = s;
+    return S_OK;
+}
+
+HRESULT Device::CreateDepthStencilSurface(UINT w, UINT h, DWORD fmt, DWORD, ID8Surface** out)
+{
+    if (!out) return D8ERR_INVALIDCALL;
+    Surface* s = new Surface(this, nullptr, 0, w, h, fmt, D8USAGE_DEPTHSTENCIL, D8POOL_DEFAULT);
+    AddRef();
+    s->m_holdsDeviceRef = true;
+    if (!s->CreateStandalone()) { s->Release(); return D8ERR_INVALIDCALL; }
+    *out = s;
+    return S_OK;
+}
+
+HRESULT Device::CreateImageSurface(UINT w, UINT h, DWORD fmt, ID8Surface** out)
+{
+    if (!out) return D8ERR_INVALIDCALL;
+    Surface* s = new Surface(this, nullptr, 0, w, h, fmt, 0, D8POOL_SYSTEMMEM);
+    AddRef();
+    s->m_holdsDeviceRef = true;
+    if (!s->CreateStandalone()) { s->Release(); return D8ERR_INVALIDCALL; }
+    *out = s;
+    return S_OK;
+}
+
+HRESULT Device::CopyRects(ID8Surface* src, const RECT* rects, UINT count, ID8Surface* dst, const POINT* pts)
+{
+    Surface* s = static_cast<Surface*>(src);
+    Surface* d = static_cast<Surface*>(dst);
+    if (!s || !d) return D8ERR_INVALIDCALL;
+    if (s->Resource() && d->Resource() && !count) {
+        m_ctx->CopySubresourceRegion(d->Resource(), d->Subresource(), 0, 0, 0, s->Resource(), s->Subresource(), nullptr);
+        return S_OK;
+    }
+    LogOnce("copyrects", "CopyRects: only whole GPU surface copies are supported");
+    return S_OK;
+}
+
+HRESULT Device::UpdateTexture(ID8BaseTexture*, ID8BaseTexture*)
+{
+    LogOnce("updatetexture", "UpdateTexture not supported");
+    return S_OK;
+}
+
+void Device::OnTextureReleased(ID8BaseTexture*) {}
+void Device::OnSurfaceReleased(Surface*) {}
+
+// ---- render targets / viewport / clears ----------------------------------------------------------
+
+HRESULT Device::SetRenderTarget(ID8Surface* rt, ID8Surface* ds)
+{
+    if (rt) SetRef(m_rt, static_cast<Surface*>(rt));
+    SetRef(m_ds, static_cast<Surface*>(ds));
+    m_rtDirty = true;
+    if (m_rt) {
+        m_viewport = { 0, 0, m_rt->m_width, m_rt->m_height, 0.0f, 1.0f };
+        m_viewportDirty = true;
+    }
+    return S_OK;
+}
+
+HRESULT Device::GetRenderTarget(ID8Surface** out)
+{
+    if (!out || !m_rt) return D8ERR_INVALIDCALL;
+    *out = m_rt;
+    m_rt->AddRef();
+    return S_OK;
+}
+
+HRESULT Device::GetDepthStencilSurface(ID8Surface** out)
+{
+    if (!out) return D8ERR_INVALIDCALL;
+    *out = m_ds;
+    if (!m_ds) return D8ERR_NOTAVAILABLE;
+    m_ds->AddRef();
+    return S_OK;
+}
+
+void Device::ApplyRenderTargets()
+{
+    if (!m_rtDirty) return;
+    ID3D11RenderTargetView* rtv = m_rt ? m_rt->Rtv() : nullptr;
+    ID3D11DepthStencilView* dsv = m_ds ? m_ds->Dsv() : nullptr;
+    // A texture bound for sampling cannot also be a render target: drop all texture bindings
+    // so PrepareDraw rebinds them.
+    ID3D11ShaderResourceView* nulls[kMaxStages] = {};
+    m_ctx->PSSetShaderResources(0, kMaxStages, nulls);
+    m_ctx->OMSetRenderTargets(1, &rtv, dsv);
+    m_rtDirty = false;
+}
+
+HRESULT Device::SetViewport(const D3D8Viewport* vp)
+{
+    if (!vp) return D8ERR_INVALIDCALL;
+    if (m_recordingStateBlock) return S_OK;
+    m_viewport = *vp;
+    m_viewportDirty = true;
+    return S_OK;
+}
+
+HRESULT Device::Clear(DWORD count, const D3D8Rect* rects, DWORD flags, DWORD color, float z, DWORD stencil)
+{
+    ApplyRenderTargets();
+    const bool fullViewport = m_rt && m_viewport.X == 0 && m_viewport.Y == 0 &&
+                              m_viewport.Width >= m_rt->m_width && m_viewport.Height >= m_rt->m_height;
+    if (count == 0 && fullViewport) {
+        if ((flags & D8CLEAR_TARGET) && m_rt && m_rt->Rtv()) {
+            float c[4];
+            ColorToFloat4(color, c);
+            m_ctx->ClearRenderTargetView(m_rt->Rtv(), c);
+        }
+        if ((flags & (D8CLEAR_ZBUFFER | D8CLEAR_STENCIL)) && m_ds && m_ds->Dsv()) {
+            UINT f = ((flags & D8CLEAR_ZBUFFER) ? D3D11_CLEAR_DEPTH : 0) | ((flags & D8CLEAR_STENCIL) ? D3D11_CLEAR_STENCIL : 0);
+            m_ctx->ClearDepthStencilView(m_ds->Dsv(), f, z, (UINT8)stencil);
+        }
+        return S_OK;
+    }
+    ClearWithQuad(count, rects, flags, color, z);
+    return S_OK;
+}
+
+void Device::ClearWithQuad(DWORD count, const D3D8Rect* rects, DWORD flags, DWORD color, float z)
+{
+    HelperConstants hc = {};
+    ColorToFloat4(color, hc.color);
+    hc.misc[0] = z;
+    D3D11_MAPPED_SUBRESOURCE map;
+    if (SUCCEEDED(m_ctx->Map(m_clearCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        memcpy(map.pData, &hc, sizeof(hc));
+        m_ctx->Unmap(m_clearCB.Get(), 0);
+    }
+    static ComPtr<ID3D11BlendState> blendColor, blendNone;
+    static ComPtr<ID3D11DepthStencilState> depthWrite;
+    if (!blendColor) {
+        D3D11_BLEND_DESC bd = {};
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        m_device->CreateBlendState(&bd, &blendColor);
+        bd.RenderTarget[0].RenderTargetWriteMask = 0;
+        m_device->CreateBlendState(&bd, &blendNone);
+        D3D11_DEPTH_STENCIL_DESC dd = {};
+        dd.DepthEnable = TRUE;
+        dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+        dd.DepthFunc = D3D11_COMPARISON_ALWAYS;
+        m_device->CreateDepthStencilState(&dd, &depthWrite);
+    }
+    D3D11_VIEWPORT vp = { (float)m_viewport.X, (float)m_viewport.Y, (float)m_viewport.Width, (float)m_viewport.Height, 0.0f, 1.0f };
+    m_ctx->RSSetViewports(1, &vp);
+    m_ctx->IASetInputLayout(nullptr);
+    m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_ctx->VSSetShader(m_fullscreenVS.Get(), nullptr, 0);
+    m_ctx->VSSetConstantBuffers(0, 1, m_clearCB.GetAddressOf());
+    m_ctx->PSSetShader(m_clearPS.Get(), nullptr, 0);
+    m_ctx->PSSetConstantBuffers(0, 1, m_clearCB.GetAddressOf());
+    m_ctx->OMSetBlendState((flags & D8CLEAR_TARGET) ? blendColor.Get() : blendNone.Get(), nullptr, 0xFFFFFFFF);
+    m_ctx->OMSetDepthStencilState((flags & D8CLEAR_ZBUFFER) && m_ds ? depthWrite.Get() : m_noDepth.Get(), 0);
+    if (count && rects) {
+        m_ctx->RSSetState(m_noCullScissor.Get());
+        for (DWORD i = 0; i < count; i++) {
+            D3D11_RECT r = { rects[i].x1, rects[i].y1, rects[i].x2, rects[i].y2 };
+            m_ctx->RSSetScissorRects(1, &r);
+            m_ctx->Draw(3, 0);
+        }
+    } else {
+        m_ctx->RSSetState(m_noCull.Get());
+        m_ctx->Draw(3, 0);
+    }
+    // Force PrepareDraw to rebind everything we touched.
+    m_viewportDirty = true;
+    m_vsConstDirty = m_psConstDirty = true;
+    m_lastVS = nullptr; m_lastPS = nullptr; m_lastLayout = nullptr;
+    m_lastBlend = nullptr; m_lastDepth = nullptr; m_lastRaster = nullptr;
+}
+
+// ---- transforms / lights (stored only: the game uses vertex shaders) ------------------------------
+
+HRESULT Device::SetTransform(DWORD state, const D3D8Matrix* m)
+{
+    if (!m || state >= 512) return D8ERR_INVALIDCALL;
+    m_transforms[state] = *m;
+    return S_OK;
+}
+
+HRESULT Device::GetTransform(DWORD state, D3D8Matrix* m)
+{
+    if (!m || state >= 512) return D8ERR_INVALIDCALL;
+    *m = m_transforms[state];
+    return S_OK;
+}
+
+HRESULT Device::MultiplyTransform(DWORD state, const D3D8Matrix* m)
+{
+    if (!m || state >= 512) return D8ERR_INVALIDCALL;
+    D3D8Matrix r = {};
+    const D3D8Matrix& a = m_transforms[state];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            for (int k = 0; k < 4; k++) r.m[i][j] += a.m[i][k] * m->m[k][j];
+    m_transforms[state] = r;
+    return S_OK;
+}
+
+HRESULT Device::SetLight(DWORD index, const D3D8Light* l)
+{
+    if (!l) return D8ERR_INVALIDCALL;
+    m_lights[index] = *l;
+    return S_OK;
+}
+
+HRESULT Device::GetLight(DWORD index, D3D8Light* l)
+{
+    auto it = m_lights.find(index);
+    if (!l || it == m_lights.end()) return D8ERR_INVALIDCALL;
+    *l = it->second;
+    return S_OK;
+}
+
+HRESULT Device::LightEnable(DWORD index, BOOL enable)
+{
+    m_lightEnabled[index] = enable;
+    return S_OK;
+}
+
+HRESULT Device::GetLightEnable(DWORD index, BOOL* enable)
+{
+    if (!enable) return D8ERR_INVALIDCALL;
+    auto it = m_lightEnabled.find(index);
+    *enable = it != m_lightEnabled.end() ? it->second : FALSE;
+    return S_OK;
+}
+
+// ---- render / texture stage states ---------------------------------------------------------------
+
+HRESULT Device::SetRenderState(DWORD state, DWORD value)
+{
+    if (state >= RS_COUNT) return D8ERR_INVALIDCALL;
+    if (m_recordingStateBlock) return S_OK;
+    m_rs[state] = value;
+    switch (state) {
+    case RS_TEXTUREFACTOR: ColorToFloat4(value, m_psConst.textureFactor); m_psConstDirty = true; break;
+    case RS_ALPHAREF: m_psConst.alphaRef[0] = (float)(value & 0xFF); m_psConstDirty = true; break;
+    case RS_FOGCOLOR: ColorToFloat4(value, m_psConst.fogColor); m_psConstDirty = true; break;
+    case RS_FOGENABLE:
+        if (value) LogOnce("fog", "fog enabled (table mode %lu) - not implemented", m_rs[RS_FOGTABLEMODE]);
+        break;
+    case RS_STENCILENABLE:
+        if (value) LogOnce("stencil", "stencil enabled");
+        break;
+    default: break;
+    }
+    return S_OK;
+}
+
+HRESULT Device::GetRenderState(DWORD state, DWORD* value)
+{
+    if (state >= RS_COUNT || !value) return D8ERR_INVALIDCALL;
+    *value = m_rs[state];
+    return S_OK;
+}
+
+HRESULT Device::BeginStateBlock() { m_recordingStateBlock++; return S_OK; }
+
+HRESULT Device::EndStateBlock(DWORD* token)
+{
+    if (m_recordingStateBlock) m_recordingStateBlock--;
+    if (token) *token = 1;
+    return S_OK;
+}
+
+HRESULT Device::ApplyStateBlock(DWORD)
+{
+    LogOnce("applystateblock", "ApplyStateBlock is not implemented");
+    return S_OK;
+}
+
+HRESULT Device::CreateStateBlock(DWORD, DWORD* token)
+{
+    if (token) *token = 1;
+    return S_OK;
+}
+
+HRESULT Device::GetTexture(DWORD stage, ID8BaseTexture** out)
+{
+    if (stage >= kMaxStages || !out) return D8ERR_INVALIDCALL;
+    *out = m_textures[stage];
+    if (*out) (*out)->AddRef();
+    return S_OK;
+}
+
+HRESULT Device::SetTexture(DWORD stage, ID8BaseTexture* tex)
+{
+    if (stage >= kMaxStages) return D8ERR_INVALIDCALL;
+    if (m_recordingStateBlock) return S_OK;
+    SetRef(m_textures[stage], tex);
+    return S_OK;
+}
+
+HRESULT Device::GetTextureStageState(DWORD stage, DWORD type, DWORD* value)
+{
+    if (stage >= kMaxStages || type >= TSS_COUNT || !value) return D8ERR_INVALIDCALL;
+    *value = m_tss[stage][type];
+    return S_OK;
+}
+
+HRESULT Device::SetTextureStageState(DWORD stage, DWORD type, DWORD value)
+{
+    if (stage >= kMaxStages || type >= TSS_COUNT) return D8ERR_INVALIDCALL;
+    if (m_recordingStateBlock) return S_OK;
+    m_tss[stage][type] = value;
+    switch (type) {
+    case TSS_BUMPENVMAT00: m_psConst.bumpMat[stage][0] = AsFloat(value); m_psConstDirty = true; break;
+    case TSS_BUMPENVMAT01: m_psConst.bumpMat[stage][1] = AsFloat(value); m_psConstDirty = true; break;
+    case TSS_BUMPENVMAT10: m_psConst.bumpMat[stage][2] = AsFloat(value); m_psConstDirty = true; break;
+    case TSS_BUMPENVMAT11: m_psConst.bumpMat[stage][3] = AsFloat(value); m_psConstDirty = true; break;
+    case TSS_BUMPENVLSCALE: m_psConst.bumpLum[stage][0] = AsFloat(value); m_psConstDirty = true; break;
+    case TSS_BUMPENVLOFFSET: m_psConst.bumpLum[stage][1] = AsFloat(value); m_psConstDirty = true; break;
+    default: break;
+    }
+    return S_OK;
+}
+
+// ---- shaders -----------------------------------------------------------------------------------------
+
+HRESULT Device::CreateVertexShader(const DWORD* decl, const DWORD* func, DWORD* handle, DWORD)
+{
+    if (!decl || !handle) return D8ERR_INVALIDCALL;
+    VertexShader8* vs = new VertexShader8();
+    size_t n = ParseVSDecl(decl, vs->parsed);
+    vs->decl.assign(decl, decl + n);
+    if (func) vs->func.assign(func, func + ShaderTokenCount(func));
+    m_vertexShaders.push_back(vs);
+    *handle = (DWORD)((m_vertexShaders.size() - 1) << 1) | 1;
+    if (!BuildVertexShader(*vs, *handle)) vs->failed = true;
+    return S_OK;
+}
+
+bool Device::BuildVertexShader(VertexShader8& vs, DWORD handle)
+{
+    if (vs.func.empty()) { Log("vertex shader 0x%lx has no function (fixed-function T&L) - unsupported", handle); return false; }
+    std::string error;
+    std::string hlsl = TranslateVS(vs.func.data(), vs.parsed, error);
+    if (hlsl.empty()) { Log("vertex shader 0x%lx translation failed: %s", handle, error.c_str()); return false; }
+    char name[64];
+    sprintf_s(name, "vs_%04lx_%08x", handle, (unsigned)std::hash<std::string>()(hlsl));
+    ComPtr<ID3DBlob> blob = CompileHLSL(hlsl, "vs_4_0", name);
+    if (!blob) return false;
+    if (FAILED(m_device->CreateVertexShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &vs.vs))) return false;
+    std::vector<D3D11_INPUT_ELEMENT_DESC> elems;
+    for (const VSInput& in : vs.parsed.inputs)
+        elems.push_back({ "TEXCOORD", (UINT)in.reg, DeclFormat(in.type), (UINT)in.stream, in.offset,
+                          D3D11_INPUT_PER_VERTEX_DATA, 0 });
+    if (!elems.empty() &&
+        FAILED(m_device->CreateInputLayout(elems.data(), (UINT)elems.size(), blob->GetBufferPointer(), blob->GetBufferSize(), &vs.layout))) {
+        Log("vertex shader 0x%lx: CreateInputLayout failed", handle);
+        return false;
+    }
+    Log("vertex shader 0x%lx ready (%zu inputs)", handle, vs.parsed.inputs.size());
+    return true;
+}
+
+HRESULT Device::SetVertexShader(DWORD handle)
+{
+    if (m_recordingStateBlock) return S_OK;
+    m_vsHandle = handle;
+    if (handle & 1) {
+        size_t idx = handle >> 1;
+        if (idx < m_vertexShaders.size() && m_vertexShaders[idx]) {
+            // D3D8 loads the constants embedded in the declaration when the shader is set.
+            for (auto& c : m_vertexShaders[idx]->parsed.constants) {
+                UINT count = (UINT)c.second.size() / 4;
+                if (c.first + count <= kMaxVSConst) memcpy(m_vsConst[c.first], c.second.data(), count * 16);
+                m_vsConstDirty = true;
+            }
+        }
+    }
+    return S_OK;
+}
+
+HRESULT Device::DeleteVertexShader(DWORD handle)
+{
+    size_t idx = handle >> 1;
+    if (!(handle & 1) || idx >= m_vertexShaders.size() || !m_vertexShaders[idx]) return D8ERR_INVALIDCALL;
+    delete m_vertexShaders[idx];
+    m_vertexShaders[idx] = nullptr;
+    return S_OK;
+}
+
+HRESULT Device::SetVertexShaderConstant(DWORD reg, const void* data, DWORD count)
+{
+    if (!data || reg + count > kMaxVSConst) return D8ERR_INVALIDCALL;
+    memcpy(m_vsConst[reg], data, count * 16);
+    m_vsConstDirty = true;
+    return S_OK;
+}
+
+HRESULT Device::GetVertexShaderConstant(DWORD reg, void* data, DWORD count)
+{
+    if (!data || reg + count > kMaxVSConst) return D8ERR_INVALIDCALL;
+    memcpy(data, m_vsConst[reg], count * 16);
+    return S_OK;
+}
+
+HRESULT Device::GetVertexShaderDeclaration(DWORD handle, void* data, DWORD* size)
+{
+    size_t idx = handle >> 1;
+    if (!size || !(handle & 1) || idx >= m_vertexShaders.size() || !m_vertexShaders[idx]) return D8ERR_INVALIDCALL;
+    const auto& d = m_vertexShaders[idx]->decl;
+    DWORD bytes = (DWORD)(d.size() * 4);
+    if (data) { if (*size < bytes) return D8ERR_INVALIDCALL; memcpy(data, d.data(), bytes); }
+    *size = bytes;
+    return S_OK;
+}
+
+HRESULT Device::GetVertexShaderFunction(DWORD handle, void* data, DWORD* size)
+{
+    size_t idx = handle >> 1;
+    if (!size || !(handle & 1) || idx >= m_vertexShaders.size() || !m_vertexShaders[idx]) return D8ERR_INVALIDCALL;
+    const auto& f = m_vertexShaders[idx]->func;
+    DWORD bytes = (DWORD)(f.size() * 4);
+    if (data) { if (*size < bytes) return D8ERR_INVALIDCALL; memcpy(data, f.data(), bytes); }
+    *size = bytes;
+    return S_OK;
+}
+
+HRESULT Device::CreatePixelShader(const DWORD* func, DWORD* handle)
+{
+    if (!func || !handle) return D8ERR_INVALIDCALL;
+    PixelShader8* ps = new PixelShader8();
+    ps->func.assign(func, func + ShaderTokenCount(func));
+    m_pixelShaders.push_back(ps);
+    *handle = (DWORD)m_pixelShaders.size();
+    return S_OK;
+}
+
+HRESULT Device::SetPixelShader(DWORD handle)
+{
+    if (m_recordingStateBlock) return S_OK;
+    m_psHandle = handle;
+    return S_OK;
+}
+
+HRESULT Device::DeletePixelShader(DWORD handle)
+{
+    if (handle == 0 || handle > m_pixelShaders.size() || !m_pixelShaders[handle - 1]) return D8ERR_INVALIDCALL;
+    delete m_pixelShaders[handle - 1];
+    m_pixelShaders[handle - 1] = nullptr;
+    return S_OK;
+}
+
+HRESULT Device::SetPixelShaderConstant(DWORD reg, const void* data, DWORD count)
+{
+    if (!data || reg + count > kMaxPSConst) return D8ERR_INVALIDCALL;
+    memcpy(m_psConst.c[reg], data, count * 16);
+    m_psConstDirty = true;
+    return S_OK;
+}
+
+HRESULT Device::GetPixelShaderConstant(DWORD reg, void* data, DWORD count)
+{
+    if (!data || reg + count > kMaxPSConst) return D8ERR_INVALIDCALL;
+    memcpy(data, m_psConst.c[reg], count * 16);
+    return S_OK;
+}
+
+HRESULT Device::GetPixelShaderFunction(DWORD handle, void* data, DWORD* size)
+{
+    if (!size || handle == 0 || handle > m_pixelShaders.size() || !m_pixelShaders[handle - 1]) return D8ERR_INVALIDCALL;
+    const auto& f = m_pixelShaders[handle - 1]->func;
+    DWORD bytes = (DWORD)(f.size() * 4);
+    if (data) { if (*size < bytes) return D8ERR_INVALIDCALL; memcpy(data, f.data(), bytes); }
+    *size = bytes;
+    return S_OK;
+}
+
+// ---- streams ----------------------------------------------------------------------------------------
+
+HRESULT Device::SetStreamSource(UINT stream, ID8VertexBuffer* vb, UINT stride)
+{
+    if (stream >= kMaxStreams) return D8ERR_INVALIDCALL;
+    if (m_recordingStateBlock) return S_OK;
+    SetRef(m_streams[stream].vb, static_cast<VertexBuffer*>(vb));
+    m_streams[stream].stride = stride;
+    return S_OK;
+}
+
+HRESULT Device::GetStreamSource(UINT stream, ID8VertexBuffer** vb, UINT* stride)
+{
+    if (stream >= kMaxStreams || !vb || !stride) return D8ERR_INVALIDCALL;
+    *vb = m_streams[stream].vb;
+    if (*vb) (*vb)->AddRef();
+    *stride = m_streams[stream].stride;
+    return S_OK;
+}
+
+HRESULT Device::SetIndices(ID8IndexBuffer* ib, UINT baseVertex)
+{
+    if (m_recordingStateBlock) return S_OK;
+    SetRef(m_indices, static_cast<IndexBuffer*>(ib));
+    m_baseVertex = baseVertex;
+    return S_OK;
+}
+
+HRESULT Device::GetIndices(ID8IndexBuffer** ib, UINT* baseVertex)
+{
+    if (!ib || !baseVertex) return D8ERR_INVALIDCALL;
+    *ib = m_indices;
+    if (*ib) (*ib)->AddRef();
+    *baseVertex = m_baseVertex;
+    return S_OK;
+}
+
+// ---- pipeline state ---------------------------------------------------------------------------------
+
+ID3D11BlendState* Device::GetBlendState()
+{
+    const bool enable = m_rs[RS_ALPHABLENDENABLE] != 0;
+    DWORD src = m_rs[RS_SRCBLEND], dst = m_rs[RS_DESTBLEND];
+    if (src == 12) { src = 5; dst = 6; }       // BOTHSRCALPHA
+    else if (src == 13) { src = 6; dst = 5; }  // BOTHINVSRCALPHA
+    const uint64_t key = (enable ? 1ull : 0ull) | ((uint64_t)src << 1) | ((uint64_t)dst << 9) |
+                         ((uint64_t)(m_rs[RS_BLENDOP] & 7) << 17) | ((uint64_t)(m_rs[RS_COLORWRITEENABLE] & 0xF) << 20);
+    auto it = m_blendStates.find(key);
+    if (it != m_blendStates.end()) return it->second.Get();
+    D3D11_BLEND_DESC bd = {};
+    D3D11_RENDER_TARGET_BLEND_DESC& r = bd.RenderTarget[0];
+    r.BlendEnable = enable;
+    r.SrcBlend = MapBlend(src, false);
+    r.DestBlend = MapBlend(dst, false);
+    r.BlendOp = (m_rs[RS_BLENDOP] >= 1 && m_rs[RS_BLENDOP] <= 5) ? (D3D11_BLEND_OP)m_rs[RS_BLENDOP] : D3D11_BLEND_OP_ADD;
+    r.SrcBlendAlpha = MapBlend(src, true);
+    r.DestBlendAlpha = MapBlend(dst, true);
+    r.BlendOpAlpha = r.BlendOp;
+    r.RenderTargetWriteMask = (UINT8)(m_rs[RS_COLORWRITEENABLE] & 0xF);
+    ComPtr<ID3D11BlendState> st;
+    m_device->CreateBlendState(&bd, &st);
+    m_blendStates[key] = st;
+    return st.Get();
+}
+
+ID3D11DepthStencilState* Device::GetDepthState()
+{
+    const bool z = m_rs[RS_ZENABLE] != 0;
+    const bool stencil = m_rs[RS_STENCILENABLE] != 0;
+    uint64_t key = (z ? 1ull : 0ull) | ((m_rs[RS_ZWRITEENABLE] ? 1ull : 0ull) << 1) | ((uint64_t)(m_rs[RS_ZFUNC] & 15) << 2);
+    if (stencil)
+        key |= (1ull << 6) | ((uint64_t)(m_rs[RS_STENCILFUNC] & 15) << 7) | ((uint64_t)(m_rs[RS_STENCILFAIL] & 15) << 11) |
+               ((uint64_t)(m_rs[RS_STENCILZFAIL] & 15) << 15) | ((uint64_t)(m_rs[RS_STENCILPASS] & 15) << 19) |
+               ((uint64_t)(m_rs[RS_STENCILMASK] & 0xFF) << 23) | ((uint64_t)(m_rs[RS_STENCILWRITEMASK] & 0xFF) << 31);
+    auto it = m_depthStates.find(key);
+    if (it != m_depthStates.end()) return it->second.Get();
+    D3D11_DEPTH_STENCIL_DESC dd = {};
+    dd.DepthEnable = z;
+    dd.DepthWriteMask = m_rs[RS_ZWRITEENABLE] ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
+    dd.DepthFunc = MapCmp(m_rs[RS_ZFUNC]);
+    if (stencil) {
+        dd.StencilEnable = TRUE;
+        dd.StencilReadMask = (UINT8)m_rs[RS_STENCILMASK];
+        dd.StencilWriteMask = (UINT8)m_rs[RS_STENCILWRITEMASK];
+        D3D11_DEPTH_STENCILOP_DESC op = { (D3D11_STENCIL_OP)m_rs[RS_STENCILFAIL], (D3D11_STENCIL_OP)m_rs[RS_STENCILZFAIL],
+                                          (D3D11_STENCIL_OP)m_rs[RS_STENCILPASS], MapCmp(m_rs[RS_STENCILFUNC]) };
+        dd.FrontFace = dd.BackFace = op;
+    }
+    ComPtr<ID3D11DepthStencilState> st;
+    m_device->CreateDepthStencilState(&dd, &st);
+    m_depthStates[key] = st;
+    return st.Get();
+}
+
+ID3D11RasterizerState* Device::GetRasterState()
+{
+    const uint64_t key = (m_rs[RS_CULLMODE] & 3) | ((uint64_t)(m_rs[RS_FILLMODE] & 3) << 2) | ((uint64_t)(m_rs[RS_ZBIAS] & 0xFF) << 4);
+    auto it = m_rasterStates.find(key);
+    if (it != m_rasterStates.end()) return it->second.Get();
+    D3D11_RASTERIZER_DESC rd = {};
+    rd.FillMode = m_rs[RS_FILLMODE] == 2 ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
+    rd.CullMode = m_rs[RS_CULLMODE] == 2 ? D3D11_CULL_FRONT : (m_rs[RS_CULLMODE] == 3 ? D3D11_CULL_BACK : D3D11_CULL_NONE);
+    rd.DepthBias = -(INT)(m_rs[RS_ZBIAS] * 32);
+    rd.SlopeScaledDepthBias = -(float)m_rs[RS_ZBIAS] * 0.25f;
+    rd.DepthClipEnable = TRUE;
+    ComPtr<ID3D11RasterizerState> st;
+    m_device->CreateRasterizerState(&rd, &st);
+    m_rasterStates[key] = st;
+    return st.Get();
+}
+
+ID3D11SamplerState* Device::GetSampler(int stage)
+{
+    const DWORD* t = m_tss[stage];
+    DWORD mag = t[TSS_MAGFILTER], min = t[TSS_MINFILTER], mip = t[TSS_MIPFILTER];
+    DWORD aniso = t[TSS_MAXANISOTROPY];
+    if (g_config.forceAnisotropy > 1 && min >= 2 && mip >= 1) { min = 3; aniso = (DWORD)g_config.forceAnisotropy; }
+    DWORD key[10] = { t[TSS_ADDRESSU], t[TSS_ADDRESSV], t[TSS_ADDRESSW], mag, min, mip, t[TSS_MIPMAPLODBIAS],
+                      t[TSS_MAXMIPLEVEL], aniso, t[TSS_BORDERCOLOR] };
+    std::string k((const char*)key, sizeof(key));
+    auto it = m_samplers.find(k);
+    if (it != m_samplers.end()) return it->second.Get();
+    D3D11_SAMPLER_DESC sd = {};
+    if (mag == 3 || min == 3) {
+        sd.Filter = D3D11_FILTER_ANISOTROPIC;
+        sd.MaxAnisotropy = aniso < 1 ? 1 : (aniso > 16 ? 16 : aniso);
+    } else {
+        bool minL = min == 2, magL = mag == 2, mipL = mip == 2;
+        sd.Filter = (D3D11_FILTER)((minL ? 0x10 : 0) | (magL ? 0x4 : 0) | (mipL ? 0x1 : 0));
+        sd.MaxAnisotropy = 1;
+    }
+    sd.AddressU = MapAddress(t[TSS_ADDRESSU]);
+    sd.AddressV = MapAddress(t[TSS_ADDRESSV]);
+    sd.AddressW = MapAddress(t[TSS_ADDRESSW]);
+    sd.MipLODBias = AsFloat(t[TSS_MIPMAPLODBIAS]);
+    sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    ColorToFloat4(t[TSS_BORDERCOLOR], sd.BorderColor);
+    sd.MinLOD = (float)t[TSS_MAXMIPLEVEL];
+    sd.MaxLOD = mip == 0 ? sd.MinLOD : D3D11_FLOAT32_MAX;
+    ComPtr<ID3D11SamplerState> st;
+    m_device->CreateSamplerState(&sd, &st);
+    m_samplers[k] = st;
+    return st.Get();
+}
+
+static BYTE TextureDim(ID8BaseTexture* t)
+{
+    if (!t) return 0;
+    DWORD type = t->GetType();
+    return type == D8RTYPE_VOLUMETEXTURE ? 3 : (type == D8RTYPE_TEXTURE ? 2 : 0);
+}
+
+ID3D11PixelShader* Device::GetPixelShader()
+{
+    const BYTE alphaFunc = m_rs[RS_ALPHATESTENABLE] ? (BYTE)m_rs[RS_ALPHAFUNC] : 0;
+    if (m_psHandle) {
+        if (m_psHandle > m_pixelShaders.size() || !m_pixelShaders[m_psHandle - 1]) {
+            LogOnce(std::string("ps-invalid-") + std::to_string(m_psHandle), "draw rejected: invalid pixel shader handle 0x%lx", m_psHandle);
+            return nullptr;
+        }
+        PixelShader8* ps = m_pixelShaders[m_psHandle - 1];
+        PSVariant v;
+        for (int s = 0; s < kMaxStages; s++) v.texDim[s] = TextureDim(m_textures[s]);
+        v.alphaFunc = alphaFunc;
+        v.shadowOnly = m_sun.flags[1] > 0.5f ? 1 : 0;
+        for (auto& e : ps->variants) if (e.first == v) return e.second.Get();
+        std::string error;
+        std::string hlsl = TranslatePS(ps->func.data(), v, error);
+        ComPtr<ID3D11PixelShader> shader;
+        if (hlsl.empty()) {
+            Log("pixel shader %lu translation failed: %s", m_psHandle, error.c_str());
+        } else {
+            char name[64];
+            sprintf_s(name, "ps_%04lx_%08x", m_psHandle, (unsigned)std::hash<std::string>()(hlsl));
+            ComPtr<ID3DBlob> blob = CompileHLSL(hlsl, "ps_4_0", name);
+            if (blob) {
+                HRESULT hr = m_device->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &shader);
+                if (FAILED(hr)) Log("pixel shader %lu CreatePixelShader failed 0x%08lx", m_psHandle, hr);
+            }
+        }
+        ps->variants.push_back({ v, shader });
+        return shader.Get();
+    }
+    FFKey k = {};
+    for (int s = 0; s < kMaxStages; s++) {
+        const DWORD* t = m_tss[s];
+        FFStageKey& g = k.stages[s];
+        g.colorOp = (BYTE)t[TSS_COLOROP];
+        if (g.colorOp <= 1) break;
+        g.colorArg1 = (BYTE)t[TSS_COLORARG1]; g.colorArg2 = (BYTE)t[TSS_COLORARG2]; g.colorArg0 = (BYTE)t[TSS_COLORARG0];
+        g.alphaOp = (BYTE)t[TSS_ALPHAOP];
+        g.alphaArg1 = (BYTE)t[TSS_ALPHAARG1]; g.alphaArg2 = (BYTE)t[TSS_ALPHAARG2]; g.alphaArg0 = (BYTE)t[TSS_ALPHAARG0];
+        g.texCoordIndex = (BYTE)(t[TSS_TEXCOORDINDEX] & 7);
+        g.texDim = TextureDim(m_textures[s]);
+        g.projected = (t[TSS_TEXTURETRANSFORMFLAGS] & 256) ? 1 : 0;
+    }
+    k.alphaFunc = alphaFunc;
+    k.specular = m_rs[RS_SPECULARENABLE] ? 1 : 0;
+    k.shadowOnly = m_sun.flags[1] > 0.5f ? 1 : 0;
+    std::string key((const char*)&k, sizeof(k));
+    auto it = m_ffShaders.find(key);
+    if (it != m_ffShaders.end()) return it->second.Get();
+    std::string hlsl = GenerateFFPS(k);
+    char name[64];
+    sprintf_s(name, "ff_%08x", (unsigned)std::hash<std::string>()(hlsl));
+    ComPtr<ID3DBlob> blob = CompileHLSL(hlsl, "ps_4_0", name);
+    ComPtr<ID3D11PixelShader> shader;
+    if (blob) m_device->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &shader);
+    m_ffShaders[key] = shader;
+    return shader.Get();
+}
+
+bool Device::PrepareDraw()
+{
+    ApplyRenderTargets();
+    if (!m_rt) return false;
+
+    if (m_viewportDirty) {
+        D3D11_VIEWPORT vp = { (float)m_viewport.X, (float)m_viewport.Y, (float)m_viewport.Width,
+                              (float)m_viewport.Height, m_viewport.MinZ, m_viewport.MaxZ };
+        m_ctx->RSSetViewports(1, &vp);
+        VSExtraConstants vx = {};
+        vx.pixelOffset[0] = m_viewport.Width ? -1.0f / m_viewport.Width : 0.0f;
+        vx.pixelOffset[1] = m_viewport.Height ? 1.0f / m_viewport.Height : 0.0f;
+        D3D11_MAPPED_SUBRESOURCE map;
+        if (SUCCEEDED(m_ctx->Map(m_vsExtraCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+            memcpy(map.pData, &vx, sizeof(vx));
+            m_ctx->Unmap(m_vsExtraCB.Get(), 0);
+        }
+        m_viewportDirty = false;
+    }
+
+    // Vertex shader + input layout + streams
+    if (!(m_vsHandle & 1)) {
+        LogOnce(std::string("fvf") + std::to_string(m_vsHandle), "draw with FVF 0x%lx (fixed-function T&L) skipped", m_vsHandle);
+        return false;
+    }
+    size_t idx = m_vsHandle >> 1;
+    if (idx >= m_vertexShaders.size() || !m_vertexShaders[idx] || m_vertexShaders[idx]->failed) {
+        LogOnce(std::string("vs-invalid-") + std::to_string(m_vsHandle), "draw rejected: invalid vertex shader handle 0x%lx", m_vsHandle);
+        return false;
+    }
+    VertexShader8* vs = m_vertexShaders[idx];
+    m_worldKind = WorldShaderKind(vs->parsed);
+    m_worldDraw = g_config.sunLighting && m_worldKind != 0 && m_psHandle != 0 &&
+        m_rt == m_backBuffer && m_ds && m_rs[RS_ZENABLE] &&
+        (m_worldKind == 2 || !m_rs[RS_ALPHABLENDENABLE] || m_rs[RS_ALPHATESTENABLE]) &&
+        m_viewport.Width == m_backBuffer->m_width && m_viewport.Height == m_backBuffer->m_height;
+    m_worldCaster = m_worldDraw && m_rs[RS_ZWRITEENABLE];
+    if (g_config.sunLighting && m_rt == m_backBuffer && m_worldKind != 0) {
+        LogOnce(std::string("sun-material-") + std::to_string(m_vsHandle) + "-" + std::to_string(m_psHandle),
+            "Sun material VS %lx PS %lx kind %d receiver %d caster %d z %lu write %lu blend %lu alpha %lu",
+            m_vsHandle,m_psHandle,m_worldKind,m_worldDraw,m_worldCaster,m_rs[RS_ZENABLE],
+            m_rs[RS_ZWRITEENABLE],m_rs[RS_ALPHABLENDENABLE],m_rs[RS_ALPHATESTENABLE]);
+    }
+    UpdateSun(false);
+    std::string drawKey = std::string("draw-path-") + std::to_string(m_vsHandle) + "-" + std::to_string(m_psHandle);
+    LogOnce(drawKey, "draw path: VS 0x%lx PS 0x%lx streams s0=%p/%u s1=%p/%u tex0=%u tex1=%u tex2=%u viewport=%ux%u",
+            m_vsHandle, m_psHandle, (void*)m_streams[0].vb, m_streams[0].stride,
+            (void*)m_streams[1].vb, m_streams[1].stride, TextureDim(m_textures[0]),
+            TextureDim(m_textures[1]), TextureDim(m_textures[2]), m_viewport.Width, m_viewport.Height);
+    if (m_lastVS != vs->vs.Get()) { m_ctx->VSSetShader(vs->vs.Get(), nullptr, 0); m_lastVS = vs->vs.Get(); }
+    if (m_lastLayout != vs->layout.Get()) { m_ctx->IASetInputLayout(vs->layout.Get()); m_lastLayout = vs->layout.Get(); }
+    for (int s = 0; s < kMaxStreams; s++) {
+        if (!(vs->parsed.streamMask & (1u << s))) continue;
+        ID3D11Buffer* buf = m_streams[s].vb ? m_streams[s].vb->m_impl.m_buf.Get() : nullptr;
+        UINT stride = m_streams[s].stride, offset = 0;
+        if (m_lastVB[s] != buf || m_lastStride[s] != stride) {
+            m_ctx->IASetVertexBuffers(s, 1, &buf, &stride, &offset);
+            m_lastVB[s] = buf;
+            m_lastStride[s] = stride;
+        }
+    }
+
+    // Constants
+    if (m_vsConstDirty) {
+        D3D11_MAPPED_SUBRESOURCE map;
+        if (SUCCEEDED(m_ctx->Map(m_vsCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+            memcpy(map.pData, m_vsConst, sizeof(m_vsConst));
+            m_ctx->Unmap(m_vsCB.Get(), 0);
+        }
+        m_vsConstDirty = false;
+    }
+    if (m_psConstDirty) {
+        D3D11_MAPPED_SUBRESOURCE map;
+        if (SUCCEEDED(m_ctx->Map(m_psCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+            memcpy(map.pData, &m_psConst, sizeof(m_psConst));
+            m_ctx->Unmap(m_psCB.Get(), 0);
+        }
+        m_psConstDirty = false;
+    }
+    ID3D11Buffer* vcbs[2] = { m_vsCB.Get(), m_vsExtraCB.Get() };
+    m_ctx->VSSetConstantBuffers(0, 2, vcbs);
+    m_ctx->PSSetConstantBuffers(0, 1, m_psCB.GetAddressOf());
+
+    // Textures and samplers
+    ID3D11ShaderResourceView* srvs[kMaxStages] = {};
+    ID3D11SamplerState* samplers[kMaxStages] = {};
+    for (int s = 0; s < kMaxStages; s++) {
+        ID8BaseTexture* t = m_textures[s];
+        if (!t) continue;
+        if (t->GetType() == D8RTYPE_TEXTURE) {
+            Texture* tex = static_cast<Texture*>(static_cast<ID8Texture*>(t));
+            if (m_rt && m_rt->m_container == tex) continue; // sampling the current render target
+            srvs[s] = tex->Srv();
+        } else if (t->GetType() == D8RTYPE_VOLUMETEXTURE) {
+            srvs[s] = static_cast<VolumeTexture*>(static_cast<ID8VolumeTexture*>(t))->Srv();
+        }
+        samplers[s] = GetSampler(s);
+    }
+    m_ctx->PSSetShaderResources(0, kMaxStages, srvs);
+    m_ctx->PSSetSamplers(0, kMaxStages, samplers);
+
+    ID3D11PixelShader* ps = GetPixelShader();
+    if (!ps) {
+        LogOnce(std::string("ps-null-") + std::to_string(m_psHandle) + "-vs-" + std::to_string(m_vsHandle),
+                "draw rejected: no pixel shader for VS 0x%lx PS 0x%lx", m_vsHandle, m_psHandle);
+        return false;
+    }
+    if (m_lastPS != ps) { m_ctx->PSSetShader(ps, nullptr, 0); m_lastPS = ps; }
+
+    ID3D11BlendState* blend = GetBlendState();
+    if (m_lastBlend != blend) { m_ctx->OMSetBlendState(blend, nullptr, 0xFFFFFFFF); m_lastBlend = blend; }
+    ID3D11DepthStencilState* depth = GetDepthState();
+    if (m_lastDepth != depth || m_lastStencilRef != m_rs[RS_STENCILREF]) {
+        m_ctx->OMSetDepthStencilState(depth, m_rs[RS_STENCILREF]);
+        m_lastDepth = depth;
+        m_lastStencilRef = m_rs[RS_STENCILREF];
+    }
+    ID3D11RasterizerState* raster = GetRasterState();
+    if (m_lastRaster != raster) { m_ctx->RSSetState(raster); m_lastRaster = raster; }
+    return true;
+}
+
+// ---- draws ---------------------------------------------------------------------------------------------
+
+bool Device::DrawWithTopology(DWORD type, UINT primCount, UINT& count, D3D11_PRIMITIVE_TOPOLOGY& topo)
+{
+    switch (type) {
+    case D8PT_POINTLIST: topo = D3D11_PRIMITIVE_TOPOLOGY_POINTLIST; count = primCount; break;
+    case D8PT_LINELIST: topo = D3D11_PRIMITIVE_TOPOLOGY_LINELIST; count = primCount * 2; break;
+    case D8PT_LINESTRIP: topo = D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP; count = primCount + 1; break;
+    case D8PT_TRIANGLELIST: topo = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST; count = primCount * 3; break;
+    case D8PT_TRIANGLESTRIP: topo = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; count = primCount + 2; break;
+    case D8PT_TRIANGLEFAN: topo = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST; count = primCount * 3; break;
+    default: return false;
+    }
+    return true;
+}
+
+void Device::UploadDynamicIndices(const void* data, UINT bytes, DXGI_FORMAT fmt)
+{
+    if (bytes > m_dynIBSize) {
+        m_dynIB.Reset();
+        m_dynIBSize = max(bytes, 65536u);
+        D3D11_BUFFER_DESC bd = { m_dynIBSize, D3D11_USAGE_DYNAMIC, D3D11_BIND_INDEX_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0 };
+        m_device->CreateBuffer(&bd, nullptr, &m_dynIB);
+    }
+    D3D11_MAPPED_SUBRESOURCE map;
+    if (SUCCEEDED(m_ctx->Map(m_dynIB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        memcpy(map.pData, data, bytes);
+        m_ctx->Unmap(m_dynIB.Get(), 0);
+    }
+    m_ctx->IASetIndexBuffer(m_dynIB.Get(), fmt, 0);
+    m_lastIB = m_dynIB.Get();
+}
+
+void Device::UploadDynamicVertices(const void* data, UINT bytes, UINT stride)
+{
+    if (bytes > m_dynVBSize) {
+        m_dynVB.Reset();
+        m_dynVBSize = max(bytes, 262144u);
+        D3D11_BUFFER_DESC bd = { m_dynVBSize, D3D11_USAGE_DYNAMIC, D3D11_BIND_VERTEX_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0 };
+        m_device->CreateBuffer(&bd, nullptr, &m_dynVB);
+    }
+    D3D11_MAPPED_SUBRESOURCE map;
+    if (SUCCEEDED(m_ctx->Map(m_dynVB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        memcpy(map.pData, data, bytes);
+        m_ctx->Unmap(m_dynVB.Get(), 0);
+    }
+    UINT offset = 0;
+    ID3D11Buffer* buf = m_dynVB.Get();
+    m_ctx->IASetVertexBuffers(0, 1, &buf, &stride, &offset);
+    m_lastVB[0] = buf;
+    m_lastStride[0] = stride;
+}
+
+// Builds triangle-list indices for a fan: (first, i + 1, i + 2).
+static std::vector<UINT> FanToList(const std::vector<UINT>& fan)
+{
+    std::vector<UINT> out;
+    for (size_t i = 1; i + 1 < fan.size(); i++) { out.push_back(fan[0]); out.push_back(fan[i]); out.push_back(fan[i + 1]); }
+    return out;
+}
+
+HRESULT Device::DrawPrimitive(DWORD type, UINT start, UINT primCount)
+{
+    if (!primCount || !PrepareDraw()) return S_OK;
+    UINT count;
+    D3D11_PRIMITIVE_TOPOLOGY topo;
+    if (!DrawWithTopology(type, primCount, count, topo)) return D8ERR_INVALIDCALL;
+    m_ctx->IASetPrimitiveTopology(topo);
+    if (type == D8PT_TRIANGLEFAN) {
+        std::vector<WORD> idx;
+        idx.reserve(count);
+        for (UINT i = 0; i < primCount; i++) { idx.push_back(0); idx.push_back((WORD)(i + 1)); idx.push_back((WORD)(i + 2)); }
+        UploadDynamicIndices(idx.data(), (UINT)idx.size() * 2, DXGI_FORMAT_R16_UINT);
+        m_ctx->DrawIndexed(count, 0, (INT)start);
+        DrawSunShadow(true, count, 0, (INT)start);
+        return S_OK;
+    }
+    m_ctx->Draw(count, start);
+    DrawSunShadow(false, count, start, 0);
+    return S_OK;
+}
+
+HRESULT Device::DrawIndexedPrimitive(DWORD type, UINT, UINT, UINT startIndex, UINT primCount)
+{
+    if (!primCount || !m_indices || !PrepareDraw()) return S_OK;
+    UINT count;
+    D3D11_PRIMITIVE_TOPOLOGY topo;
+    if (!DrawWithTopology(type, primCount, count, topo)) return D8ERR_INVALIDCALL;
+    m_ctx->IASetPrimitiveTopology(topo);
+    const DXGI_FORMAT fmt = m_indices->m_format == D8FMT_INDEX32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
+    if (type == D8PT_TRIANGLEFAN) {
+        const UINT isz = fmt == DXGI_FORMAT_R32_UINT ? 4 : 2;
+        std::vector<UINT> fan(primCount + 2);
+        const BYTE* src = m_indices->m_impl.m_shadow.data() + (size_t)startIndex * isz;
+        for (UINT i = 0; i < primCount + 2; i++) fan[i] = isz == 4 ? ((const UINT*)src)[i] : ((const WORD*)src)[i];
+        std::vector<UINT> list = FanToList(fan);
+        UploadDynamicIndices(list.data(), (UINT)list.size() * 4, DXGI_FORMAT_R32_UINT);
+        m_ctx->DrawIndexed(count, 0, (INT)m_baseVertex);
+        DrawSunShadow(true, count, 0, (INT)m_baseVertex);
+        return S_OK;
+    }
+    ID3D11Buffer* ib = m_indices->m_impl.m_buf.Get();
+    if (m_lastIB != ib || m_lastIBFormat != fmt) {
+        m_ctx->IASetIndexBuffer(ib, fmt, 0);
+        m_lastIB = ib;
+        m_lastIBFormat = fmt;
+    }
+    m_ctx->DrawIndexed(count, startIndex, (INT)m_baseVertex);
+    DrawSunShadow(true, count, startIndex, (INT)m_baseVertex);
+    return S_OK;
+}
+
+HRESULT Device::DrawPrimitiveUP(DWORD type, UINT primCount, const void* data, UINT stride)
+{
+    if (!data || !primCount) return D8ERR_INVALIDCALL;
+    UINT count;
+    D3D11_PRIMITIVE_TOPOLOGY topo;
+    if (!DrawWithTopology(type, primCount, count, topo)) return D8ERR_INVALIDCALL;
+    UINT vertices = type == D8PT_TRIANGLEFAN ? primCount + 2 : count;
+    // D3D8 resets stream 0 after an UP draw.
+    SetRef(m_streams[0].vb, (VertexBuffer*)nullptr);
+    m_streams[0].stride = stride;
+    if (!PrepareDraw()) return S_OK;
+    UploadDynamicVertices(data, vertices * stride, stride);
+    m_ctx->IASetPrimitiveTopology(topo);
+    if (type == D8PT_TRIANGLEFAN) {
+        std::vector<WORD> idx;
+        for (UINT i = 0; i < primCount; i++) { idx.push_back(0); idx.push_back((WORD)(i + 1)); idx.push_back((WORD)(i + 2)); }
+        UploadDynamicIndices(idx.data(), (UINT)idx.size() * 2, DXGI_FORMAT_R16_UINT);
+        m_ctx->DrawIndexed(count, 0, 0);
+    } else {
+        m_ctx->Draw(count, 0);
+    }
+    m_lastVB[0] = nullptr;
+    return S_OK;
+}
+
+HRESULT Device::DrawIndexedPrimitiveUP(DWORD type, UINT minIndex, UINT numVertices, UINT primCount,
+                                       const void* indices, DWORD indexFmt, const void* data, UINT stride)
+{
+    if (!data || !indices || !primCount) return D8ERR_INVALIDCALL;
+    UINT count;
+    D3D11_PRIMITIVE_TOPOLOGY topo;
+    if (!DrawWithTopology(type, primCount, count, topo)) return D8ERR_INVALIDCALL;
+    SetRef(m_streams[0].vb, (VertexBuffer*)nullptr);
+    SetRef(m_indices, (IndexBuffer*)nullptr);
+    m_streams[0].stride = stride;
+    if (!PrepareDraw()) return S_OK;
+    UploadDynamicVertices(data, (minIndex + numVertices) * stride, stride);
+    m_ctx->IASetPrimitiveTopology(topo);
+    const UINT isz = indexFmt == D8FMT_INDEX32 ? 4 : 2;
+    const UINT idxCount = type == D8PT_TRIANGLEFAN ? primCount + 2 : count;
+    if (type == D8PT_TRIANGLEFAN) {
+        std::vector<UINT> fan(idxCount);
+        for (UINT i = 0; i < idxCount; i++) fan[i] = isz == 4 ? ((const UINT*)indices)[i] : ((const WORD*)indices)[i];
+        std::vector<UINT> list = FanToList(fan);
+        UploadDynamicIndices(list.data(), (UINT)list.size() * 4, DXGI_FORMAT_R32_UINT);
+    } else {
+        UploadDynamicIndices(indices, idxCount * isz, isz == 4 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT);
+    }
+    m_ctx->DrawIndexed(count, 0, 0);
+    m_lastVB[0] = nullptr;
+    m_lastIB = nullptr;
+    return S_OK;
+}
+
+// ---- presentation ----------------------------------------------------------------------------------
+
+void Device::UpdateSwapChainSize()
+{
+    RECT rc = {};
+    GetClientRect(m_window, &rc);
+    UINT w = rc.right - rc.left, h = rc.bottom - rc.top;
+    if (!w || !h || (w == m_swapW && h == m_swapH)) return;
+    m_swapRTV.Reset();
+    m_ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    HRESULT hr = m_swap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
+    if (SUCCEEDED(hr)) { m_swapW = w; m_swapH = h; Log("swap chain resized to %ux%u", w, h); }
+    m_rtDirty = true;
+}
+
+void Device::LimitFrameRate()
+{
+    if (g_config.fpsLimit <= 0) return;
+    const LONGLONG frameTicks = m_qpcFreq.QuadPart / g_config.fpsLimit;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    LONGLONG target = m_lastFrame.QuadPart + frameTicks;
+    while (now.QuadPart < target) {
+        LONGLONG remainingMs = (target - now.QuadPart) * 1000 / m_qpcFreq.QuadPart;
+        if (remainingMs > 2) Sleep((DWORD)(remainingMs - 2)); else YieldProcessor();
+        QueryPerformanceCounter(&now);
+    }
+    m_lastFrame.QuadPart = (now.QuadPart - target < frameTicks) ? target : now.QuadPart;
+}
+
+HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
+{
+    if (g_config.debugLayer) {
+        ComPtr<ID3D11InfoQueue> queue;
+        if (SUCCEEDED(m_device.As(&queue))) {
+            const UINT64 count = queue->GetNumStoredMessagesAllowedByRetrievalFilter();
+            for (UINT64 i = 0; i < count; ++i) {
+                SIZE_T size = 0;
+                queue->GetMessage(i, nullptr, &size);
+                std::vector<BYTE> storage(size);
+                auto* message = reinterpret_cast<D3D11_MESSAGE*>(storage.data());
+                if (SUCCEEDED(queue->GetMessage(i, message, &size))) {
+                    LogOnce(std::string("d3d11-") + message->pDescription,
+                            "D3D11 diagnostic %u severity %u: %s", message->ID,
+                            message->Severity, message->pDescription);
+                }
+            }
+            queue->ClearStoredMessages();
+        }
+    }
+    UpdateSwapChainSize();
+    if (!m_swapRTV) {
+        ComPtr<ID3D11Texture2D> buf;
+        if (FAILED(m_swap->GetBuffer(0, IID_PPV_ARGS(&buf)))) return D8ERR_INVALIDCALL;
+        m_device->CreateRenderTargetView(buf.Get(), nullptr, &m_swapRTV);
+    }
+    if (m_gammaDirty) {
+        WORD lut[256][4];
+        for (int i = 0; i < 256; i++) { lut[i][0] = m_gamma.red[i]; lut[i][1] = m_gamma.green[i]; lut[i][2] = m_gamma.blue[i]; lut[i][3] = 0xFFFF; }
+        m_ctx->UpdateSubresource(m_gammaTex.Get(), 0, nullptr, lut, sizeof(lut), sizeof(lut));
+        m_gammaDirty = false;
+    }
+    HelperConstants hc = {};
+    hc.misc[1] = (g_config.applyGamma && !m_gammaIdentity) ? 1.0f : 0.0f;
+    D3D11_MAPPED_SUBRESOURCE map;
+    if (SUCCEEDED(m_ctx->Map(m_clearCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        memcpy(map.pData, &hc, sizeof(hc));
+        m_ctx->Unmap(m_clearCB.Get(), 0);
+    }
+    ID3D11RenderTargetView* rtv = m_swapRTV.Get();
+    m_ctx->OMSetRenderTargets(1, &rtv, nullptr);
+    D3D11_VIEWPORT vp = { 0, 0, (float)m_swapW, (float)m_swapH, 0, 1 };
+    m_ctx->RSSetViewports(1, &vp);
+    m_ctx->RSSetState(m_noCull.Get());
+    m_ctx->OMSetBlendState(m_noBlend.Get(), nullptr, 0xFFFFFFFF);
+    m_ctx->OMSetDepthStencilState(m_noDepth.Get(), 0);
+    m_ctx->IASetInputLayout(nullptr);
+    m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_ctx->VSSetShader(m_fullscreenVS.Get(), nullptr, 0);
+    m_ctx->VSSetConstantBuffers(0, 1, m_clearCB.GetAddressOf());
+    m_ctx->PSSetShader(m_presentPS.Get(), nullptr, 0);
+    m_ctx->PSSetConstantBuffers(0, 1, m_clearCB.GetAddressOf());
+    ID3D11ShaderResourceView* srvs[2] = { m_backBuffer->m_srv.Get(), m_gammaSRV.Get() };
+    m_ctx->PSSetShaderResources(0, 2, srvs);
+    const bool sameSize = m_swapW == m_backBuffer->m_width && m_swapH == m_backBuffer->m_height;
+    ID3D11SamplerState* smp[2] = { sameSize ? m_pointClamp.Get() : m_linearClamp.Get(), m_pointClamp.Get() };
+    m_ctx->PSSetSamplers(0, 2, smp);
+    m_ctx->Draw(3, 0);
+    ID3D11ShaderResourceView* nulls[2] = {};
+    m_ctx->PSSetShaderResources(0, 2, nulls);
+
+    HRESULT hr = m_swap->Present(g_config.syncInterval, 0);
+    if (FAILED(hr)) LogOnce("presentfail", "Present failed 0x%08lx", hr);
+    LimitFrameRate();
+    m_frame++;
+    if (m_sunStarted && m_shadowDraws) {
+        memcpy(m_sun.readRows, m_sun.writeRows, sizeof(m_sun.readRows));
+        std::swap(m_sunRead, m_sunWrite);
+        m_sunReady = true;
+        LogOnce("sun-casters", "Sun shadows active: %u caster draws in first world frame", m_shadowDraws);
+    } else m_sunReady = false;
+    m_sunStarted = false;
+    m_shadowDraws = 0;
+
+    // Everything bound above has to be rebound by the next draw.
+    m_rtDirty = m_viewportDirty = true;
+    m_vsConstDirty = m_psConstDirty = true;
+    m_lastVS = nullptr; m_lastPS = nullptr; m_lastLayout = nullptr;
+    m_lastBlend = nullptr; m_lastDepth = nullptr; m_lastRaster = nullptr;
+    return S_OK;
+}
