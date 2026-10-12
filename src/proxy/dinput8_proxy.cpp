@@ -1,6 +1,6 @@
 // dinput8.dll proxy + mini ASI loader.
-// Reenvia todo al dinput8.dll real del sistema y, al arrancar el proceso, carga los *.asi de la
-// carpeta del juego (todos los modulos importados por el juego ya estan mapeados en ese momento).
+// Forwards everything to the real system dinput8.dll and, at process start, loads every *.asi in
+// the game folder (all modules imported by the game are already mapped at that point).
 
 #include <windows.h>
 
@@ -16,7 +16,7 @@ static HMODULE Real()
 {
     if (!g_real) {
         char path[MAX_PATH];
-        GetSystemDirectoryA(path, MAX_PATH); // SysWOW64 en un proceso de 32 bits
+        GetSystemDirectoryA(path, MAX_PATH); // SysWOW64 in a 32-bit process
         strcat_s(path, "\\dinput8.dll");
         g_real = LoadLibraryA(path);
     }
@@ -84,8 +84,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(inst);
-        // Se cargan ya (como Ultimate ASI Loader) para que los plugins puedan enganchar cosas que el
-        // juego crea antes de usar DirectInput, como el dispositivo Direct3D.
+        // Loaded right away (like Ultimate ASI Loader) so plugins can hook things the game creates
+        // before using DirectInput, such as the Direct3D device.
         LoadAsiPlugins();
     }
     return TRUE;

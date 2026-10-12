@@ -1,6 +1,6 @@
 @echo off
-rem Compila el plugin (JPOGMouseFix.asi) y el proxy (dinput8.dll) en out\
-rem Requiere Visual Studio con herramientas C++ (x86). Ajustar VCVARS si la ruta es otra.
+rem Builds the plugin (JPOGMouseFix.asi) and the proxy (dinput8.dll) into out\
+rem Requires Visual Studio with C++ tools (x86). Set VCVARS if your install path differs.
 setlocal
 set "HERE=%~dp0"
 if not defined VCVARS set "VCVARS=C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars32.bat"

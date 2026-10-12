@@ -1,12 +1,12 @@
-// d3d8_profiler.h - Registro de uso de Direct3D 8 (rama dx11)
+// d3d8_profiler.h - Direct3D 8 usage profiler (dx11 branch)
 //
-// Objetivo: saber exactamente que partes de la API usa el juego antes de escribir la capa
-// D3D8 -> D3D11. Se engancha la vtable de IDirect3DDevice8:
-//  - Todos los metodos (0..96) pasan por un thunk que cuenta llamadas.
-//  - Algunos tienen un hook detallado que registra argumentos (render states, texture stage
-//    states, formatos, FVF, tipos de primitiva, shaders...).
-//  - Los vertex/pixel shaders creados se vuelcan a disco (declaracion + bytecode).
-// Cada ~5 s se reescribe <juego>\d3d8_profile\profile.txt. Se activa con [Debug] ProfileD3D8=1.
+// Goal: know exactly which parts of the API the game uses before writing the D3D8 -> D3D11 layer.
+// The IDirect3DDevice8 vtable is hooked:
+//  - Every method (0..96) goes through a thunk that counts calls.
+//  - Some methods have a detailed hook that records arguments (render states, texture stage
+//    states, formats, FVFs, primitive types, shaders...).
+//  - Created vertex/pixel shaders are dumped to disk (declaration + bytecode).
+// <game>\d3d8_profile\profile.txt is rewritten every ~300 frames. Enabled with [Debug] ProfileD3D8=1.
 #pragma once
 #include <windows.h>
 #include <stdio.h>
@@ -46,12 +46,12 @@ static void* g_orig[kMethods];
 static bool g_installed = false;
 static std::string g_dir;
 
-// Registros detallados
-static std::map<DWORD, std::set<DWORD>> g_rs;                  // render state -> valores
-static std::map<DWORD, std::set<DWORD>> g_tss;                 // (stage<<16|type) -> valores
-static std::map<std::string, int> g_misc;                      // descripcion -> cantidad
-static std::map<DWORD, int> g_drawsByVS;                       // handle/FVF activo -> draws
-static std::map<DWORD, int> g_vsConstRegs;                     // registro inicial -> max count
+// Detailed records
+static std::map<DWORD, std::set<DWORD>> g_rs;                  // render state -> values
+static std::map<DWORD, std::set<DWORD>> g_tss;                 // (stage<<16|type) -> values
+static std::map<std::string, int> g_misc;                      // description -> count
+static std::map<DWORD, int> g_drawsByVS;                       // active handle/FVF -> draws
+static std::map<DWORD, int> g_vsConstRegs;                     // start register -> max count
 static DWORD g_curVS = 0, g_curPS = 0;
 static int g_presents = 0, g_vsDumped = 0, g_psDumped = 0;
 
@@ -76,26 +76,26 @@ static void Dump()
     std::string path = g_dir + "profile.txt";
     FILE* f = nullptr;
     if (fopen_s(&f, path.c_str(), "w") != 0 || !f) return;
-    fprintf(f, "Presents: %d\n\n== Llamadas por metodo ==\n", g_presents);
+    fprintf(f, "Presents: %d\n\n== Calls per method ==\n", g_presents);
     for (int i = 0; i < kMethods; i++)
         if (g_calls[i]) fprintf(f, "%3d %-28s %ld\n", i, kNames[i], g_calls[i]);
-    fprintf(f, "\n== Render states (estado: valores) ==\n");
+    fprintf(f, "\n== Render states (state: values) ==\n");
     for (auto& kv : g_rs) {
         fprintf(f, "RS %3lu:", kv.first);
         for (DWORD v : kv.second) fprintf(f, " 0x%lx", v);
         fprintf(f, "\n");
     }
-    fprintf(f, "\n== Texture stage states (stage.tipo: valores) ==\n");
+    fprintf(f, "\n== Texture stage states (stage.type: values) ==\n");
     for (auto& kv : g_tss) {
         fprintf(f, "TSS %lu.%-3lu:", kv.first >> 16, kv.first & 0xffff);
         for (DWORD v : kv.second) fprintf(f, " 0x%lx", v);
         fprintf(f, "\n");
     }
-    fprintf(f, "\n== Draws por vertex shader / FVF activo ==\n");
+    fprintf(f, "\n== Draws per active vertex shader / FVF ==\n");
     for (auto& kv : g_drawsByVS) fprintf(f, "VS 0x%08lx: %d\n", kv.first, kv.second);
-    fprintf(f, "\n== Constantes de vertex shader (registro inicial: max cantidad) ==\n");
+    fprintf(f, "\n== Vertex shader constants (start register: max count) ==\n");
     for (auto& kv : g_vsConstRegs) fprintf(f, "c%lu: %d\n", kv.first, kv.second);
-    fprintf(f, "\n== Otros ==\n");
+    fprintf(f, "\n== Other ==\n");
     for (auto& kv : g_misc) fprintf(f, "%-60s %d\n", kv.first.c_str(), kv.second);
     fclose(f);
 }
@@ -115,7 +115,7 @@ static size_t TokenStreamBytes(const DWORD* p, DWORD endToken, size_t maxTokens)
     return (n + 1) * 4;
 }
 
-// ---- hooks detallados (stdcall, this primero) ----
+// ---- detailed hooks (stdcall, this first) ----
 #define ORIG(idx, type) ((type)g_orig[idx])
 
 static HRESULT WINAPI H_Present(void* d, const RECT* a, const RECT* b, HWND c, const void* e)
@@ -128,7 +128,7 @@ static HRESULT WINAPI H_Present(void* d, const RECT* a, const RECT* b, HWND c, c
 static HRESULT WINAPI H_CreateTexture(void* d, UINT w, UINT h, UINT lv, DWORD usage, DWORD fmt, DWORD pool, void** out)
 {
     InterlockedIncrement(&g_calls[20]);
-    Count("CreateTexture fmt=%lu pool=%lu usage=0x%lx mips=%s", fmt, pool, usage, lv == 1 ? "1" : "varios");
+    Count("CreateTexture fmt=%lu pool=%lu usage=0x%lx mips=%s", fmt, pool, usage, lv == 1 ? "1" : "many");
     return ORIG(20, HRESULT(WINAPI*)(void*, UINT, UINT, UINT, DWORD, DWORD, DWORD, void**))(d, w, h, lv, usage, fmt, pool, out);
 }
 
@@ -170,7 +170,7 @@ static HRESULT WINAPI H_SetTransform(void* d, DWORD st, const void* m)
 static HRESULT WINAPI H_SetLight(void* d, DWORD idx, const DWORD* light)
 {
     InterlockedIncrement(&g_calls[44]);
-    Count("SetLight idx=%lu tipo=%lu", idx, light ? light[0] : 0);
+    Count("SetLight idx=%lu type=%lu", idx, light ? light[0] : 0);
     return ORIG(44, HRESULT(WINAPI*)(void*, DWORD, const DWORD*))(d, idx, light);
 }
 
@@ -198,7 +198,7 @@ static HRESULT WINAPI H_SetTSS(void* d, DWORD stage, DWORD type, DWORD v)
 static HRESULT WINAPI H_DrawPrimitive(void* d, DWORD pt, UINT start, UINT count)
 {
     InterlockedIncrement(&g_calls[70]);
-    Count("DrawPrimitive tipo=%lu", pt);
+    Count("DrawPrimitive type=%lu", pt);
     g_drawsByVS[g_curVS]++;
     return ORIG(70, HRESULT(WINAPI*)(void*, DWORD, UINT, UINT))(d, pt, start, count);
 }
@@ -206,7 +206,7 @@ static HRESULT WINAPI H_DrawPrimitive(void* d, DWORD pt, UINT start, UINT count)
 static HRESULT WINAPI H_DrawIndexed(void* d, DWORD pt, UINT mi, UINT nv, UINT si, UINT pc)
 {
     InterlockedIncrement(&g_calls[71]);
-    Count("DrawIndexedPrimitive tipo=%lu", pt);
+    Count("DrawIndexedPrimitive type=%lu", pt);
     g_drawsByVS[g_curVS]++;
     return ORIG(71, HRESULT(WINAPI*)(void*, DWORD, UINT, UINT, UINT, UINT))(d, pt, mi, nv, si, pc);
 }
@@ -214,7 +214,7 @@ static HRESULT WINAPI H_DrawIndexed(void* d, DWORD pt, UINT mi, UINT nv, UINT si
 static HRESULT WINAPI H_DrawUP(void* d, DWORD pt, UINT pc, const void* data, UINT stride)
 {
     InterlockedIncrement(&g_calls[72]);
-    Count("DrawPrimitiveUP tipo=%lu stride=%u", pt, stride);
+    Count("DrawPrimitiveUP type=%lu stride=%u", pt, stride);
     g_drawsByVS[g_curVS]++;
     return ORIG(72, HRESULT(WINAPI*)(void*, DWORD, UINT, const void*, UINT))(d, pt, pc, data, stride);
 }
@@ -223,7 +223,7 @@ static HRESULT WINAPI H_DrawIndexedUP(void* d, DWORD pt, UINT mi, UINT nv, UINT 
                                       const void* data, UINT stride)
 {
     InterlockedIncrement(&g_calls[73]);
-    Count("DrawIndexedPrimitiveUP tipo=%lu ifmt=%lu stride=%u", pt, fmt, stride);
+    Count("DrawIndexedPrimitiveUP type=%lu ifmt=%lu stride=%u", pt, fmt, stride);
     g_drawsByVS[g_curVS]++;
     return ORIG(73, HRESULT(WINAPI*)(void*, DWORD, UINT, UINT, UINT, const void*, DWORD, const void*, UINT))(
         d, pt, mi, nv, pc, idx, fmt, data, stride);
@@ -241,7 +241,7 @@ static HRESULT WINAPI H_CreateVS(void* d, const DWORD* decl, const DWORD* func, 
             sprintf_s(name, "vs_%03d_h%08lx_func.bin", g_vsDumped, *handle);
             WriteBlob(name, func, TokenStreamBytes(func, 0x0000FFFF, 65536));
         }
-        Count("CreateVertexShader %s usage=0x%lx", func ? "programable" : "solo declaracion (FF)", usage);
+        Count("CreateVertexShader %s usage=0x%lx", func ? "programmable" : "declaration only (FF)", usage);
         g_vsDumped++;
     }
     return hr;
@@ -291,7 +291,7 @@ static HRESULT WINAPI H_SetPS(void* d, DWORD h)
     return ORIG(88, HRESULT(WINAPI*)(void*, DWORD))(d, h);
 }
 
-// Thunk generico: inc dword [g_calls+i*4]; jmp dword [g_orig+i*4]
+// Generic thunk: inc dword [g_calls+i*4]; jmp dword [g_orig+i*4]
 static void* MakeCountThunk(int i)
 {
     static BYTE* page = nullptr;

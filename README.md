@@ -1,52 +1,55 @@
 # JPOG Modernize
 
-Mejoras para **Jurassic Park: Operation Genesis** (PC, 2003, motor Toshi de Blue Tongue) en forma de plugin `.asi` cargado por un proxy `dinput8.dll`. No modifica archivos del juego (salvo opcionalmente el flag Large Address Aware del exe).
+Improvements for **Jurassic Park: Operation Genesis** (PC, 2003, Blue Tongue's Toshi engine), delivered as an `.asi` plugin loaded by a `dinput8.dll` proxy. Game files are not modified (except, optionally, the Large Address Aware flag of the executable).
 
-## Qué hace
+## Features
 
-**Control**
-- Cursor sin aceleración, sensibilidad lineal configurable y misma velocidad en X e Y en pantallas anchas.
-- Slider de sensibilidad en primera persona con mínimo más bajo.
-- Zoom con la rueda, suavizado de cámara y desplazamiento por bordes independientes de los FPS.
-- Teclado no exclusivo: funcionan Impr Pant, Alt+F4 y la tecla Windows.
+**Controls**
+- Pointer acceleration removed; linear, configurable sensitivity with equal X/Y speed on wide screens.
+- Lower minimum for the first-person mouse sensitivity slider.
+- Framerate-independent mouse wheel zoom, camera smoothing and edge scrolling.
+- Non-exclusive keyboard: Print Screen, Alt+F4 and the Windows key work.
 
-**Pantalla**
-- Ventana sin bordes a pantalla completa (fuerza modo ventana en Direct3D 8).
-- Widescreen Hor+ (en 16:9 se ve más a los costados, no se recorta arriba/abajo).
-- HUD sin estirar, con tres modos (`HUDMode`):
-  - `2`: 16:9 anclado, el HUD de partida va a los bordes y los menús quedan centrados.
-  - `1`: todo en 4:3 centrado.
-  - `0`: estirado como el original.
-- Clics, iconos sobre unidades, vistas 3D de la interfaz y menús radiales corregidos para el HUD centrado.
+**Display**
+- Borderless fullscreen window (forces windowed mode in Direct3D 8).
+- Hor+ widescreen: 16:9 shows more on the sides instead of cropping top/bottom.
+- Unstretched UI with three modes (`HUDMode`):
+  - `2`: 16:9 anchored. The in-game HUD sits on the real screen edges and menus stay centered.
+  - `1`: everything centered in 4:3.
+  - `0`: stretched, like the original.
+- Clicks, icons over units, 3D views inside the UI and radial/popup menus are corrected for the centered UI.
 
-**Texturas**
-- Cargador de texturas: reemplaza cualquier textura del juego por archivos en `mods\textures\` (con subcarpetas), en `.png`, `.dds`, `.jpg`, `.tga` o `.bmp`, de cualquier resolución.
-- Funciona con texturas DDS y crudas (1555/4444/8888). La GUI mantiene sus coordenadas originales.
+**Textures**
+- Texture loader: replaces any game texture with files from `mods\textures\`.
+  - Subfolders are supported; folders starting with `_` are ignored.
+  - Formats: `.png`, `.dds`, `.jpg`, `.tga` or `.bmp`, at any resolution.
+- Works for DDS and raw (1555/4444/8888) textures. The UI keeps its original coordinates, so upscaled atlases line up.
 
-## Instalación
+## Building and installing
 
-1. Compilar con `build.bat` (Visual Studio x86). Si VS está en otra ruta, definir `VCVARS`.
-2. `install.bat "C:\ruta\al\juego"`. Copia `JPOGMouseFix.asi`, `dinput8.dll` y el `.ini` (este último solo si no existe).
-3. Configurar en `JPOGMouseFix.ini`.
+1. Run `build.bat` (Visual Studio, x86 tools). If Visual Studio is installed elsewhere, set `VCVARS`.
+2. Run `install.bat "C:\path\to\game"`. It copies `JPOGMouseFix.asi`, `dinput8.dll` and the `.ini`; the `.ini` is copied only if missing.
+3. Edit `JPOGMouseFix.ini` in the game folder.
 
-## Herramientas (`tools/`, Python 3 + Pillow)
+## Tools (`tools/`, Python 3 + Pillow)
 
-| Script | Uso |
+| Script | Purpose |
 |---|---|
-| `tml.py` / `export.py` | Leer los `.tml` del juego y exportar texturas a PNG |
-| `hd_a_mods.py` | PNG escalados → DDS DXT1/DXT5 con mipmaps en `mods\textures\<carpeta>` |
-| `fondos_a_mods.py` | Fondos de menú enteros → las 6 piezas que usa el juego |
-| `arreglar_alfa.py` | Copia la transparencia de la textura original a la escalada |
-| `carpetas.py` | Ordena `mods\textures` en subcarpetas por categoría |
-| `repack.py` | (Experimental) reempaqueta PNG dentro de un `.tml` |
+| `tml.py` | Reads the game's `.tml` texture libraries |
+| `export.py` | Exports every texture to PNG (backgrounds, UI, fonts, 3D) |
+| `hd_to_mods.py` | Upscaled PNGs → DXT1/DXT5 DDS with mipmaps, sorted into `mods\textures` |
+| `backgrounds_to_mods.py` | Full menu backgrounds → the 6 tiles the game uses |
+| `fix_alpha.py` | Copies the original alpha channel onto upscaled textures |
+| `folders.py` | Sorts loose files in `mods\textures` into category folders |
+| `repack.py` | (Experimental) repacks PNGs into a `.tml` |
 
-Para escalar texturas recomendamos Real-ESRGAN (ncnn-vulkan) con el modelo 4x-UltraSharp.
+For upscaling we recommend Real-ESRGAN (ncnn-vulkan) with the 4x-UltraSharp model.
 
-## Ramas
+## Branches
 
-- `main`: plugin actual (DirectX 8, se puede usar junto con dgVoodoo).
-- `dx11`: renderizador propio que traduce Direct3D 8 → Direct3D 11, para shaders modernos (iluminación por píxel, sombras dinámicas, etc.). En desarrollo.
+- `main`: current plugin (Direct3D 8; works alongside dgVoodoo).
+- `dx11`: custom renderer translating Direct3D 8 to Direct3D 11, to enable modern shaders (per-pixel lighting, dynamic shadows, ...). Work in progress.
 
-Las notas de ingeniería inversa (direcciones, estructuras, funciones) están en [docs/NOTAS.md](docs/NOTAS.md).
+Reverse-engineering notes (addresses, structures, functions) are in [docs/NOTES.md](docs/NOTES.md).
 
-> No se incluyen archivos ni assets del juego. Hace falta una copia propia de JPOG.
+> No game files or assets are included. You need your own copy of JPOG.
