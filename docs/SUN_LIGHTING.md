@@ -1,53 +1,70 @@
-# Experimental DX11 sun lighting
+# DX11 sun shadows
 
-Enable `[Lighting] Enabled=1` in the game's `d3d8to11.ini`. Set it back to 0
-to restore the original lighting. The shipped default remains disabled pending
-in-game verification.
+Enable with `[Lighting] Enabled=1` in the game's `d3d8to11.ini` (restart required).
+`Enabled=0` gives the original image. The game's own lighting is kept; shadows only
+darken it.
 
-This implementation adds a sun depth shadow map with 3x3 PCF. JPOG already
-lights its colors, so shadow composition preserves the original RGB exactly
-where visibility is 1. Ambient and SunIntensity control the fraction attenuated
-by a shadow rather than applying a second lighting/tint pass over the game.
-It is not global illumination: there is no indirect bounce calculation.
+## How it works (`src/d3d8to11/sun.cpp`)
 
-Recognized vertex declarations select skinned models, terrain, rigid geometry
-and grass. The first recognized main-world terrain draw establishes the shared
-camera from c0. All recognized shaders reconstruct world position from their
-original clip position through that camera's inverse, so model-local transforms
-in a mesh's c0 do not place its shadow at a local-space origin. Geometric normals
-are derived from screen derivatives of this reconstructed position.
-Shadow receivers and casters are distinct: main-world terrain can receive
-shadows when blending is enabled or depth writes are disabled; only eligible
-depth-writing draws cast. UI, offscreen texture generation and water are excluded.
-These rules still require validation against all game materials. Material
-eligibility is logged for each VS/PS pair.
+JPOG has no world/view/projection split: every world vertex shader receives one
+world-to-clip (or model-to-clip) matrix in `c0..c3`. The terrain shader (`kind 2`,
+v0 `D3DCOLOR` height + v1 grid position) adds only a chunk offset (`c4`) to its
+vertices, so its `c0..c3` is the camera's view-projection.
 
-Each eligible draw is repeated into a sun-view depth texture using its original
-animation, textures and alpha-test logic. A dedicated depth-only pixel shader
-avoids a color target. Two maps alternate: the current frame builds one map while
-sampling the completed preceding frame. Consequently animated shadows lag by
-one frame. Only geometry submitted in the camera's visible world pass casts
-shadows; off-camera casters and cascaded shadow maps are not implemented yet.
+1. **Frame start** — the first full-screen terrain draw inverts its `c0..c3`
+   (`clipToWorld`). Rays through a 3x3 grid of screen points are intersected with the
+   chunk's base height and clamped to `ShadowDistance`; an orthographic light box is
+   fitted around those points in light space, its size rounded to 32 units and its
+   centre snapped to whole texels (no shimmering while panning). The shadow map is cleared.
+2. **Casters** — every opaque world draw (depth writes on, full-screen viewport, back
+   buffer target) is drawn a second time into the shadow map. The translated vertex
+   shader maps its own clip position back through `clipToWorld`, so skinned dinosaurs,
+   rigid meshes and terrain get world positions without knowing their model matrices.
+   Alpha-tested foliage runs its pixel shader up to the alpha test. Grass is excluded
+   unless `GrassShadows=1`.
+3. **Resolve** — before the first draw without depth to the back buffer (the HUD), before
+   a depth clear, or at Present, a full-screen pass reads the scene depth (the depth buffer
+   is created typeless), rebuilds world position and a depth-derived normal (per axis the
+   neighbour on the same surface), offsets along the normal and takes 12 Poisson PCF taps.
+   Surfaces facing away from the sun are left alone (the game already darkens them);
+   shadows fade at the light box edge and towards `ShadowDistance`. The back buffer is
+   multiplied by the result (`ShadowStrength`, slight blue tint).
 
-The shadow camera follows the terrain camera's center ray intersected with a
-ground plane; models before that terrain pass are left unchanged. The sun
-direction is currently fixed in world space, and does not
-follow the game's time of day. The shadow extent and ambient/direct strengths
-are configurable. Invalid camera matrices disable lighting for that draw.
+Everything happens in the same frame: no latency, no dependence on the previous camera.
 
-Verification on Radeon RX 6700 XT:
+## Sun direction
 
-- All 14 captured vertex shaders, 18 pixel shaders, 18 depth variants and four
-  fixed-function variants compile successfully: 54 passed.
-- A GPU readback test uses the captured terrain shader with blending enabled
-  and depth writes disabled, plus an elevated model with translation in its c0.
-  The model casts at the correct world-space offset. Lit
-  pixels remain exactly 128 before and after shadow-map completion; the selected
-  occluded pixel changes from 128 to 79 with the test's 0.9 shadow strength.
-- The partial managed-texture update / HUD regression remains green (ff00ff00)
-  with lighting enabled.
-- The synthetic shadow scene reports no D3D11 debug-layer diagnostics.
+`SunSource=game`: the skinned shader lights with `N . -c89`, with N in the space that its
+`c0..c3` maps to clip. `-c89` mapped through `c0..c3` and `clipToWorld` is the game's sun
+in world space; it is smoothed over frames and used from the next frame on. Until a
+dinosaur has been drawn, `SunX/Y/Z` is used. `SunMinHeight` raises a low sun (keeping its
+azimuth) to avoid endless shadows. `SunSource=fixed` always uses `SunX/Y/Z`.
 
-These tests verify the mechanism, not its visual correctness in every JPOG
-scene. Validate camera movement, dinosaur animation, terrain, foliage, UI and
-performance in-game before enabling by default.
+## Diagnostics
+
+`d3d8to11.log` reports once:
+
+- `Sun frame:` ground height, light box size and texel size, sun direction and source.
+- `Game sun (skin c89)`: the derived direction, the 4th column of the reconstructed model
+  matrix (should be 0 0 0 1; anything else means the skin camera differs from the terrain
+  camera) and the terrain shader's `c22` for comparison.
+- `Sun shadows resolved at hud|clear|present`.
+- `Sun frame order`: casters drawn before the terrain (not in the map) and world draws after
+  the resolve (not shadowed). Non-zero values point at objects without shadows.
+
+`DebugView=3` shows the shadow mask instead of the image (sky magenta), `DebugView=4` the
+reconstructed normals.
+
+## Tests
+
+`tools/suncheck.cpp` renders a terrain quad, a floating caster and a HUD patch with captured
+JPOG shaders on a hidden 64x64 device and checks, in the same frame, that the shadow lands
+9 units away from a 0.6/0.8 sun, follows the caster when its matrix moves it, does not touch
+the caster's top and leaves the HUD unshadowed.
+
+## Limits
+
+- Objects outside the game's view frustum are culled by the game and cast nothing.
+- World draws before the first terrain chunk are not in the map (see `Sun frame order`).
+- Transparent surfaces (water, particles) are shaded by the depth behind them.
+- The light box assumes the chunk base height as ground; very hilly views may clip.

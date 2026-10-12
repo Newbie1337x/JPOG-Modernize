@@ -65,19 +65,29 @@ void LoadConfig()
     g_config.debugLayer = GetPrivateProfileIntA("Debug", "D3D11DebugLayer", 0, ini.c_str()) != 0;
     g_config.dumpShaders = GetPrivateProfileIntA("Debug", "DumpShaders", 0, ini.c_str()) != 0;
     g_config.sunLighting = GetPrivateProfileIntA("Lighting", "Enabled", 0, ini.c_str()) != 0;
-    g_config.shadowResolution = GetPrivateProfileIntA("Lighting", "ShadowResolution", 2048, ini.c_str());
-    if (g_config.shadowResolution != 1024 && g_config.shadowResolution != 2048 && g_config.shadowResolution != 4096)
-        g_config.shadowResolution = 2048;
+    g_config.replaceLighting = GetPrivateProfileIntA("Lighting", "ReplaceOriginal", 0, ini.c_str()) != 0;
+    g_config.grassShadows = GetPrivateProfileIntA("Lighting", "GrassShadows", 0, ini.c_str()) != 0;
+    g_config.lightingDebug = GetPrivateProfileIntA("Lighting", "DebugView", 0, ini.c_str());
+    GetPrivateProfileStringA("Lighting", "SunSource", "game", buf, sizeof(buf), ini.c_str());
+    g_config.sunFromGame = _stricmp(buf, "fixed") != 0;
+    g_config.shadowResolution = GetPrivateProfileIntA("Lighting", "ShadowResolution", 4096, ini.c_str());
+    if (g_config.shadowResolution != 1024 && g_config.shadowResolution != 2048 &&
+        g_config.shadowResolution != 4096 && g_config.shadowResolution != 8192)
+        g_config.shadowResolution = 4096;
     auto readFloat = [&](const char* key, float fallback, float lo, float hi) {
         char value[64];
         GetPrivateProfileStringA("Lighting", key, "", value, sizeof(value), ini.c_str());
         float f = value[0] ? (float)atof(value) : fallback;
         return f >= lo && f <= hi ? f : fallback;
     };
-    g_config.shadowExtent = readFloat("ShadowExtent", 384, 64, 16384);
+    g_config.shadowDistance = readFloat("ShadowDistance", 500, 32, 16384);
     g_config.sunAmbient = readFloat("Ambient", 0.60f, 0.1f, 2);
     g_config.sunDirect = readFloat("SunIntensity", 0.55f, 0, 2);
-    g_config.shadowStrength = readFloat("ShadowStrength", 0.45f, 0, 1);
+    g_config.shadowStrength = readFloat("ShadowStrength", 0.55f, 0, 1);
+    g_config.sunMinElevation = readFloat("SunMinHeight", 0.35f, 0.05f, 1);
+    g_config.sunDirection[0] = readFloat("SunX", -0.35f, -1, 1);
+    g_config.sunDirection[1] = readFloat("SunY", 0.82f, 0.05f, 1);
+    g_config.sunDirection[2] = readFloat("SunZ", -0.45f, -1, 1);
 }
 
 // ---- formats -----------------------------------------------------------------------------------

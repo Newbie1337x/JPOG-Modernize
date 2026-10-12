@@ -157,32 +157,28 @@ const char* kVSOutputStruct =
 
 namespace {
 std::string SunBlock(int slot) {
-    return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; };\n", slot);
+    return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; };\n", slot);
 }
 std::string SunPixelCode() {
     return SunBlock(1) +
-        "Texture2D<float> sunDepth : register(t8); SamplerComparisonState sunSampler : register(s8);\n"
+        // Shadows are applied after the world pass (sun.cpp resolve). In-pass work is only the
+        // optional replacement lighting ([Lighting] ReplaceOriginal=1); otherwise colour is untouched.
         "float4 ApplySun(float4 color, VSOut i) {\n"
-        "  if (sunFlags.x < 0.5 || sunFlags.y > 0.5) return color;\n"
+        "  if (sunFlags.x < 0.5 || sunFlags.y > 0.5 || sunControl.x < 0.5) return color;\n"
+        "  if (sunControl.y == 1) return color;\n"
         "  float3 rawN = cross(ddy(i.world), ddx(i.world));\n"
+        "  if (dot(i.normal,i.normal) > 1e-8) rawN = i.normal;\n"
         "  float nlen = dot(rawN, rawN); if (nlen < 1e-12) return color;\n"
         "  float3 N = rawN * rsqrt(nlen);\n"
-        "  if (N.y < 0) N = -N;\n"
+        "  if (sunFlags.w == 2 && N.y < 0) N = -N;\n"
+        "  if (sunControl.y == 2) return float4(N*0.5+0.5,color.a);\n"
         "  float ndl = saturate(dot(N, sunDirection.xyz));\n"
-        "  float visibility = 1; float4 p = float4(i.world, 1);\n"
-        "  float3 q = float3(dot(p,sunRead[0]),dot(p,sunRead[1]),dot(p,sunRead[2]));\n"
-        "  float2 uv = q.xy * float2(0.5,-0.5) + 0.5;\n"
-        "  if (sunFlags.z > 0.5 && all(uv > 0) && all(uv < 1) && q.z > 0 && q.z < 1) {\n"
-        "    visibility = 0; float bias = 0.00008 + (1-ndl)*0.00016;\n"
-        "    [unroll] for(int y=-1;y<=1;y++) [unroll] for(int x=-1;x<=1;x++)\n"
-        "      visibility += sunDepth.SampleCmpLevelZero(sunSampler,uv+float2(x,y)*sunSettings.w,q.z-bias);\n"
-        "    visibility = lerp(1,visibility/9,sunSettings.z);\n"
-        "  }\n"
-        "  // JPOG already applies sunlight, ambient and fog to color. Preserve\n"
-        "  // that result exactly in lit areas; only attenuate the direct fraction.\n"
-        "  float direct = sunSettings.y*ndl;\n"
-        "  float light = (sunSettings.x + direct*visibility) / max(sunSettings.x + direct,0.0001);\n"
-        "  return float4(color.rgb*light,color.a);\n"
+        "  if (sunFlags.w == 4) ndl = abs(dot(N,sunDirection.xyz));\n"
+        "  float sky = saturate(N.y*0.5+0.5);\n"
+        "  float3 ambient = sunSettings.x * lerp(float3(0.38,0.34,0.27),float3(0.78,0.88,1.0),sky);\n"
+        "  float3 light = ambient + sunSettings.y*ndl*float3(1.0,0.95,0.84);\n"
+        "  float3 linearColor = pow(max(color.rgb,0),2.2);\n"
+        "  return float4(pow(max(linearColor*light,0),1.0/2.2),color.a);\n"
         "}\n";
 }
 }
@@ -387,7 +383,20 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
     s += "    if (abs(worldH.w) > 1e-6) worldPosition = float4(worldH.xyz/worldH.w,1);\n";
     s += "  }\n";
     s += "  o.world = worldPosition.xyz;\n";
-    s += WorldShaderKind(decl) == 1 ? "  o.normal = r6.xyz;\n" : "  o.normal = 0;\n";
+    s += "  o.normal = 0;\n";
+    if (WorldShaderKind(decl) == 1) {
+        // r6 is the skinned normal in the coordinate system consumed by c0.
+        // Transform its inverse transpose into the shared terrain world space.
+        s += "  if (sunControl.x > 0.5 && sunFlags.x > 0.5) {\n";
+        s += "    float3 basis[3];\n";
+        s += "    [unroll] for(int a=0;a<3;a++) {\n";
+        s += "      float4 clipAxis=float4(c[0][a],c[1][a],c[2][a],c[3][a]);\n";
+        s += "      basis[a]=float3(dot(clipAxis,clipToWorld[0]),dot(clipAxis,clipToWorld[1]),dot(clipAxis,clipToWorld[2]));\n";
+        s += "    }\n";
+        s += "    float det=dot(basis[0],cross(basis[1],basis[2]));\n";
+        s += "    if(abs(det)>1e-8) o.normal=(r6.x*cross(basis[1],basis[2])+r6.y*cross(basis[2],basis[0])+r6.z*cross(basis[0],basis[1]))/det;\n";
+        s += "  }\n";
+    }
     s += "  if (sunFlags.y > 0.5) o.pos = float4(dot(worldPosition,sunWrite[0]),dot(worldPosition,sunWrite[1]),dot(worldPosition,sunWrite[2]),dot(worldPosition,sunWrite[3]));\n";
     s += "  if (sunFlags.y < 0.5) o.pos.xy += pixelOffset.xy * oPos.w;\n";
     s += "  o.d0 = saturate(od0);\n  o.d1 = saturate(od1);\n";
@@ -492,6 +501,8 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
             s += Fmt("  cp[%d] = float4(%.9g, %.9g, %.9g, %.9g);\n", RegNumOf(in.p[0]), AsFloat(in.p[1]),
                      AsFloat(in.p[2]), AsFloat(in.p[3]), AsFloat(in.p[4]));
     s += "  float4 v0 = i.d0, v1 = i.d1;\n";
+    s += "  bool relight = sunControl.x > 0.5 && sunFlags.x > 0.5 && sunFlags.y < 0.5;\n";
+    s += "  if (relight) { v0.rgb = 1; v1.rgb = 0; }\n";
     s += "  float4 r0 = 0, r1 = 0, t0 = 0, t1 = 0, t2 = 0, t3 = 0;\n";
     s += "  float m0 = 0, m1 = 0;\n";
 
@@ -500,6 +511,7 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
     int tmp = 0;
     auto flush = [&]() { for (auto& w : pendingWrites) s += w; pendingWrites.clear(); };
     int padCount = 0;
+    bool deferredFog = false;
 
     for (size_t k = 0; k < code.size(); k++) {
         const Instr& in = code[k];
@@ -512,7 +524,13 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
             int n = RegNumOf(p[0]);
             std::string coord = Fmt("i.t%d", n);
             switch (in.op) {
-            case OP_TEX: s += Fmt("  t%d = ", n) + SampleExpr(n, v.texDim, coord) + ";\n"; break;
+            case OP_TEX:
+                s += Fmt("  t%d = ", n) + SampleExpr(n, v.texDim, coord) + ";\n";
+                // Captured grass shader multiplies its blade texture by a
+                // terrain colour/light texture. Retain that texture's alpha
+                // but replace its RGB contribution with our own illumination.
+                if (n == 1) s += "  if (relight && sunFlags.w == 4) t1.rgb = 1;\n";
+                break;
             case OP_TEXCOORD: s += Fmt("  t%d = float4(saturate(i.t%d.xyz), 1.0);\n", n, n); break;
             case OP_TEXKILL: s += "  if (any(" + coord + ".xyz < 0.0)) discard;\n"; break;
             case OP_TEXBEM: case OP_TEXBEML: {
@@ -571,7 +589,18 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
         case OP_SUB: expr = S(1) + " - " + S(2); break;
         case OP_MUL: expr = S(1) + " * " + S(2); break;
         case OP_MAD: expr = S(1) + " * " + S(2) + " + " + S(3); break;
-        case OP_LRP: expr = "lerp(" + S(3) + ", " + S(2) + ", " + S(1) + ")"; break;
+        case OP_LRP:
+            expr = "lerp(" + S(3) + ", " + S(2) + ", " + S(1) + ")";
+            // Captured world shaders use lrp r0.xyz, v1.w, v1, r0 for fog.
+            // Keep it out of the albedo; apply it after our lighting instead.
+            if (RegTypeOf(p[1]) == RT_INPUT && RegNumOf(p[1]) == 1 &&
+                ((p[1] >> 16) & 255) == 255 && ((p[1] >> 24) & 15) == 0 &&
+                RegTypeOf(p[2]) == RT_INPUT && RegNumOf(p[2]) == 1 &&
+                MaskOf(p[0]) == ".xyz") {
+                deferredFog = true;
+                expr = "(relight ? " + S(3) + " : " + expr + ")";
+            }
+            break;
         case OP_DP3: expr = "dot((" + S(1) + ").xyz, (" + S(2) + ").xyz).xxxx"; break;
         case OP_DP4: expr = "dot(" + S(1) + ", " + S(2) + ").xxxx"; break;
         case OP_CND: expr = "((" + S(1) + ") > 0.5 ? (" + S(2) + ") : (" + S(3) + "))"; break;
@@ -588,7 +617,13 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
     flush();
     s += "  float4 color = saturate(r0);\n";
     s += AlphaTest(v.alphaFunc);
-    s += v.shadowOnly ? "  return;\n}\n" : "  return ApplySun(color,i);\n}\n";
+    if (v.shadowOnly) s += "  return;\n}\n";
+    else {
+        s += "  color = ApplySun(color,i);\n";
+        if (deferredFog)
+            s += "  if (relight && sunControl.y == 0) color.rgb = lerp(color.rgb,i.d1.rgb,saturate(i.d1.w));\n";
+        s += "  return color;\n}\n";
+    }
     return s;
 }
 
@@ -656,6 +691,7 @@ std::string GenerateFFPS(const FFKey& k)
     s += SunPixelCode();
     s += k.shadowOnly ? "void main(VSOut i) {\n" : "float4 main(VSOut i) : SV_Target {\n";
     s += "  float4 diffuse = i.d0, specular = i.d1, cur = i.d0, temp = 0, tex = 1;\n";
+    s += "  if (sunControl.x > 0.5 && sunFlags.x > 0.5 && sunFlags.y < 0.5) { diffuse.rgb=1; specular.rgb=0; cur.rgb=1; }\n";
     s += "  float2 bump = 0; float bumpL = 1.0;\n";
     s += "  float4 tc[8] = { i.t0, i.t1, i.t2, i.t3, i.t4, i.t5, i.t6, i.t7 };\n";
     for (int st = 0; st < kMaxStages; st++) {

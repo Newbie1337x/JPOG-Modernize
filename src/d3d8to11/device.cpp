@@ -218,7 +218,7 @@ bool Device::CreatePresentResources()
 
 bool Device::CreateSwapChainAndBackBuffer()
 {
-    m_sunReady = m_sunStarted = false;
+    m_sunStarted = m_sunResolved = false;
     m_shadowDraws = 0;
     RECT rc = {};
     GetClientRect(m_window, &rc);
@@ -505,6 +505,7 @@ HRESULT Device::SetViewport(const D3D8Viewport* vp)
 
 HRESULT Device::Clear(DWORD count, const D3D8Rect* rects, DWORD flags, DWORD color, float z, DWORD stencil)
 {
+    if (m_sunStarted && !m_sunResolved && (flags & D8CLEAR_ZBUFFER) && m_ds == m_autoDepth) ResolveSun("clear");
     ApplyRenderTargets();
     const bool fullViewport = m_rt && m_viewport.X == 0 && m_viewport.Y == 0 &&
                               m_viewport.Width >= m_rt->m_width && m_viewport.Height >= m_rt->m_height;
@@ -1090,6 +1091,9 @@ ID3D11PixelShader* Device::GetPixelShader()
 
 bool Device::PrepareDraw()
 {
+    // The first depth-less draw to the back buffer after the world is the HUD: apply the
+    // sun shadows before it so they never darken the interface.
+    if (m_sunStarted && !m_sunResolved && m_rt == m_backBuffer && !m_rs[RS_ZENABLE]) ResolveSun("hud");
     ApplyRenderTargets();
     if (!m_rt) return false;
 
@@ -1120,11 +1124,12 @@ bool Device::PrepareDraw()
     }
     VertexShader8* vs = m_vertexShaders[idx];
     m_worldKind = WorldShaderKind(vs->parsed);
-    m_worldDraw = g_config.sunLighting && m_worldKind != 0 && m_psHandle != 0 &&
+    m_worldDraw = g_config.sunLighting && m_worldKind != 0 &&
+        (m_psHandle != 0 || m_rs[RS_ZWRITEENABLE]) &&
         m_rt == m_backBuffer && m_ds && m_rs[RS_ZENABLE] &&
         (m_worldKind == 2 || !m_rs[RS_ALPHABLENDENABLE] || m_rs[RS_ALPHATESTENABLE]) &&
         m_viewport.Width == m_backBuffer->m_width && m_viewport.Height == m_backBuffer->m_height;
-    m_worldCaster = m_worldDraw && m_rs[RS_ZWRITEENABLE];
+    m_worldCaster = m_worldDraw && m_rs[RS_ZWRITEENABLE] && (m_worldKind != 4 || g_config.grassShadows);
     if (g_config.sunLighting && m_rt == m_backBuffer && m_worldKind != 0) {
         LogOnce(std::string("sun-material-") + std::to_string(m_vsHandle) + "-" + std::to_string(m_psHandle),
             "Sun material VS %lx PS %lx kind %d receiver %d caster %d z %lu write %lu blend %lu alpha %lu",
@@ -1426,6 +1431,7 @@ HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
             queue->ClearStoredMessages();
         }
     }
+    EndSunFrame();
     UpdateSwapChainSize();
     if (!m_swapRTV) {
         ComPtr<ID3D11Texture2D> buf;
@@ -1471,14 +1477,6 @@ HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
     if (FAILED(hr)) LogOnce("presentfail", "Present failed 0x%08lx", hr);
     LimitFrameRate();
     m_frame++;
-    if (m_sunStarted && m_shadowDraws) {
-        memcpy(m_sun.readRows, m_sun.writeRows, sizeof(m_sun.readRows));
-        std::swap(m_sunRead, m_sunWrite);
-        m_sunReady = true;
-        LogOnce("sun-casters", "Sun shadows active: %u caster draws in first world frame", m_shadowDraws);
-    } else m_sunReady = false;
-    m_sunStarted = false;
-    m_shadowDraws = 0;
 
     // Everything bound above has to be rebound by the next draw.
     m_rtDirty = m_viewportDirty = true;

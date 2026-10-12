@@ -235,18 +235,30 @@ private:
 
     LARGE_INTEGER m_qpcFreq = {}, m_lastFrame = {};
     UINT64 m_frame = 0;
-    ComPtr<ID3D11Buffer> m_sunCB;
-    ComPtr<ID3D11Texture2D> m_sunMaps[2];
-    ComPtr<ID3D11DepthStencilView> m_sunDSV[2];
-    ComPtr<ID3D11ShaderResourceView> m_sunSRV[2];
+    // Sun shadows (sun.cpp). Casters are drawn into m_sunMap as the frame is rendered; once the
+    // world is finished, a full-screen pass darkens the back buffer using the scene depth.
+    ComPtr<ID3D11Buffer> m_sunCB, m_resolveCB;
+    ComPtr<ID3D11Texture2D> m_sunMap;
+    ComPtr<ID3D11DepthStencilView> m_sunDSV;
+    ComPtr<ID3D11ShaderResourceView> m_sunSRV;
     ComPtr<ID3D11SamplerState> m_sunSampler;
     ComPtr<ID3D11DepthStencilState> m_sunDepth;
     ComPtr<ID3D11RasterizerState> m_sunRaster;
+    ComPtr<ID3D11VertexShader> m_resolveVS;
+    ComPtr<ID3D11PixelShader> m_resolvePS;
+    ComPtr<ID3D11BlendState> m_multiplyBlend;
     SunConstants m_sun = {};
     SunConstants m_sunUploaded = {};
     bool m_sunUploadedValid = false;
-    int m_sunRead = 0, m_sunWrite = 1, m_worldKind = 0;
-    bool m_sunStarted = false, m_sunReady = false, m_worldDraw = false;
+    int m_worldKind = 0;
+    bool m_sunStarted = false, m_sunResolved = false, m_worldDraw = false;
     bool m_worldCaster = false;
-    UINT m_shadowDraws = 0;
+    UINT m_shadowDraws = 0, m_earlyCasters = 0, m_lateWorldDraws = 0;
+    float m_sunDepthRange = 1.0f, m_sunTexelWorld = 0.1f;
+    float m_gameSun[3] = {};
+    bool m_gameSunValid = false;
+    void StartSunFrame();
+    void CaptureGameSun();
+    void ResolveSun(const char* reason);
+    void EndSunFrame();
 };

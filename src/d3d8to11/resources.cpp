@@ -155,10 +155,20 @@ bool Surface::CreateStandalone()
     FormatInfo info = GetFormatInfo(m_format);
     if (info.dxgi == DXGI_FORMAT_UNKNOWN) { Log("surface: unsupported format %lu", m_format); return false; }
     if (m_usage & D8USAGE_DEPTHSTENCIL) {
-        D3D11_TEXTURE2D_DESC td = { m_width, m_height, 1, 1, DXGI_FORMAT_D24_UNORM_S8_UINT, { 1, 0 },
-                                    D3D11_USAGE_DEFAULT, D3D11_BIND_DEPTH_STENCIL, 0, 0 };
+        // Typeless so the sun shadow resolve can read scene depth through m_srv.
+        D3D11_TEXTURE2D_DESC td = { m_width, m_height, 1, 1, DXGI_FORMAT_R24G8_TYPELESS, { 1, 0 },
+                                    D3D11_USAGE_DEFAULT, D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE, 0, 0 };
         if (FAILED(m_dev->D3D()->CreateTexture2D(&td, nullptr, &m_tex))) return false;
-        return SUCCEEDED(m_dev->D3D()->CreateDepthStencilView(m_tex.Get(), nullptr, &m_dsv));
+        D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
+        dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        if (FAILED(m_dev->D3D()->CreateDepthStencilView(m_tex.Get(), &dd, &m_dsv))) return false;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+        sd.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels = 1;
+        m_dev->D3D()->CreateShaderResourceView(m_tex.Get(), &sd, &m_srv);
+        return true;
     }
     if (m_usage & D8USAGE_RENDERTARGET) {
         D3D11_TEXTURE2D_DESC td = { m_width, m_height, 1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, { 1, 0 },

@@ -28,10 +28,15 @@ struct Config {
     bool applyGamma = true;     // [Renderer] ApplyGammaRamp
     bool debugLayer = false;    // [Debug] D3D11DebugLayer
     bool dumpShaders = false;   // [Debug] DumpShaders (writes generated HLSL to d3d8to11_shaders\)
-    bool sunLighting = false;
-    int shadowResolution = 2048;
-    float shadowExtent = 384.0f;
-    float sunAmbient = 0.60f, sunDirect = 0.55f, shadowStrength = 0.45f;
+    bool sunLighting = false;       // [Lighting] Enabled: sun shadows
+    bool replaceLighting = false;   // [Lighting] ReplaceOriginal: experimental per-pixel relighting
+    bool sunFromGame = true;        // [Lighting] SunSource=game (else SunX/Y/Z)
+    bool grassShadows = false;      // [Lighting] GrassShadows
+    int lightingDebug = 0;          // 0 off, 1 albedo, 2 normals (replacement), 3 shadow mask, 4 resolve normals
+    int shadowResolution = 4096;
+    float shadowDistance = 500.0f;  // farthest point from the camera that receives shadows
+    float sunAmbient = 0.60f, sunDirect = 0.55f, shadowStrength = 0.55f;
+    float sunMinElevation = 0.35f;  // minimum sun height (sin of elevation), avoids endless shadows
     float sunDirection[3] = { -0.35f, 0.82f, -0.45f };
 };
 extern Config g_config;

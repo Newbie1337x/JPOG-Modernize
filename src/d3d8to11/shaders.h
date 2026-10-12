@@ -78,4 +78,5 @@ struct SunConstants {
     float direction[4];
     float settings[4]; // ambient, direct, shadow strength, inverse map size
     float flags[4];    // lighting enabled, shadow pass, previous map ready, normal kind
+    float control[4];  // replace original, debug view, reserved, reserved
 };
