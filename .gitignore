@@ -1,0 +1,18 @@
+out/
+obj/
+*.obj
+*.lib
+*.exp
+*.pdb
+__pycache__/
+
+# Nunca subir archivos del juego ni assets extraidos/escalados (copyright)
+*.tml
+*.dds
+*.png
+*.jpg
+*.bik
+*.exe
+*.dll
+mods/
+JPOG_UI_Export/
