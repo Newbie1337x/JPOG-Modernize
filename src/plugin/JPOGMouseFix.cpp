@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <stdarg.h>
+#include "d3d8_profiler.h"
 
 static float g_cursorSpeed = 0.5f;
 static bool  g_disableAccel = true;
@@ -591,6 +593,7 @@ typedef HRESULT(WINAPI* GetAdapterDisplayMode_t)(void*, UINT, D3DDISPLAYMODE8*);
 typedef HRESULT(WINAPI* Reset_t)(void*, D3DPP8*);
 
 static bool g_forceWindowed = true;
+static bool g_profileD3D8 = false;
 static bool g_altF4 = true;
 static Direct3DCreate8_t g_origCreate8 = nullptr;
 static CreateDevice_t g_origCreateDevice = nullptr;
@@ -707,6 +710,13 @@ static HRESULT WINAPI CreateDevice_Hook(void* d3d, UINT adapter, DWORD type, HWN
     if (hr >= 0 && outDev && *outDev) {
         PatchVtable(*(void***)*outDev, 15, (void*)&Present_Hook, (void**)&g_origPresent); // Present
         if (pp) { g_bbWidth = pp->BackBufferWidth; g_bbHeight = pp->BackBufferHeight; }
+        if (g_profileD3D8) {
+            char dir[MAX_PATH];
+            GetModuleFileNameA(nullptr, dir, MAX_PATH);
+            char* slash = strrchr(dir, '\\');
+            if (slash) slash[1] = 0;
+            prof::Install(*outDev, std::string(dir) + "d3d8_profile\\");
+        }
     }
     return hr;
 }
@@ -1040,6 +1050,7 @@ static void LoadConfig(HMODULE self)
     if (g_hudMode < 0 || g_hudMode > 2) g_hudMode = 2;
     g_fixHud = g_hudMode != 0;
     g_texModsEnabled = GetPrivateProfileIntA("Mods", "TextureReplacement", 1, path) != 0;
+    g_profileD3D8 = GetPrivateProfileIntA("Debug", "ProfileD3D8", 0, path) != 0;
     g_borderless = GetPrivateProfileIntA("Display", "Borderless", 1, path) != 0;
     g_forceWindowed = g_borderless; // borderless = ventana forzada + sin bordes
     g_altF4 = GetPrivateProfileIntA("Display", "AltF4Quit", 1, path) != 0;
