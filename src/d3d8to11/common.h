@@ -26,6 +26,8 @@ struct Config {
     int fpsLimit = 0;           // [Renderer] FPSLimit (0 = off)
     int forceAnisotropy = 16;   // [Renderer] Anisotropy (0/1 = use game setting)
     bool applyGamma = true;     // [Renderer] ApplyGammaRamp
+    int msaa = 4;               // [Renderer] MSAA: 0/1 off, 2, 4, 8 samples (3D scene and HUD)
+    bool alphaToCoverage = true; // [Renderer] AlphaToCoverage: smooth alpha-tested foliage under MSAA
     bool debugLayer = false;    // [Debug] D3D11DebugLayer
     bool dumpShaders = false;   // [Debug] DumpShaders (writes generated HLSL to d3d8to11_shaders\)
     bool sunLighting = false;       // [Lighting] Enabled: sun shadows
@@ -39,6 +41,14 @@ struct Config {
     float sunAmbient = 0.60f, sunDirect = 0.55f, shadowStrength = 0.55f;
     float sunMinElevation = 0.35f;  // minimum sun height (sin of elevation), avoids endless shadows
     float sunDirection[3] = { -0.35f, 0.82f, -0.45f };
+    // [Post] sunlight and colour, applied to the world before the HUD (sun.cpp resolve pass)
+    bool postEnabled = false;       // [Post] Enabled
+    float sunBoost = 0.25f;         // [Post] SunBoost: extra light on sunlit surfaces
+    float shadowCool = 0.5f;        // [Post] ShadowCool: blue tint in shadows
+    float exposure = 1.0f;          // [Post] Exposure
+    float contrast = 1.08f;         // [Post] Contrast
+    float saturation = 1.1f;        // [Post] Saturation
+    float warmth = 0.15f;           // [Post] Warmth (-1 cold .. 1 warm)
     int overlayKey = VK_INSERT;     // [Overlay] Key: virtual-key code that opens the settings panel
     bool showFps = false;           // [Overlay] ShowFPS: small counter while the panel is closed
     float overlayScale = 1.0f;      // [Overlay] Scale

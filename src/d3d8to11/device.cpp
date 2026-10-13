@@ -254,14 +254,18 @@ bool Device::CreateSwapChainAndBackBuffer()
 
     if (m_backBuffer) { m_backBuffer->m_holdsDeviceRef = false; m_backBuffer->Release(); m_backBuffer = nullptr; }
     if (m_autoDepth) { m_autoDepth->m_holdsDeviceRef = false; m_autoDepth->Release(); m_autoDepth = nullptr; }
+    m_msaaApplied = SupportedSamples(g_config.msaa);
     m_backBuffer = new Surface(this, nullptr, 0, m_pp.BackBufferWidth, m_pp.BackBufferHeight, m_pp.BackBufferFormat,
                                D8USAGE_RENDERTARGET, D8POOL_DEFAULT);
+    m_backBuffer->m_samples = m_msaaApplied;
     if (!m_backBuffer->CreateStandalone()) { Log("back buffer creation failed"); return false; }
     if (m_pp.EnableAutoDepthStencil) {
         m_autoDepth = new Surface(this, nullptr, 0, m_pp.BackBufferWidth, m_pp.BackBufferHeight,
                                   m_pp.AutoDepthStencilFormat, D8USAGE_DEPTHSTENCIL, D8POOL_DEFAULT);
+        m_autoDepth->m_samples = m_msaaApplied;
         if (!m_autoDepth->CreateStandalone()) { Log("depth buffer creation failed"); return false; }
     }
+    Log("MSAA %ux", m_msaaApplied);
     SetRef(m_rt, m_backBuffer);
     SetRef(m_ds, m_autoDepth);
     m_rtDirty = true;
@@ -435,7 +439,9 @@ HRESULT Device::CopyRects(ID8Surface* src, const RECT* rects, UINT count, ID8Sur
     Surface* d = static_cast<Surface*>(dst);
     if (!s || !d) return D8ERR_INVALIDCALL;
     if (s->Resource() && d->Resource() && !count) {
-        m_ctx->CopySubresourceRegion(d->Resource(), d->Subresource(), 0, 0, 0, s->Resource(), s->Subresource(), nullptr);
+        if (d->m_samples > 1) { LogOnce("copyrects-ms", "CopyRects into the MSAA back buffer skipped"); return S_OK; }
+        ID3D11Texture2D* source = s->m_samples > 1 ? s->ResolvedTexture() : s->Resource();
+        m_ctx->CopySubresourceRegion(d->Resource(), d->Subresource(), 0, 0, 0, source, s->Subresource(), nullptr);
         return S_OK;
     }
     LogOnce("copyrects", "CopyRects: only whole GPU surface copies are supported");
@@ -484,11 +490,48 @@ HRESULT Device::GetDepthStencilSurface(ID8Surface** out)
     return S_OK;
 }
 
+// Highest sample count <= requested that the GPU supports for both back buffer formats.
+UINT Device::SupportedSamples(int requested)
+{
+    UINT n = requested >= 8 ? 8 : requested >= 4 ? 4 : requested >= 2 ? 2 : 1;
+    for (; n > 1; n /= 2) {
+        UINT q1 = 0, q2 = 0;
+        m_device->CheckMultisampleQualityLevels(DXGI_FORMAT_B8G8R8A8_UNORM, n, &q1);
+        m_device->CheckMultisampleQualityLevels(DXGI_FORMAT_D24_UNORM_S8_UINT, n, &q2);
+        if (q1 && q2) break;
+    }
+    return n;
+}
+
+// [Renderer] MSAA changed (overlay): rebuild the back buffer and depth behind the same Surfaces.
+void Device::ApplyMsaa()
+{
+    const UINT want = SupportedSamples(g_config.msaa);
+    if (want == m_msaaApplied || !m_backBuffer) return;
+    m_ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    m_backBuffer->m_samples = want;
+    bool ok = m_backBuffer->CreateStandalone();
+    if (m_autoDepth) {
+        m_autoDepth->m_samples = want;
+        ok = m_autoDepth->CreateStandalone() && ok;
+        if (ok) m_ctx->ClearDepthStencilView(m_autoDepth->Dsv(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1, 0);
+    }
+    m_msaaApplied = want;
+    m_rtDirty = true;
+    Log("MSAA changed to %ux%s", want, ok ? "" : " (surface creation failed)");
+}
+
 void Device::ApplyRenderTargets()
 {
     if (!m_rtDirty) return;
     ID3D11RenderTargetView* rtv = m_rt ? m_rt->Rtv() : nullptr;
     ID3D11DepthStencilView* dsv = m_ds ? m_ds->Dsv() : nullptr;
+    if (rtv && dsv && m_rt->m_samples != m_ds->m_samples) {
+        // Only the back buffer and its auto depth are multisampled.
+        LogOnce("rt-ds-samples", "render target and depth sample counts differ (%u/%u): depth unbound",
+                m_rt->m_samples, m_ds->m_samples);
+        dsv = nullptr;
+    }
     // A texture bound for sampling cannot also be a render target: drop all texture bindings
     // so PrepareDraw rebinds them.
     ID3D11ShaderResourceView* nulls[kMaxStages] = {};
@@ -933,7 +976,8 @@ ID3D11BlendState* Device::GetBlendState()
     if (src == 12) { src = 5; dst = 6; }       // BOTHSRCALPHA
     else if (src == 13) { src = 6; dst = 5; }  // BOTHINVSRCALPHA
     const uint64_t key = (enable ? 1ull : 0ull) | ((uint64_t)src << 1) | ((uint64_t)dst << 9) |
-                         ((uint64_t)(m_rs[RS_BLENDOP] & 7) << 17) | ((uint64_t)(m_rs[RS_COLORWRITEENABLE] & 0xF) << 20);
+                         ((uint64_t)(m_rs[RS_BLENDOP] & 7) << 17) | ((uint64_t)(m_rs[RS_COLORWRITEENABLE] & 0xF) << 20) |
+                         ((uint64_t)(AlphaToCoverageActive() ? 1 : 0) << 24);
     auto it = m_blendStates.find(key);
     if (it != m_blendStates.end()) return it->second.Get();
     D3D11_BLEND_DESC bd = {};
@@ -946,6 +990,7 @@ ID3D11BlendState* Device::GetBlendState()
     r.DestBlendAlpha = MapBlend(dst, true);
     r.BlendOpAlpha = r.BlendOp;
     r.RenderTargetWriteMask = (UINT8)(m_rs[RS_COLORWRITEENABLE] & 0xF);
+    bd.AlphaToCoverageEnable = AlphaToCoverageActive();
     ComPtr<ID3D11BlendState> st;
     m_device->CreateBlendState(&bd, &st);
     m_blendStates[key] = st;
@@ -1052,6 +1097,7 @@ ID3D11PixelShader* Device::GetPixelShader()
         for (int s = 0; s < kMaxStages; s++) v.texDim[s] = TextureDim(m_textures[s]);
         v.alphaFunc = alphaFunc;
         v.shadowOnly = m_sun.flags[1] > 0.5f ? 1 : 0;
+        v.a2c = AlphaToCoverageActive() ? 1 : 0;
         for (auto& e : ps->variants) if (e.first == v) return e.second.Get();
         std::string error;
         std::string hlsl = TranslatePS(ps->func.data(), v, error);
@@ -1086,6 +1132,7 @@ ID3D11PixelShader* Device::GetPixelShader()
     k.alphaFunc = alphaFunc;
     k.specular = m_rs[RS_SPECULARENABLE] ? 1 : 0;
     k.shadowOnly = m_sun.flags[1] > 0.5f ? 1 : 0;
+    k.a2c = AlphaToCoverageActive() ? 1 : 0;
     std::string key((const char*)&k, sizeof(k));
     auto it = m_ffShaders.find(key);
     if (it != m_ffShaders.end()) return it->second.Get();
@@ -1134,14 +1181,14 @@ bool Device::PrepareDraw()
     }
     VertexShader8* vs = m_vertexShaders[idx];
     m_worldKind = WorldShaderKind(vs->parsed);
-    m_worldDraw = g_config.sunLighting && m_worldKind != 0 &&
+    m_worldDraw = (g_config.sunLighting || g_config.postEnabled) && m_worldKind != 0 &&
         (m_psHandle != 0 || m_rs[RS_ZWRITEENABLE]) &&
         m_rt == m_backBuffer && m_ds && m_rs[RS_ZENABLE] &&
         (m_worldKind == 2 || !m_rs[RS_ALPHABLENDENABLE] || m_rs[RS_ALPHATESTENABLE]) &&
         m_viewport.Width == m_backBuffer->m_width && m_viewport.Height == m_backBuffer->m_height;
-    m_worldCaster = m_worldDraw && m_rs[RS_ZWRITEENABLE] && (m_worldKind != 4 || g_config.grassShadows) &&
+    m_worldCaster = g_config.sunLighting && m_worldDraw && m_rs[RS_ZWRITEENABLE] && (m_worldKind != 4 || g_config.grassShadows) &&
         (m_worldKind != 2 || g_config.terrainShadows);
-    if (g_config.sunLighting && m_rt == m_backBuffer && m_worldKind != 0) {
+    if ((g_config.sunLighting || g_config.postEnabled) && m_rt == m_backBuffer && m_worldKind != 0) {
         LogOnce(std::string("sun-material-") + std::to_string(m_vsHandle) + "-" + std::to_string(m_psHandle),
             "Sun material VS %lx PS %lx kind %d receiver %d caster %d z %lu write %lu blend %lu alpha %lu",
             m_vsHandle,m_psHandle,m_worldKind,m_worldDraw,m_worldCaster,m_rs[RS_ZENABLE],
@@ -1483,7 +1530,7 @@ HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
     m_ctx->VSSetConstantBuffers(0, 1, m_clearCB.GetAddressOf());
     m_ctx->PSSetShader(m_presentPS.Get(), nullptr, 0);
     m_ctx->PSSetConstantBuffers(0, 1, m_clearCB.GetAddressOf());
-    ID3D11ShaderResourceView* srvs[2] = { m_backBuffer->m_srv.Get(), m_gammaSRV.Get() };
+    ID3D11ShaderResourceView* srvs[2] = { m_backBuffer->ResolvedSrv(), m_gammaSRV.Get() };
     m_ctx->PSSetShaderResources(0, 2, srvs);
     const bool sameSize = m_swapW == m_backBuffer->m_width && m_swapH == m_backBuffer->m_height;
     ID3D11SamplerState* smp[2] = { sameSize ? m_pointClamp.Get() : m_linearClamp.Get(), m_pointClamp.Get() };
@@ -1496,6 +1543,7 @@ HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
     HRESULT hr = m_swap->Present(g_config.syncInterval, 0);
     if (FAILED(hr)) LogOnce("presentfail", "Present failed 0x%08lx", hr);
     LimitFrameRate();
+    ApplyMsaa(); // after the frame is shown: the rebuilt back buffer starts empty
     m_frame++;
 
     // Everything bound above has to be rebound by the next draw.

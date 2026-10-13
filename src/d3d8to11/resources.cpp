@@ -154,27 +154,38 @@ bool Surface::CreateStandalone()
 {
     FormatInfo info = GetFormatInfo(m_format);
     if (info.dxgi == DXGI_FORMAT_UNKNOWN) { Log("surface: unsupported format %lu", m_format); return false; }
+    // Called again (with a new m_samples) when the MSAA level changes: the game keeps its
+    // pointer to this Surface, only the D3D11 objects behind it are replaced.
+    m_tex.Reset(); m_rtv.Reset(); m_dsv.Reset(); m_srv.Reset(); m_resolveTex.Reset(); m_resolveSrv.Reset();
+    const bool ms = m_samples > 1;
     if (m_usage & D8USAGE_DEPTHSTENCIL) {
         // Typeless so the sun shadow resolve can read scene depth through m_srv.
-        D3D11_TEXTURE2D_DESC td = { m_width, m_height, 1, 1, DXGI_FORMAT_R24G8_TYPELESS, { 1, 0 },
+        D3D11_TEXTURE2D_DESC td = { m_width, m_height, 1, 1, DXGI_FORMAT_R24G8_TYPELESS, { m_samples, 0 },
                                     D3D11_USAGE_DEFAULT, D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE, 0, 0 };
         if (FAILED(m_dev->D3D()->CreateTexture2D(&td, nullptr, &m_tex))) return false;
         D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
         dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-        dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        dd.ViewDimension = ms ? D3D11_DSV_DIMENSION_TEXTURE2DMS : D3D11_DSV_DIMENSION_TEXTURE2D;
         if (FAILED(m_dev->D3D()->CreateDepthStencilView(m_tex.Get(), &dd, &m_dsv))) return false;
         D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
         sd.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.ViewDimension = ms ? D3D11_SRV_DIMENSION_TEXTURE2DMS : D3D11_SRV_DIMENSION_TEXTURE2D;
         sd.Texture2D.MipLevels = 1;
         m_dev->D3D()->CreateShaderResourceView(m_tex.Get(), &sd, &m_srv);
         return true;
     }
     if (m_usage & D8USAGE_RENDERTARGET) {
-        D3D11_TEXTURE2D_DESC td = { m_width, m_height, 1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, { 1, 0 },
+        D3D11_TEXTURE2D_DESC td = { m_width, m_height, 1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, { m_samples, 0 },
                                     D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, 0, 0 };
         if (FAILED(m_dev->D3D()->CreateTexture2D(&td, nullptr, &m_tex))) return false;
         if (FAILED(m_dev->D3D()->CreateRenderTargetView(m_tex.Get(), nullptr, &m_rtv))) return false;
+        if (ms) {
+            // Single-sample copy used for presenting and read-back (ResolvedTexture).
+            td.SampleDesc.Count = 1;
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED(m_dev->D3D()->CreateTexture2D(&td, nullptr, &m_resolveTex))) return false;
+            return SUCCEEDED(m_dev->D3D()->CreateShaderResourceView(m_resolveTex.Get(), nullptr, &m_resolveSrv));
+        }
         return SUCCEEDED(m_dev->D3D()->CreateShaderResourceView(m_tex.Get(), nullptr, &m_srv));
     }
     // Image surface: CPU memory only.
@@ -185,6 +196,20 @@ bool Surface::CreateStandalone()
 ID3D11Texture2D* Surface::Resource()
 {
     return m_container ? m_container->m_tex.Get() : m_tex.Get();
+}
+
+ID3D11Texture2D* Surface::ResolvedTexture()
+{
+    if (m_samples <= 1 || !m_resolveTex) return m_tex.Get();
+    m_dev->Ctx()->ResolveSubresource(m_resolveTex.Get(), 0, m_tex.Get(), 0, DXGI_FORMAT_B8G8R8A8_UNORM);
+    return m_resolveTex.Get();
+}
+
+ID3D11ShaderResourceView* Surface::ResolvedSrv()
+{
+    if (m_samples <= 1) return m_srv.Get();
+    ResolvedTexture();
+    return m_resolveSrv.Get();
 }
 
 ID3D11RenderTargetView* Surface::Rtv()
@@ -208,14 +233,15 @@ HRESULT Surface::LockRect(D3D8LockedRect* lr, const RECT* rect, DWORD flags)
     const UINT pitch = D8RowPitch(m_format, m_width);
     if (m_tex) {
         // Render target read-back (screenshots): copy through a staging texture.
+        ID3D11Texture2D* source = ResolvedTexture();
         D3D11_TEXTURE2D_DESC td;
-        m_tex->GetDesc(&td);
+        source->GetDesc(&td);
         td.Usage = D3D11_USAGE_STAGING;
         td.BindFlags = 0;
         td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         ComPtr<ID3D11Texture2D> staging;
         if (FAILED(m_dev->D3D()->CreateTexture2D(&td, nullptr, &staging))) return D8ERR_INVALIDCALL;
-        m_dev->Ctx()->CopyResource(staging.Get(), m_tex.Get());
+        m_dev->Ctx()->CopyResource(staging.Get(), source);
         D3D11_MAPPED_SUBRESOURCE map;
         if (FAILED(m_dev->Ctx()->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map))) return D8ERR_INVALIDCALL;
         m_lockData.resize((size_t)pitch * m_height);

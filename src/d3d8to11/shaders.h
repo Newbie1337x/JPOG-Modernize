@@ -34,6 +34,7 @@ struct PSVariant {
     BYTE texDim[kMaxStages] = {};
     BYTE alphaFunc = 0; // 0 = alpha test off, otherwise D3DCMPFUNC
     BYTE shadowOnly = 0;
+    BYTE a2c = 0;       // alpha-to-coverage instead of the alpha test discard
     bool operator==(const PSVariant& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
 };
 std::string TranslatePS(const DWORD* func, const PSVariant& variant, std::string& error);
@@ -49,7 +50,7 @@ struct FFKey {
     BYTE alphaFunc;
     BYTE specular;
     BYTE shadowOnly;
-    BYTE pad;
+    BYTE a2c;
 };
 std::string GenerateFFPS(const FFKey& key);
 

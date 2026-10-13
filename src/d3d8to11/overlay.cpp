@@ -220,6 +220,23 @@ void Device::DrawOverlay()
             ImGui::Text("Current sun (Y up): %.2f %.2f %.2f", m_sun.direction[0], -m_sun.direction[1], m_sun.direction[2]);
         }
 
+        if (ImGui::CollapsingHeader("Sunlight & colour", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Enabled##post", &g_config.postEnabled);
+            ImGui::BeginDisabled(!g_config.postEnabled);
+            ImGui::SliderFloat("Sunlight", &g_config.sunBoost, 0.0f, 1.0f, "%.2f");
+            ImGui::SetItemTooltip("Warm extra light on everything the sun reaches (outside shadows).");
+            ImGui::SliderFloat("Cool shadows", &g_config.shadowCool, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Exposure", &g_config.exposure, 0.5f, 2.0f, "%.2f");
+            ImGui::SliderFloat("Contrast", &g_config.contrast, 0.5f, 1.5f, "%.2f");
+            ImGui::SliderFloat("Saturation", &g_config.saturation, 0.0f, 2.0f, "%.2f");
+            ImGui::SliderFloat("Warmth", &g_config.warmth, -1.0f, 1.0f, "%.2f");
+            if (ImGui::Button("Defaults##post")) {
+                g_config.sunBoost = 0.25f; g_config.shadowCool = 0.5f; g_config.exposure = 1.0f;
+                g_config.contrast = 1.08f; g_config.saturation = 1.1f; g_config.warmth = 0.15f;
+            }
+            ImGui::EndDisabled();
+        }
+
         if (ImGui::CollapsingHeader("Display")) {
             ImGui::SliderInt("FPS limit", &g_config.fpsLimit, 0, 360, g_config.fpsLimit ? "%d" : "Off");
             bool vsync = g_config.syncInterval != 0;
@@ -229,6 +246,12 @@ void Device::DrawOverlay()
             for (int i = 0; i < 5; i++) if (anisos[i] <= g_config.forceAnisotropy) a = i;
             const char* alabels[] = { "Game setting", "2x", "4x", "8x", "16x" };
             if (ImGui::Combo("Anisotropic filtering", &a, alabels, 5)) g_config.forceAnisotropy = anisos[a];
+            static const int msaaValues[] = { 1, 2, 4, 8 };
+            int m = 0;
+            for (int i = 0; i < 4; i++) if (msaaValues[i] <= g_config.msaa) m = i;
+            const char* mlabels[] = { "Off", "2x", "4x", "8x" };
+            if (ImGui::Combo("Antialiasing (MSAA)", &m, mlabels, 4)) g_config.msaa = msaaValues[m];
+            ImGui::Checkbox("Smooth foliage edges (alpha to coverage)", &g_config.alphaToCoverage);
             ImGui::Checkbox("Apply game brightness/gamma", &g_config.applyGamma);
             ImGui::Checkbox("FPS counter when closed", &g_config.showFps);
         }

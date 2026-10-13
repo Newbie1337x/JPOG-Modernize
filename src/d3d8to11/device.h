@@ -245,7 +245,12 @@ private:
     ComPtr<ID3D11DepthStencilState> m_sunDepth;
     ComPtr<ID3D11RasterizerState> m_sunRaster;
     ComPtr<ID3D11VertexShader> m_resolveVS;
-    ComPtr<ID3D11PixelShader> m_resolvePS;
+    ComPtr<ID3D11PixelShader> m_resolvePS, m_resolvePSMS;
+    ComPtr<ID3D11Texture2D> m_sceneCopy;
+    ComPtr<ID3D11ShaderResourceView> m_sceneCopySRV;
+    UINT m_sceneCopyW = 0, m_sceneCopyH = 0;
+    bool EnsureSceneCopy();
+    void CopySceneColor();
     ComPtr<ID3D11BlendState> m_multiplyBlend;
     SunConstants m_sun = {};
     SunConstants m_sunUploaded = {};
@@ -271,6 +276,14 @@ private:
     bool m_dumped = false;
     void TraceFlush();
     bool EnsureShadowMap();
+    UINT SupportedSamples(int requested);
+    void ApplyMsaa();
+    UINT m_msaaApplied = 1;
+    // Alpha-tested draws to the multisampled back buffer use alpha-to-coverage instead of a hard cut.
+    bool AlphaToCoverageActive() const {
+        return g_config.alphaToCoverage && m_rt && m_rt->m_samples > 1 && m_rs[RS_ALPHATESTENABLE] &&
+               (m_rs[RS_ALPHAFUNC] == 5 || m_rs[RS_ALPHAFUNC] == 7) && m_sun.flags[1] < 0.5f;
+    }
     void DrawOverlay();     // overlay.cpp
     void ShutdownOverlay();
     UINT m_lastCasters = 0;

@@ -41,6 +41,8 @@ public:
     ID3D11RenderTargetView* Rtv();
     ID3D11DepthStencilView* Dsv() { return m_dsv.Get(); }
     ID3D11Texture2D* Resource();   // backing texture (container texture for levels)
+    ID3D11Texture2D* ResolvedTexture();       // single-sample view of a standalone render target
+    ID3D11ShaderResourceView* ResolvedSrv();
     UINT Subresource() const { return m_level; }
 
     Device* m_dev;
@@ -49,10 +51,13 @@ public:
     DWORD m_format, m_usage, m_pool;
     LONG m_ref = 1;
     bool m_holdsDeviceRef = false;          // app-created standalone surfaces keep the device alive
+    UINT m_samples = 1;                     // MSAA sample count (back buffer / auto depth)
     ComPtr<ID3D11Texture2D> m_tex;          // standalone only
     ComPtr<ID3D11RenderTargetView> m_rtv;
     ComPtr<ID3D11DepthStencilView> m_dsv;
     ComPtr<ID3D11ShaderResourceView> m_srv; // standalone render targets (back buffer)
+    ComPtr<ID3D11Texture2D> m_resolveTex;   // MSAA back buffer: resolved copy
+    ComPtr<ID3D11ShaderResourceView> m_resolveSrv;
     std::vector<BYTE> m_lockData;           // read-back / image surface storage
 };
 

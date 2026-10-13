@@ -62,6 +62,8 @@ void LoadConfig()
     g_config.fpsLimit = GetPrivateProfileIntA("Renderer", "FPSLimit", 0, ini.c_str());
     g_config.forceAnisotropy = GetPrivateProfileIntA("Renderer", "Anisotropy", 16, ini.c_str());
     g_config.applyGamma = GetPrivateProfileIntA("Renderer", "ApplyGammaRamp", 1, ini.c_str()) != 0;
+    g_config.msaa = GetPrivateProfileIntA("Renderer", "MSAA", 4, ini.c_str());
+    g_config.alphaToCoverage = GetPrivateProfileIntA("Renderer", "AlphaToCoverage", 1, ini.c_str()) != 0;
     g_config.debugLayer = GetPrivateProfileIntA("Debug", "D3D11DebugLayer", 0, ini.c_str()) != 0;
     g_config.dumpShaders = GetPrivateProfileIntA("Debug", "DumpShaders", 0, ini.c_str()) != 0;
     g_config.sunLighting = GetPrivateProfileIntA("Lighting", "Enabled", 0, ini.c_str()) != 0;
@@ -89,6 +91,19 @@ void LoadConfig()
     g_config.sunDirection[0] = readFloat("SunX", -0.35f, -1, 1);
     g_config.sunDirection[1] = readFloat("SunY", 0.82f, 0.05f, 1);
     g_config.sunDirection[2] = readFloat("SunZ", -0.45f, -1, 1);
+    auto readPost = [&](const char* key, float fallback, float lo, float hi) {
+        char value[64];
+        GetPrivateProfileStringA("Post", key, "", value, sizeof(value), ini.c_str());
+        float f = value[0] ? (float)atof(value) : fallback;
+        return f >= lo && f <= hi ? f : fallback;
+    };
+    g_config.postEnabled = GetPrivateProfileIntA("Post", "Enabled", 0, ini.c_str()) != 0;
+    g_config.sunBoost = readPost("SunBoost", 0.25f, 0, 1);
+    g_config.shadowCool = readPost("ShadowCool", 0.5f, 0, 1);
+    g_config.exposure = readPost("Exposure", 1.0f, 0.5f, 2);
+    g_config.contrast = readPost("Contrast", 1.08f, 0.5f, 1.5f);
+    g_config.saturation = readPost("Saturation", 1.1f, 0, 2);
+    g_config.warmth = readPost("Warmth", 0.15f, -1, 1);
     g_config.overlayKey = GetPrivateProfileIntA("Overlay", "Key", VK_INSERT, ini.c_str());
     g_config.showFps = GetPrivateProfileIntA("Overlay", "ShowFPS", 0, ini.c_str()) != 0;
     GetPrivateProfileStringA("Overlay", "Scale", "1.0", buf, sizeof(buf), ini.c_str());
@@ -112,6 +127,8 @@ void SaveConfig()
     putInt("Renderer", "FPSLimit", g_config.fpsLimit);
     putInt("Renderer", "Anisotropy", g_config.forceAnisotropy);
     putInt("Renderer", "ApplyGammaRamp", g_config.applyGamma);
+    putInt("Renderer", "MSAA", g_config.msaa);
+    putInt("Renderer", "AlphaToCoverage", g_config.alphaToCoverage);
     putInt("Lighting", "Enabled", g_config.sunLighting);
     putInt("Lighting", "ShadowResolution", g_config.shadowResolution);
     putFloat("Lighting", "ShadowDistance", g_config.shadowDistance);
@@ -127,6 +144,13 @@ void SaveConfig()
     putInt("Lighting", "ReplaceOriginal", g_config.replaceLighting);
     putFloat("Lighting", "Ambient", g_config.sunAmbient);
     putFloat("Lighting", "SunIntensity", g_config.sunDirect);
+    putInt("Post", "Enabled", g_config.postEnabled);
+    putFloat("Post", "SunBoost", g_config.sunBoost);
+    putFloat("Post", "ShadowCool", g_config.shadowCool);
+    putFloat("Post", "Exposure", g_config.exposure);
+    putFloat("Post", "Contrast", g_config.contrast);
+    putFloat("Post", "Saturation", g_config.saturation);
+    putFloat("Post", "Warmth", g_config.warmth);
     putInt("Overlay", "Key", g_config.overlayKey);
     putInt("Overlay", "ShowFPS", g_config.showFps);
     putFloat("Overlay", "Scale", g_config.overlayScale);

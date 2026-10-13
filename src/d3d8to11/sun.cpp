@@ -24,7 +24,9 @@ struct ResolveConstants {
     float sunDir[4];
     float params[4]; // strength, 1/map size, depth bias (light depth units), normal offset (world)
     float screen[4]; // 1/W, 1/H, half-pixel offset applied by the vertex shaders (x, y)
-    float misc[4];   // debug view, shadow distance, -, -
+    float misc[4];   // debug view, shadow distance, light depth range, shadows on
+    float grade0[4]; // exposure, contrast, saturation, warmth
+    float grade1[4]; // sun boost, shadow cool, post on, -
 };
 
 const char* kResolveVS =
@@ -32,11 +34,19 @@ const char* kResolveVS =
     "  float2 uv = float2((id << 1) & 2, id & 2);\n"
     "  return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); }\n";
 
+// Compiled twice: MSAA 0 (Texture2D depth) and MSAA 1 (Texture2DMS depth, sample 0).
 const char* kResolvePS =
     "cbuffer Resolve : register(b0) { float4 clipToWorld[4]; float4 lightRows[4]; float4 sunDir;\n"
-    "  float4 params; float4 screen; float4 misc; };\n"
+    "  float4 params; float4 screen; float4 misc; float4 grade0; float4 grade1; };\n"
+    "#if MSAA\n"
+    "Texture2DMS<float> sceneDepth : register(t0);\n"
+    "float LoadDepth(int2 p) { return sceneDepth.Load(p, 0); }\n"
+    "#else\n"
     "Texture2D<float> sceneDepth : register(t0);\n"
+    "float LoadDepth(int2 p) { return sceneDepth.Load(int3(p, 0)); }\n"
+    "#endif\n"
     "Texture2D<float> shadowMap : register(t1);\n"
+    "Texture2D<float4> sceneColor : register(t2);\n"
     "SamplerComparisonState cmp : register(s0);\n"
     "static const float2 kTaps[12] = { float2(-0.326,-0.406), float2(-0.840,-0.074), float2(-0.696,0.457),\n"
     "  float2(-0.203,0.621), float2(0.962,-0.195), float2(0.473,-0.480), float2(0.519,0.767),\n"
@@ -47,49 +57,68 @@ const char* kResolvePS =
     "  float4 c = float4(ndc, d, 1);\n"
     "  float4 w = float4(dot(c, clipToWorld[0]), dot(c, clipToWorld[1]), dot(c, clipToWorld[2]), dot(c, clipToWorld[3]));\n"
     "  return w.xyz / w.w; }\n"
-    "float3 WorldAt(int2 p) { return Unproject(p + 0.5, sceneDepth.Load(int3(p, 0))); }\n"
+    "float3 WorldAt(int2 p) { return Unproject(p + 0.5, LoadDepth(p)); }\n"
+    // Soft shoulder above 0.8 so boosted highlights roll off instead of clipping.
+    "float3 Shoulder(float3 x) { return x <= 0.8 ? x : 0.8 + 0.2 * (1 - exp(-(x - 0.8) / 0.2)); }\n"
     "float4 main(float4 pos : SV_Position) : SV_Target {\n"
     "  int2 p = int2(pos.xy);\n"
-    "  if (misc.x == 5 && pos.x < 540 && pos.y < 540) {\n"
+    "  float3 color = sceneColor.Load(int3(p, 0)).rgb;\n"
+    "  if (misc.x == 5 && misc.w > 0.5 && pos.x < 540 && pos.y < 540) {\n"
     "    uint mw, mh; shadowMap.GetDimensions(mw, mh);\n"
     "    float v = shadowMap.Load(int3(pos.xy / 540 * mw, 0));\n"
     "    return v >= 1 ? float4(0.2, 0.2, 0.6, 1) : float4(frac(v * misc.z / 2).xxx, 1); }\n"
-    "  float d = sceneDepth.Load(int3(p, 0));\n"
-    "  if (d >= 0.999999) { if (misc.x >= 3) return float4(1, 0.6, 1, 1); discard; }\n"
-    "  float3 P = Unproject(pos.xy, d);\n"
-    "  float3 V = Unproject(pos.xy, 0) - P;\n"
-    "  float dist = length(V);\n"
+    "  float d = LoadDepth(p);\n"
+    "  bool sky = d >= 0.999999;\n"
+    "  float shadow = 0, vis = 1;\n"
+    "  if (sky && misc.x >= 3) return float4(1, 0.6, 1, 1);\n"
+    "  if (!sky && misc.w > 0.5) {\n"
+    "    float3 P = Unproject(pos.xy, d);\n"
+    "    float3 V = Unproject(pos.xy, 0) - P;\n"
+    "    float dist = length(V);\n"
     // Normal from depth: per axis take the neighbour on the same surface (smaller step).
-    "  float3 L = WorldAt(p - int2(1, 0)), R = WorldAt(p + int2(1, 0));\n"
-    "  float3 U = WorldAt(p - int2(0, 1)), D = WorldAt(p + int2(0, 1));\n"
-    "  float3 dx = dot(R - P, R - P) < dot(P - L, P - L) ? R - P : P - L;\n"
-    "  float3 dy = dot(D - P, D - P) < dot(P - U, P - U) ? D - P : P - U;\n"
-    "  float3 N = cross(dy, dx); float nl = dot(N, N);\n"
-    "  N = nl > 1e-20 ? N * rsqrt(nl) : V / max(dist, 1e-6);\n"
-    "  if (dot(N, V) < 0) N = -N;\n"
-    "  if (misc.x == 4) return float4(N * 0.5 + 0.5, 1);\n"
-    "  if (misc.x == 6) { float2 g = frac(P.xz / 8); return float4(g.x < 0.08 || g.y < 0.08 ? float3(1, 0, 0) : frac(P.yyy / 4), 1); }\n"
-    "  float ndl = dot(N, sunDir.xyz);\n"
+    "    float3 L = WorldAt(p - int2(1, 0)), R = WorldAt(p + int2(1, 0));\n"
+    "    float3 U = WorldAt(p - int2(0, 1)), D = WorldAt(p + int2(0, 1));\n"
+    "    float3 dx = dot(R - P, R - P) < dot(P - L, P - L) ? R - P : P - L;\n"
+    "    float3 dy = dot(D - P, D - P) < dot(P - U, P - U) ? D - P : P - U;\n"
+    "    float3 N = cross(dy, dx); float nl = dot(N, N);\n"
+    "    N = nl > 1e-20 ? N * rsqrt(nl) : V / max(dist, 1e-6);\n"
+    "    if (dot(N, V) < 0) N = -N;\n"
+    "    if (misc.x == 4) return float4(N * 0.5 + 0.5, 1);\n"
+    "    if (misc.x == 6) { float2 g = frac(P.xz / 8); return float4(g.x < 0.08 || g.y < 0.08 ? float3(1, 0, 0) : frac(P.yyy / 4), 1); }\n"
+    "    float ndl = dot(N, sunDir.xyz);\n"
     // Offset toward the sun: robust where depth normals are noisy (grass, foliage).
-    "  float3 Q = P + sunDir.xyz * params.w * 3;\n"
-    "  float4 Q4 = float4(Q, 1);\n"
-    "  float3 q = float3(dot(Q4, lightRows[0]), dot(Q4, lightRows[1]), dot(Q4, lightRows[2]));\n"
-    "  float2 uv = q.xy * float2(0.5, -0.5) + 0.5;\n"
-    "  float edge = saturate(min(min(uv.x, 1 - uv.x), min(uv.y, 1 - uv.y)) * 12);\n"
-    "  float vis = 1;\n"
-    "  if (edge > 0 && q.z > 0 && q.z < 1) {\n"
-    "    float z = q.z - params.z, sum = 0;\n"
-    "    [unroll] for (int k = 0; k < 12; k++) sum += shadowMap.SampleCmpLevelZero(cmp, uv + kTaps[k] * params.y * 1.6, z);\n"
-    "    vis = sum / 12;\n"
-    "  }\n"
+    "    float3 Q = P + sunDir.xyz * params.w * 3;\n"
+    "    float4 Q4 = float4(Q, 1);\n"
+    "    float3 q = float3(dot(Q4, lightRows[0]), dot(Q4, lightRows[1]), dot(Q4, lightRows[2]));\n"
+    "    float2 uv = q.xy * float2(0.5, -0.5) + 0.5;\n"
+    "    float edge = saturate(min(min(uv.x, 1 - uv.x), min(uv.y, 1 - uv.y)) * 12);\n"
+    "    if (edge > 0 && q.z > 0 && q.z < 1) {\n"
+    "      float z = q.z - params.z, sum = 0;\n"
+    "      [unroll] for (int k = 0; k < 12; k++) sum += shadowMap.SampleCmpLevelZero(cmp, uv + kTaps[k] * params.y * 1.6, z);\n"
+    "      vis = sum / 12;\n"
+    "    }\n"
+    "    if (misc.x == 7) return float4(vis.xxx, 1);\n"
     // Faces turned away from the sun are already dark in the game's own lighting.
-    "  float facing = lerp(0.6, 1, saturate(ndl * 4));\n"
-    "  float fade = saturate((misc.y - dist) / (misc.y * 0.2));\n"
-    "  if (misc.x == 7) return float4(vis.xxx, 1);\n"
-    "  float shadow = (1 - vis) * edge * facing * fade;\n"
+    "    float facing = lerp(0.6, 1, saturate(ndl * 4));\n"
+    "    float fade = saturate((misc.y - dist) / (misc.y * 0.2));\n"
+    "    shadow = (1 - vis) * edge * facing * fade;\n"
+    "  }\n"
     "  float3 shade = (1 - params.x * shadow) * lerp(float3(1, 1, 1), float3(0.93, 0.96, 1.0), shadow);\n"
-    "  return float4(shade, 1); }\n";
-
+    "  if (misc.x == 3) return float4(shade, 1);\n"
+    "  float3 c = color * shade;\n"
+    "  if (grade1.z > 0.5) {\n"
+    // Sunlight: warm lift where the sun reaches (everything outside the shadow), cool shadows.
+    "    float lit = sky ? 0 : 1 - shadow;\n"
+    "    c *= 1 + grade1.x * lit * float3(1.0, 0.93, 0.78);\n"
+    "    c = lerp(c, c * float3(0.88, 0.94, 1.1), grade1.y * saturate(shadow * 2));\n"
+    "    c *= grade0.x;\n"
+    "    float luma = dot(c, float3(0.2126, 0.7152, 0.0722));\n"
+    "    c = lerp(luma.xxx, c, grade0.z);\n"
+    "    c *= float3(1 + 0.08 * grade0.w, 1, 1 - 0.08 * grade0.w);\n"
+    "    c = (c - 0.5) * grade0.y + 0.5;\n"
+    "    c = Shoulder(max(c, 0));\n"
+    "  }\n"
+    "  return float4(c, 1); }\n";
 void LoadRows(const float (&rows)[4][4], XMMATRIX& out)
 {
     // rows[i] are dot-product rows (clip_i = rows[i] . p); as a DirectXMath row-vector matrix
@@ -146,10 +175,12 @@ bool Device::CreateSunResources()
         FAILED(m_device->CreateBlendState(&blend, &m_multiplyBlend))) return false;
 
     auto vs = CompileHLSL(kResolveVS, "vs_4_0", "sun_resolve_vs");
-    auto ps = CompileHLSL(kResolvePS, "ps_4_0", "sun_resolve_ps");
-    if (!vs || !ps) return false;
+    auto ps = CompileHLSL(std::string("#define MSAA 0\n") + kResolvePS, "ps_4_1", "sun_resolve_ps");
+    auto psMS = CompileHLSL(std::string("#define MSAA 1\n") + kResolvePS, "ps_4_1", "sun_resolve_ps_ms");
+    if (!vs || !ps || !psMS) return false;
     if (FAILED(m_device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &m_resolveVS)) ||
-        FAILED(m_device->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &m_resolvePS)))
+        FAILED(m_device->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &m_resolvePS)) ||
+        FAILED(m_device->CreatePixelShader(psMS->GetBufferPointer(), psMS->GetBufferSize(), nullptr, &m_resolvePSMS)))
         return false;
     Log("Sun shadows: enabled %d, %d map, distance %.0f, strength %.2f, sun %s, grass %d, replacement lighting %d, debug %d",
         g_config.sunLighting, g_config.shadowResolution, g_config.shadowDistance, g_config.shadowStrength, g_config.sunFromGame ? "from game" : "fixed",
@@ -185,7 +216,7 @@ bool Device::EnsureShadowMap()
 
 void Device::StartSunFrame()
 {
-    if (!EnsureShadowMap()) return;
+    if (g_config.sunLighting && !EnsureShadowMap()) return;
     XMMATRIX vp;
     float rows[4][4];
     memcpy(rows, m_vsConst, sizeof(rows));
@@ -236,7 +267,7 @@ void Device::StartSunFrame()
     XMFLOAT3 l, h;
     XMStoreFloat3(&l, lo); XMStoreFloat3(&h, hi);
     if (!(l.x < h.x) || !std::isfinite(l.x + l.y + l.z + h.x + h.y + h.z)) return;
-    const float res = (float)m_sunMapSize;
+    const float res = (float)(m_sunMapSize ? m_sunMapSize : 4096);
     float size = (h.x - l.x > h.y - l.y ? h.x - l.x : h.y - l.y) * 1.15f + 16.0f;
     size = std::ceil(size / 32.0f) * 32.0f; // stable texel size while the camera pans
     const float texel = size / res;
@@ -251,7 +282,7 @@ void Device::StartSunFrame()
     m_sunTexelWorld = texel;
     m_sun.settings[0] = g_config.sunAmbient; m_sun.settings[1] = g_config.sunDirect;
     m_sun.settings[2] = g_config.shadowStrength; m_sun.settings[3] = 1.0f / res;
-    m_ctx->ClearDepthStencilView(m_sunDSV.Get(), D3D11_CLEAR_DEPTH, 1, 0);
+    if (g_config.sunLighting && m_sunDSV) m_ctx->ClearDepthStencilView(m_sunDSV.Get(), D3D11_CLEAR_DEPTH, 1, 0);
     m_sunStarted = true;
     LogOnce("sun-viewport", "Sun camera viewport %lu,%lu %lux%lu depth %.3f..%.3f; camera rows z %g %g %g %g w %g %g %g %g",
             m_viewport.X, m_viewport.Y, m_viewport.Width, m_viewport.Height, m_viewport.MinZ, m_viewport.MaxZ,
@@ -299,7 +330,7 @@ void Device::CaptureGameSun()
 
 void Device::UpdateSun(bool shadowPass)
 {
-    if (!g_config.sunLighting) {
+    if (!g_config.sunLighting && !g_config.postEnabled) {
         m_worldDraw = false;
     } else {
         if (m_worldDraw && m_worldKind == 2 && !m_sunStarted && !m_sunResolved) StartSunFrame();
@@ -330,7 +361,7 @@ void Device::UpdateSun(bool shadowPass)
 
 void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base)
 {
-    if (!m_worldCaster || !m_sunStarted || m_sunResolved || !m_sunDSV) return;
+    if (!g_config.sunLighting || !m_worldCaster || !m_sunStarted || m_sunResolved || !m_sunDSV) return;
     UpdateSun(true);
     ID3D11PixelShader* depthPixel = GetPixelShader();
     if (!depthPixel) { UpdateSun(false); return; }
@@ -351,13 +382,17 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base)
     m_lastBlend = nullptr; m_lastDepth = nullptr; m_lastRaster = nullptr;
 }
 
+// End of the world pass: copies the scene and redraws it with sun shadows and the [Post]
+// sunlight/colour grade applied, before the HUD is drawn on top.
 void Device::ResolveSun(const char* reason)
 {
     if (!m_sunStarted || m_sunResolved) return;
     m_sunResolved = true;
     TraceSun("Resolve at %s: %u casters in this segment", reason, m_segmentCasters);
-    if (!m_segmentCasters || !m_resolvePS || !m_backBuffer || !m_autoDepth || !m_autoDepth->m_srv) return;
-    if (g_config.lightingDebug == 8 && !m_dumped) {
+    const bool shadows = g_config.sunLighting && m_segmentCasters && m_sunSRV;
+    if (!shadows && !g_config.postEnabled) return;
+    if (!m_resolvePS || !m_backBuffer || !m_autoDepth || !m_autoDepth->m_srv || !EnsureSceneCopy()) return;
+    if (shadows && g_config.lightingDebug == 8 && !m_dumped) {
         if (!m_dumpAt) m_dumpAt = m_frame + 600;
         else if (m_frame >= m_dumpAt) { DumpSunFrame(); m_dumped = true; }
     }
@@ -367,7 +402,7 @@ void Device::ResolveSun(const char* reason)
     memcpy(rc.lightRows, m_sun.writeRows, sizeof(rc.lightRows));
     memcpy(rc.sunDir, m_sun.direction, sizeof(rc.sunDir));
     rc.params[0] = g_config.shadowStrength;
-    rc.params[1] = 1.0f / m_sunMapSize;
+    rc.params[1] = m_sunMapSize ? 1.0f / m_sunMapSize : 0.0f;
     rc.params[2] = 1.5f * m_sunTexelWorld / m_sunDepthRange;
     rc.params[3] = 1.5f * m_sunTexelWorld;
     const float w = (float)m_backBuffer->m_width, h = (float)m_backBuffer->m_height;
@@ -376,42 +411,73 @@ void Device::ResolveSun(const char* reason)
     rc.misc[0] = (float)g_config.lightingDebug;
     rc.misc[1] = g_config.shadowDistance;
     rc.misc[2] = m_sunDepthRange;
+    rc.misc[3] = shadows ? 1.0f : 0.0f;
+    rc.grade0[0] = g_config.exposure; rc.grade0[1] = g_config.contrast;
+    rc.grade0[2] = g_config.saturation; rc.grade0[3] = g_config.warmth;
+    rc.grade1[0] = g_config.sunBoost; rc.grade1[1] = g_config.shadowCool;
+    rc.grade1[2] = g_config.postEnabled ? 1.0f : 0.0f;
     D3D11_MAPPED_SUBRESOURCE map;
     if (FAILED(m_ctx->Map(m_resolveCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
     memcpy(map.pData, &rc, sizeof(rc));
     m_ctx->Unmap(m_resolveCB.Get(), 0);
 
+    CopySceneColor();
     ID3D11RenderTargetView* rtv = m_backBuffer->Rtv();
     m_ctx->OMSetRenderTargets(1, &rtv, nullptr);
     D3D11_VIEWPORT vp = { 0, 0, w, h, 0, 1 };
     m_ctx->RSSetViewports(1, &vp);
     m_ctx->RSSetState(m_noCull.Get());
-    m_ctx->OMSetBlendState(g_config.lightingDebug >= 3 ? m_noBlend.Get() : m_multiplyBlend.Get(), nullptr, 0xffffffff);
+    m_ctx->OMSetBlendState(m_noBlend.Get(), nullptr, 0xffffffff);
     m_ctx->OMSetDepthStencilState(m_noDepth.Get(), 0);
     m_ctx->IASetInputLayout(nullptr);
     m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     m_ctx->VSSetShader(m_resolveVS.Get(), nullptr, 0);
-    m_ctx->PSSetShader(m_resolvePS.Get(), nullptr, 0);
+    m_ctx->PSSetShader(m_autoDepth->m_samples > 1 ? m_resolvePSMS.Get() : m_resolvePS.Get(), nullptr, 0);
     m_ctx->PSSetConstantBuffers(0, 1, m_resolveCB.GetAddressOf());
-    ID3D11ShaderResourceView* srvs[2] = { m_autoDepth->m_srv.Get(), m_sunSRV.Get() };
-    m_ctx->PSSetShaderResources(0, 2, srvs);
+    ID3D11ShaderResourceView* srvs[3] = { m_autoDepth->m_srv.Get(), shadows ? m_sunSRV.Get() : nullptr, m_sceneCopySRV.Get() };
+    m_ctx->PSSetShaderResources(0, 3, srvs);
     m_ctx->PSSetSamplers(0, 1, m_sunSampler.GetAddressOf());
     m_ctx->Draw(3, 0);
-    ID3D11ShaderResourceView* nulls[2] = {};
-    m_ctx->PSSetShaderResources(0, 2, nulls);
+    ID3D11ShaderResourceView* nulls[3] = {};
+    m_ctx->PSSetShaderResources(0, 3, nulls);
 
     // Everything above has to be rebound by the next game draw.
     m_rtDirty = m_viewportDirty = true;
     m_lastVS = nullptr; m_lastPS = nullptr; m_lastLayout = nullptr;
     m_lastBlend = nullptr; m_lastDepth = nullptr; m_lastRaster = nullptr;
-    LogOnce(std::string("sun-resolve-") + reason, "Sun shadows resolved at %s: %u caster draws, VS 0x%lx PS 0x%lx",
-            reason, m_shadowDraws, m_vsHandle, m_psHandle);
+    LogOnce(std::string("sun-resolve-") + reason, "Scene pass at %s: shadows %d (%u casters), post %d",
+            reason, shadows, m_segmentCasters, g_config.postEnabled);
 }
 
+bool Device::EnsureSceneCopy()
+{
+    const UINT w = m_backBuffer->m_width, h = m_backBuffer->m_height;
+    if (m_sceneCopy && m_sceneCopyW == w && m_sceneCopyH == h) return true;
+    m_sceneCopySRV.Reset(); m_sceneCopy.Reset();
+    D3D11_TEXTURE2D_DESC td = { w, h, 1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT,
+                                D3D11_BIND_SHADER_RESOURCE, 0, 0 };
+    if (FAILED(m_device->CreateTexture2D(&td, nullptr, &m_sceneCopy)) ||
+        FAILED(m_device->CreateShaderResourceView(m_sceneCopy.Get(), nullptr, &m_sceneCopySRV))) {
+        m_sceneCopy.Reset();
+        return false;
+    }
+    m_sceneCopyW = w; m_sceneCopyH = h;
+    return true;
+}
+
+// Back buffer -> m_sceneCopy (resolving MSAA samples when the back buffer is multisampled).
+void Device::CopySceneColor()
+{
+    if (m_backBuffer->m_samples > 1)
+        m_ctx->ResolveSubresource(m_sceneCopy.Get(), 0, m_backBuffer->m_tex.Get(), 0, DXGI_FORMAT_B8G8R8A8_UNORM);
+    else
+        m_ctx->CopyResource(m_sceneCopy.Get(), m_backBuffer->m_tex.Get());
+}
 // DebugView=8: writes the shadow map, scene depth, back buffer and matrices once to
 // d3d8to11_dump\ for offline analysis (tools/sundump.py).
 void Device::DumpSunFrame()
 {
+    if (m_autoDepth->m_samples > 1) { Log("Sun frame dump needs MSAA off"); return; }
     const std::string dir = g_gameDir + "d3d8to11_dump\\";
     CreateDirectoryA(dir.c_str(), nullptr);
     auto save = [&](ID3D11Texture2D* tex, const char* name, UINT bytesPerPixel) {
