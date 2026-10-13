@@ -253,10 +253,23 @@ private:
     int m_worldKind = 0;
     bool m_sunStarted = false, m_sunResolved = false, m_worldDraw = false;
     bool m_worldCaster = false;
-    UINT m_shadowDraws = 0, m_earlyCasters = 0, m_lateWorldDraws = 0;
+    UINT m_segmentCasters = 0, m_shadowDraws = 0, m_earlyCasters = 0, m_lateWorldDraws = 0;
     float m_sunDepthRange = 1.0f, m_sunTexelWorld = 0.1f;
     float m_gameSun[3] = {};
     bool m_gameSunValid = false;
+    // One-frame trace of the world/HUD draw order (d3d8to11_frame.log), written once,
+    // 1000 frames after the first shadowed frame.
+    bool m_trace = false;
+    std::string m_traceBuf;
+    UINT64 m_traceAt = 0;
+    bool m_traceDone = false;
+    std::string m_traceLast;
+    UINT m_traceRepeat = 0;
+    void TraceSun(const char* fmt, ...);
+    void DumpSunFrame();
+    UINT64 m_dumpAt = 0;
+    bool m_dumped = false;
+    void TraceFlush();
     void StartSunFrame();
     void CaptureGameSun();
     void ResolveSun(const char* reason);

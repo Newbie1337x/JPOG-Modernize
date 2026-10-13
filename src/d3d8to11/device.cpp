@@ -456,6 +456,8 @@ HRESULT Device::SetRenderTarget(ID8Surface* rt, ID8Surface* ds)
 {
     if (rt) SetRef(m_rt, static_cast<Surface*>(rt));
     SetRef(m_ds, static_cast<Surface*>(ds));
+    TraceSun("SetRenderTarget rt %s %ux%u ds %s", m_rt == m_backBuffer ? "back" : "other",
+             m_rt ? m_rt->m_width : 0, m_rt ? m_rt->m_height : 0, !m_ds ? "none" : (m_ds == m_autoDepth ? "auto" : "other"));
     m_rtDirty = true;
     if (m_rt) {
         m_viewport = { 0, 0, m_rt->m_width, m_rt->m_height, 0.0f, 1.0f };
@@ -505,7 +507,14 @@ HRESULT Device::SetViewport(const D3D8Viewport* vp)
 
 HRESULT Device::Clear(DWORD count, const D3D8Rect* rects, DWORD flags, DWORD color, float z, DWORD stencil)
 {
-    if (m_sunStarted && !m_sunResolved && (flags & D8CLEAR_ZBUFFER) && m_ds == m_autoDepth) ResolveSun("clear");
+    TraceSun("Clear flags %lu z %.3f rt %s ds %s viewport %ux%u", flags, z, m_rt == m_backBuffer ? "back" : "other",
+             m_ds == m_autoDepth ? "auto" : "other", m_viewport.Width, m_viewport.Height);
+    if (m_sunStarted && (flags & D8CLEAR_ZBUFFER) && m_ds == m_autoDepth) {
+        // JPOG draws the world in more than one depth segment per frame, each with its own
+        // camera. Finish this one; the next terrain draw starts a new one.
+        ResolveSun("clear");
+        m_sunStarted = m_sunResolved = false;
+    }
     ApplyRenderTargets();
     const bool fullViewport = m_rt && m_viewport.X == 0 && m_viewport.Y == 0 &&
                               m_viewport.Width >= m_rt->m_width && m_viewport.Height >= m_rt->m_height;
@@ -1129,7 +1138,8 @@ bool Device::PrepareDraw()
         m_rt == m_backBuffer && m_ds && m_rs[RS_ZENABLE] &&
         (m_worldKind == 2 || !m_rs[RS_ALPHABLENDENABLE] || m_rs[RS_ALPHATESTENABLE]) &&
         m_viewport.Width == m_backBuffer->m_width && m_viewport.Height == m_backBuffer->m_height;
-    m_worldCaster = m_worldDraw && m_rs[RS_ZWRITEENABLE] && (m_worldKind != 4 || g_config.grassShadows);
+    m_worldCaster = m_worldDraw && m_rs[RS_ZWRITEENABLE] && (m_worldKind != 4 || g_config.grassShadows) &&
+        (m_worldKind != 2 || g_config.terrainShadows);
     if (g_config.sunLighting && m_rt == m_backBuffer && m_worldKind != 0) {
         LogOnce(std::string("sun-material-") + std::to_string(m_vsHandle) + "-" + std::to_string(m_psHandle),
             "Sun material VS %lx PS %lx kind %d receiver %d caster %d z %lu write %lu blend %lu alpha %lu",
@@ -1137,6 +1147,14 @@ bool Device::PrepareDraw()
             m_rs[RS_ZWRITEENABLE],m_rs[RS_ALPHABLENDENABLE],m_rs[RS_ALPHATESTENABLE]);
     }
     UpdateSun(false);
+    if (m_trace) {
+        DWORD cam = 0;
+        if (m_worldKind == 2) for (int i = 0; i < 16; i++) cam = cam * 31 + *(const DWORD*)&m_vsConst[i / 4][i % 4];
+        TraceSun("Draw kind %d world %d caster %d z %lu zwrite %lu blend %lu atest %lu rt %s vp %ux%u terrain-cam %08lx",
+                 m_worldKind, m_worldDraw, m_worldCaster && m_sunStarted && !m_sunResolved, m_rs[RS_ZENABLE],
+                 m_rs[RS_ZWRITEENABLE], m_rs[RS_ALPHABLENDENABLE], m_rs[RS_ALPHATESTENABLE],
+                 m_rt == m_backBuffer ? "back" : "other", m_viewport.Width, m_viewport.Height, cam);
+    }
     std::string drawKey = std::string("draw-path-") + std::to_string(m_vsHandle) + "-" + std::to_string(m_psHandle);
     LogOnce(drawKey, "draw path: VS 0x%lx PS 0x%lx streams s0=%p/%u s1=%p/%u tex0=%u tex1=%u tex2=%u viewport=%ux%u",
             m_vsHandle, m_psHandle, (void*)m_streams[0].vb, m_streams[0].stride,

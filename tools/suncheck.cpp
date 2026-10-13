@@ -41,12 +41,12 @@ int main()
     dev->CreatePixelShader(psCode.data(), &pixel);
     dev->SetPixelShader(pixel);
 
-    // Top-down orthographic camera: clip = (x/32, z/32, 0.5 - 0.01 y, 1).
-    float camera[16] = { 1.f / 32, 0, 0, 0,  0, 0, 1.f / 32, 0,  0, -.01f, 0, .5f,  0, 0, 0, 1 };
+    // Top-down orthographic camera, JPOG convention (-Y is up): clip = (x/32, z/32, 0.5 + 0.01 y, 1).
+    float camera[16] = { 1.f / 32, 0, 0, 0,  0, 0, 1.f / 32, 0,  0, .01f, 0, .5f,  0, 0, 0, 1 };
     float white[4] = { 1, 1, 1, 1 }, zero[4] = {};
 
     struct V { float x, y, z; DWORD color; float u, v; };
-    V caster[4] = { { -4, 12, 4, ~0u, 0, 0 }, { 4, 12, 4, ~0u, 1, 0 }, { 4, 12, -4, ~0u, 1, 1 }, { -4, 12, -4, ~0u, 0, 1 } };
+    V caster[4] = { { -4, -12, 4, ~0u, 0, 0 }, { 4, -12, 4, ~0u, 1, 0 }, { 4, -12, -4, ~0u, 1, 1 }, { -4, -12, -4, ~0u, 0, 1 } };
     // HUD strip across the top rows, drawn without depth after the world.
     V hud[4] = { { -14, 0, 2, ~0u, 0, 0 }, { -10, 0, 2, ~0u, 1, 0 }, { -10, 0, -2, ~0u, 1, 1 }, { -14, 0, -2, ~0u, 0, 1 } };
     BYTE* data = nullptr;
@@ -90,7 +90,7 @@ int main()
         dev->SetStreamSource(0, heightVB, 4);
         dev->SetStreamSource(1, gridVB, 8);
         dev->DrawPrimitive(6, 0, 2);
-        // Caster 12 units above the ground; the model is moved through its own c0..c3 (frame 2).
+        // Caster 12 units above the ground (y = -12); the model is moved through its own c0..c3 (frame 2).
         float model[16];
         memcpy(model, camera, sizeof(model));
         if (frame == 2) model[3] += 4.0f / 32; // shift 4 units in +x

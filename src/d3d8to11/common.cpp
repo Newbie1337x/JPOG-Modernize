@@ -67,6 +67,7 @@ void LoadConfig()
     g_config.sunLighting = GetPrivateProfileIntA("Lighting", "Enabled", 0, ini.c_str()) != 0;
     g_config.replaceLighting = GetPrivateProfileIntA("Lighting", "ReplaceOriginal", 0, ini.c_str()) != 0;
     g_config.grassShadows = GetPrivateProfileIntA("Lighting", "GrassShadows", 0, ini.c_str()) != 0;
+    g_config.terrainShadows = GetPrivateProfileIntA("Lighting", "TerrainShadows", 0, ini.c_str()) != 0;
     g_config.lightingDebug = GetPrivateProfileIntA("Lighting", "DebugView", 0, ini.c_str());
     GetPrivateProfileStringA("Lighting", "SunSource", "game", buf, sizeof(buf), ini.c_str());
     g_config.sunFromGame = _stricmp(buf, "fixed") != 0;

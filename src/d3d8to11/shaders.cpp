@@ -170,11 +170,11 @@ std::string SunPixelCode() {
         "  if (dot(i.normal,i.normal) > 1e-8) rawN = i.normal;\n"
         "  float nlen = dot(rawN, rawN); if (nlen < 1e-12) return color;\n"
         "  float3 N = rawN * rsqrt(nlen);\n"
-        "  if (sunFlags.w == 2 && N.y < 0) N = -N;\n"
+        "  if (sunFlags.w == 2 && N.y > 0) N = -N;\n" // JPOG is Y-down: terrain normals point to -Y
         "  if (sunControl.y == 2) return float4(N*0.5+0.5,color.a);\n"
         "  float ndl = saturate(dot(N, sunDirection.xyz));\n"
         "  if (sunFlags.w == 4) ndl = abs(dot(N,sunDirection.xyz));\n"
-        "  float sky = saturate(N.y*0.5+0.5);\n"
+        "  float sky = saturate(-N.y*0.5+0.5);\n"
         "  float3 ambient = sunSettings.x * lerp(float3(0.38,0.34,0.27),float3(0.78,0.88,1.0),sky);\n"
         "  float3 light = ambient + sunSettings.y*ndl*float3(1.0,0.95,0.84);\n"
         "  float3 linearColor = pow(max(color.rgb,0),2.2);\n"

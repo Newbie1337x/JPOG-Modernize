@@ -11,6 +11,9 @@
 #include "device.h"
 #include <DirectXMath.h>
 #include <cmath>
+#include <stdarg.h>
+#include <stdio.h>
+#include <share.h>
 using namespace DirectX;
 
 namespace {
@@ -47,6 +50,10 @@ const char* kResolvePS =
     "float3 WorldAt(int2 p) { return Unproject(p + 0.5, sceneDepth.Load(int3(p, 0))); }\n"
     "float4 main(float4 pos : SV_Position) : SV_Target {\n"
     "  int2 p = int2(pos.xy);\n"
+    "  if (misc.x == 5 && pos.x < 540 && pos.y < 540) {\n"
+    "    uint mw, mh; shadowMap.GetDimensions(mw, mh);\n"
+    "    float v = shadowMap.Load(int3(pos.xy / 540 * mw, 0));\n"
+    "    return v >= 1 ? float4(0.2, 0.2, 0.6, 1) : float4(frac(v * misc.z / 2).xxx, 1); }\n"
     "  float d = sceneDepth.Load(int3(p, 0));\n"
     "  if (d >= 0.999999) { if (misc.x >= 3) return float4(1, 0.6, 1, 1); discard; }\n"
     "  float3 P = Unproject(pos.xy, d);\n"
@@ -61,8 +68,10 @@ const char* kResolvePS =
     "  N = nl > 1e-20 ? N * rsqrt(nl) : V / max(dist, 1e-6);\n"
     "  if (dot(N, V) < 0) N = -N;\n"
     "  if (misc.x == 4) return float4(N * 0.5 + 0.5, 1);\n"
+    "  if (misc.x == 6) { float2 g = frac(P.xz / 8); return float4(g.x < 0.08 || g.y < 0.08 ? float3(1, 0, 0) : frac(P.yyy / 4), 1); }\n"
     "  float ndl = dot(N, sunDir.xyz);\n"
-    "  float3 Q = P + N * params.w * (1.5 - saturate(ndl));\n"
+    // Offset toward the sun: robust where depth normals are noisy (grass, foliage).
+    "  float3 Q = P + sunDir.xyz * params.w * 3;\n"
     "  float4 Q4 = float4(Q, 1);\n"
     "  float3 q = float3(dot(Q4, lightRows[0]), dot(Q4, lightRows[1]), dot(Q4, lightRows[2]));\n"
     "  float2 uv = q.xy * float2(0.5, -0.5) + 0.5;\n"
@@ -74,8 +83,9 @@ const char* kResolvePS =
     "    vis = sum / 12;\n"
     "  }\n"
     // Faces turned away from the sun are already dark in the game's own lighting.
-    "  float facing = saturate(ndl * 4);\n"
+    "  float facing = lerp(0.6, 1, saturate(ndl * 4));\n"
     "  float fade = saturate((misc.y - dist) / (misc.y * 0.2));\n"
+    "  if (misc.x == 7) return float4(vis.xxx, 1);\n"
     "  float shadow = (1 - vis) * edge * facing * fade;\n"
     "  float3 shade = (1 - params.x * shadow) * lerp(float3(1, 1, 1), float3(0.93, 0.96, 1.0), shadow);\n"
     "  return float4(shade, 1); }\n";
@@ -170,45 +180,42 @@ void Device::StartSunFrame()
     if (std::fabs(XMVectorGetX(det)) < 1e-20f) return;
     StoreRows(inv, m_sun.clipToWorld);
 
+    // JPOG's world is Y-down: "up" is -Y (camera above the park at y = -55, palm crowns at
+    // y = -6 over ground at -1). SunX/Y/Z in the ini use Y-up, so Y is negated here.
     XMVECTOR sun = g_config.sunFromGame && m_gameSunValid
         ? XMVectorSet(m_gameSun[0], m_gameSun[1], m_gameSun[2], 0)
-        : XMVectorSet(g_config.sunDirection[0], g_config.sunDirection[1], g_config.sunDirection[2], 0);
+        : XMVectorSet(g_config.sunDirection[0], -g_config.sunDirection[1], g_config.sunDirection[2], 0);
     sun = XMVector3Normalize(sun);
-    float sy = XMVectorGetY(sun);
-    if (sy < g_config.sunMinElevation) {
+    float elevation = -XMVectorGetY(sun);
+    if (elevation < g_config.sunMinElevation) {
         // Keep the azimuth, raise the sun: grazing light gives endless, unstable shadows.
         XMVECTOR flat = XMVectorSet(XMVectorGetX(sun), 0, XMVectorGetZ(sun), 0);
         float fl = XMVectorGetX(XMVector3Length(flat));
         flat = fl > 1e-4f ? flat / fl : XMVectorSet(1, 0, 0, 0);
         float h = g_config.sunMinElevation;
-        sun = XMVectorSetY(flat * std::sqrt(1 - h * h), h);
+        sun = XMVectorSetY(flat * std::sqrt(1 - h * h), -h);
     }
     XMStoreFloat4(reinterpret_cast<XMFLOAT4*>(m_sun.direction), sun);
 
-    // Visible ground: 3x3 screen rays against the terrain chunk's base height, limited to the
-    // shadow distance.
+    // The light box covers the whole view frustum cut at the shadow distance. Guessing the ground
+    // height from the terrain chunk offset put the box beside the view when zoomed in (terrain
+    // heights are added on top of that offset).
     const float groundY = m_vsConst[4][1];
     const float maxDist = g_config.shadowDistance;
     XMMATRIX lightView = XMMatrixLookToLH(XMVectorZero(), -sun,
         std::fabs(XMVectorGetY(sun)) > 0.99f ? XMVectorSet(0, 0, 1, 0) : XMVectorSet(0, 1, 0, 0));
     XMVECTOR lo = XMVectorReplicate(1e30f), hi = XMVectorReplicate(-1e30f);
-    for (int iy = -1; iy <= 1; iy++) {
-        for (int ix = -1; ix <= 1; ix++) {
+    for (int iy = -1; iy <= 1; iy += 2) {
+        for (int ix = -1; ix <= 1; ix += 2) {
             XMVECTOR n = XMVector3TransformCoord(XMVectorSet((float)ix, (float)iy, 0, 1), inv);
             XMVECTOR f = XMVector3TransformCoord(XMVectorSet((float)ix, (float)iy, 1, 1), inv);
             XMVECTOR ray = f - n;
             float len = XMVectorGetX(XMVector3Length(ray));
             if (!(len > 1e-6f)) continue;
-            XMVECTOR dir = ray / len;
-            float t = len < maxDist ? len : maxDist;
-            float dy = XMVectorGetY(dir);
-            if (dy < -1e-4f) {
-                float tg = (groundY - XMVectorGetY(n)) / dy;
-                if (tg > 0 && tg < t) t = tg;
-            }
-            XMVECTOR pt = XMVector3TransformCoord(n + dir * t, lightView);
-            lo = XMVectorMin(lo, pt);
-            hi = XMVectorMax(hi, pt);
+            XMVECTOR farPt = n + ray * ((len < maxDist ? len : maxDist) / len);
+            XMVECTOR a = XMVector3TransformCoord(n, lightView), b = XMVector3TransformCoord(farPt, lightView);
+            lo = XMVectorMin(lo, XMVectorMin(a, b));
+            hi = XMVectorMax(hi, XMVectorMax(a, b));
         }
     }
     XMFLOAT3 l, h;
@@ -231,6 +238,12 @@ void Device::StartSunFrame()
     m_sun.settings[2] = g_config.shadowStrength; m_sun.settings[3] = 1.0f / res;
     m_ctx->ClearDepthStencilView(m_sunDSV.Get(), D3D11_CLEAR_DEPTH, 1, 0);
     m_sunStarted = true;
+    LogOnce("sun-viewport", "Sun camera viewport %lu,%lu %lux%lu depth %.3f..%.3f; camera rows z %g %g %g %g w %g %g %g %g",
+            m_viewport.X, m_viewport.Y, m_viewport.Width, m_viewport.Height, m_viewport.MinZ, m_viewport.MaxZ,
+            rows[2][0], rows[2][1], rows[2][2], rows[2][3], rows[3][0], rows[3][1], rows[3][2], rows[3][3]);
+    m_segmentCasters = 0;
+    TraceSun("Sun segment start: ground %.1f, box %.0f, camera z row %g %g %g %g, w row %g %g %g %g", groundY, size,
+             rows[2][0], rows[2][1], rows[2][2], rows[2][3], rows[3][0], rows[3][1], rows[3][2], rows[3][3]);
     LogOnce("sun-start", "Sun frame: camera ground y %.1f, light box %.0f units (%.3f per texel), sun %.2f %.2f %.2f (%s)",
             groundY, size, texel, XMVectorGetX(sun), XMVectorGetY(sun), XMVectorGetZ(sun),
             g_config.sunFromGame && m_gameSunValid ? "game" : "fixed");
@@ -252,6 +265,9 @@ void Device::CaptureGameSun()
     float len = XMVectorGetX(XMVector3Length(w));
     if (!(len > 1e-6f) || !std::isfinite(len)) return;
     w = w / len;
+    // In-game this comes out as e.g. (0.47 -0.74 0.47): negative Y is up in JPOG, so the sun
+    // is above the island. Should it ever point below the ground, mirror it up.
+    if (XMVectorGetY(w) > 0) w = -w;
     XMFLOAT4X4 mf;
     XMStoreFloat4x4(&mf, model);
     LogOnce("sun-game", "Game sun (skin c89) %.3f %.3f %.3f; model matrix w column %.4f %.4f %.4f %.4f; terrain c22 %.3f %.3f %.3f",
@@ -313,6 +329,7 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base)
     m_ctx->OMSetBlendState(m_noBlend.Get(), nullptr, 0xffffffff);
     if (indexed) m_ctx->DrawIndexed(count, start, base); else m_ctx->Draw(count, start);
     ++m_shadowDraws;
+    ++m_segmentCasters;
     // Vertex/pixel shaders, streams and constants remain valid. PrepareDraw restores targets,
     // viewport and the sun-pass flag before the next game draw.
     m_rtDirty = m_viewportDirty = true;
@@ -323,7 +340,12 @@ void Device::ResolveSun(const char* reason)
 {
     if (!m_sunStarted || m_sunResolved) return;
     m_sunResolved = true;
-    if (!m_shadowDraws || !m_resolvePS || !m_backBuffer || !m_autoDepth || !m_autoDepth->m_srv) return;
+    TraceSun("Resolve at %s: %u casters in this segment", reason, m_segmentCasters);
+    if (!m_segmentCasters || !m_resolvePS || !m_backBuffer || !m_autoDepth || !m_autoDepth->m_srv) return;
+    if (g_config.lightingDebug == 8 && !m_dumped) {
+        if (!m_dumpAt) m_dumpAt = m_frame + 600;
+        else if (m_frame >= m_dumpAt) { DumpSunFrame(); m_dumped = true; }
+    }
 
     ResolveConstants rc = {};
     memcpy(rc.clipToWorld, m_sun.clipToWorld, sizeof(rc.clipToWorld));
@@ -338,6 +360,7 @@ void Device::ResolveSun(const char* reason)
     rc.screen[2] = -1.0f / w; rc.screen[3] = 1.0f / h; // VSExtraConstants::pixelOffset
     rc.misc[0] = (float)g_config.lightingDebug;
     rc.misc[1] = g_config.shadowDistance;
+    rc.misc[2] = m_sunDepthRange;
     D3D11_MAPPED_SUBRESOURCE map;
     if (FAILED(m_ctx->Map(m_resolveCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
     memcpy(map.pData, &rc, sizeof(rc));
@@ -370,10 +393,94 @@ void Device::ResolveSun(const char* reason)
             reason, m_shadowDraws, m_vsHandle, m_psHandle);
 }
 
+// DebugView=8: writes the shadow map, scene depth, back buffer and matrices once to
+// d3d8to11_dump\ for offline analysis (tools/sundump.py).
+void Device::DumpSunFrame()
+{
+    const std::string dir = g_gameDir + "d3d8to11_dump\\";
+    CreateDirectoryA(dir.c_str(), nullptr);
+    auto save = [&](ID3D11Texture2D* tex, const char* name, UINT bytesPerPixel) {
+        if (!tex) return;
+        D3D11_TEXTURE2D_DESC td;
+        tex->GetDesc(&td);
+        td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ; td.MiscFlags = 0;
+        ComPtr<ID3D11Texture2D> staging;
+        if (FAILED(m_device->CreateTexture2D(&td, nullptr, &staging))) { Log("dump: staging %s failed", name); return; }
+        m_ctx->CopyResource(staging.Get(), tex);
+        D3D11_MAPPED_SUBRESOURCE map;
+        if (FAILED(m_ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map))) return;
+        if (FILE* f = _fsopen((dir + name).c_str(), "wb", _SH_DENYNO)) {
+            for (UINT y = 0; y < td.Height; y++) fwrite((BYTE*)map.pData + (size_t)y * map.RowPitch, bytesPerPixel, td.Width, f);
+            fclose(f);
+        }
+        m_ctx->Unmap(staging.Get(), 0);
+    };
+    save(m_sunMap.Get(), "sunmap.f32", 4);
+    save(m_autoDepth->m_tex.Get(), "depth.d24s8", 4);
+    save(m_backBuffer->m_tex.Get(), "color.bgra", 4);
+    if (FILE* f = _fsopen((dir + "meta.txt").c_str(), "w", _SH_DENYNO)) {
+        auto rows = [&](const char* n, const float (&m)[4][4]) {
+            fprintf(f, "%s", n);
+            for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) fprintf(f, " %.9g", m[r][c]);
+            fprintf(f, "\n");
+        };
+        fprintf(f, "screen %u %u\nmap %d\n", m_backBuffer->m_width, m_backBuffer->m_height, g_config.shadowResolution);
+        rows("clipToWorld", m_sun.clipToWorld);
+        rows("lightRows", m_sun.writeRows);
+        fprintf(f, "sun %.6f %.6f %.6f\ntexel %.6f\ndepthRange %.6f\ncasters %u\n", m_sun.direction[0], m_sun.direction[1],
+                m_sun.direction[2], m_sunTexelWorld, m_sunDepthRange, m_segmentCasters);
+        fclose(f);
+    }
+    Log("Sun frame dumped to d3d8to11_dump (frame %llu)", m_frame);
+}
+
+void Device::TraceSun(const char* fmt, ...)
+{
+    if (!m_trace) return;
+    char line[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (m_traceLast == line) { m_traceRepeat++; return; }
+    TraceFlush();
+    m_traceLast = line;
+    m_traceRepeat = 1;
+}
+
+void Device::TraceFlush()
+{
+    if (m_trace && m_traceRepeat) {
+        char head[16];
+        sprintf_s(head, "%4ux ", m_traceRepeat);
+        m_traceBuf += head + m_traceLast + "\n";
+    }
+    m_traceRepeat = 0;
+    m_traceLast.clear();
+}
+
 // Present: finish a frame that never reached a HUD draw, then reset per-frame state.
 void Device::EndSunFrame()
 {
     ResolveSun("present");
+    if (m_trace) {
+        TraceFlush();
+        // Keep only a frame that actually rendered the park with shadows.
+        if (m_shadowDraws) {
+            if (FILE* f = _fsopen((g_gameDir + "d3d8to11_frame.log").c_str(), "w", _SH_DENYNO)) {
+                fputs(m_traceBuf.c_str(), f);
+                fclose(f);
+            }
+            m_trace = false;
+            m_traceDone = true;
+            Log("Frame trace written to d3d8to11_frame.log (frame %llu)", m_frame);
+        }
+        m_traceBuf.clear();
+    }
+    if (g_config.sunLighting && !m_traceDone && !m_trace) {
+        if (!m_traceAt && m_shadowDraws) m_traceAt = m_frame + 1000;
+        if (m_traceAt && m_frame + 1 >= m_traceAt) m_trace = true;
+    }
     if (m_sunStarted && (m_earlyCasters || m_lateWorldDraws))
         LogOnce("sun-order", "Sun frame order: %u caster draws before the terrain, %u world draws after the resolve",
                 m_earlyCasters, m_lateWorldDraws);

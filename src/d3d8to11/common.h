@@ -32,6 +32,7 @@ struct Config {
     bool replaceLighting = false;   // [Lighting] ReplaceOriginal: experimental per-pixel relighting
     bool sunFromGame = true;        // [Lighting] SunSource=game (else SunX/Y/Z)
     bool grassShadows = false;      // [Lighting] GrassShadows
+    bool terrainShadows = false;    // [Lighting] TerrainShadows (hills shadowing the ground; acne-prone)
     int lightingDebug = 0;          // 0 off, 1 albedo, 2 normals (replacement), 3 shadow mask, 4 resolve normals
     int shadowResolution = 4096;
     float shadowDistance = 500.0f;  // farthest point from the camera that receives shadows
