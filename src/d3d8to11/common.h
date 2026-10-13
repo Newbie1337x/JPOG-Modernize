@@ -26,29 +26,35 @@ struct Config {
     int fpsLimit = 0;           // [Renderer] FPSLimit (0 = off)
     int forceAnisotropy = 16;   // [Renderer] Anisotropy (0/1 = use game setting)
     bool applyGamma = true;     // [Renderer] ApplyGammaRamp
-    int msaa = 4;               // [Renderer] MSAA: 0/1 off, 2, 4, 8 samples (3D scene and HUD)
-    bool alphaToCoverage = true; // [Renderer] AlphaToCoverage: smooth alpha-tested foliage under MSAA
+    int msaa = 8;               // [Renderer] MSAA: 0/1 off, 2, 4, 8 samples (3D scene and HUD)
+    bool alphaToCoverage = false; // [Renderer] AlphaToCoverage: smooth alpha-tested foliage under MSAA
     bool debugLayer = false;    // [Debug] D3D11DebugLayer
     bool dumpShaders = false;   // [Debug] DumpShaders (writes generated HLSL to d3d8to11_shaders\)
-    bool sunLighting = false;       // [Lighting] Enabled: sun shadows
+    bool sunLighting = true;        // [Lighting] Enabled: sun shadows
     bool replaceLighting = false;   // [Lighting] ReplaceOriginal: experimental per-pixel relighting
     bool sunFromGame = true;        // [Lighting] SunSource=game (else SunX/Y/Z)
     bool grassShadows = false;      // [Lighting] GrassShadows
     bool terrainShadows = false;    // [Lighting] TerrainShadows (hills shadowing the ground; acne-prone)
     int lightingDebug = 0;          // 0 off, 1 albedo, 2 normals (replacement), 3 shadow mask, 4 resolve normals
     int shadowResolution = 4096;
-    float shadowDistance = 500.0f;  // farthest point from the camera that receives shadows
-    float sunAmbient = 0.60f, sunDirect = 0.55f, shadowStrength = 0.55f;
+    float shadowDistance = 250.0f;  // farthest point from the camera that receives shadows
+    float sunAmbient = 0.60f, sunDirect = 0.55f, shadowStrength = 0.25f;
     float sunMinElevation = 0.35f;  // minimum sun height (sin of elevation), avoids endless shadows
     float sunDirection[3] = { -0.35f, 0.82f, -0.45f };
     // [Post] sunlight and colour, applied to the world before the HUD (sun.cpp resolve pass)
-    bool postEnabled = false;       // [Post] Enabled
+    bool postEnabled = true;        // [Post] Enabled
     float sunBoost = 0.25f;         // [Post] SunBoost: extra light on sunlit surfaces
     float shadowCool = 0.5f;        // [Post] ShadowCool: blue tint in shadows
     float exposure = 1.0f;          // [Post] Exposure
-    float contrast = 1.08f;         // [Post] Contrast
-    float saturation = 1.1f;        // [Post] Saturation
-    float warmth = 0.15f;           // [Post] Warmth (-1 cold .. 1 warm)
+    float contrast = 0.97f;         // [Post] Contrast
+    float saturation = 1.09f;        // [Post] Saturation
+    float warmth = 0.23f;           // [Post] Warmth (-1 cold .. 1 warm)
+    // [Grass] creatures bend and flatten the grass around them
+    bool grassPhysics = true;       // [Grass] Enabled
+    float grassPush = 0.8f;         // [Grass] Push: sideways bend, in blade heights
+    float grassFlatten = 0.5f;      // [Grass] Flatten: 0..1 of the blade height pressed down
+    float grassRadius = 1.0f;       // [Grass] RadiusScale: multiplies the radius taken from the skeleton
+    int grassMinBones = 6;          // [Grass] MinBones: skinned draws with fewer bones (props, trees) do not push
     int overlayKey = VK_INSERT;     // [Overlay] Key: virtual-key code that opens the settings panel
     bool showFps = false;           // [Overlay] ShowFPS: small counter while the panel is closed
     float overlayScale = 1.0f;      // [Overlay] Scale

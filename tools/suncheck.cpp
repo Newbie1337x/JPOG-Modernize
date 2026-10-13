@@ -3,7 +3,8 @@
 // back buffer must show the caster's shadow displaced away from the sun, in that same frame,
 // and nothing drawn without depth (HUD) may be darkened.
 // Run from a folder holding out\d3d8.dll, profile\ (captured shaders) and a d3d8to11.ini with
-// [Lighting] Enabled=1, SunSource=fixed, SunX=0.6, SunY=0.8, SunZ=0.
+// [Lighting] Enabled=1, ShadowStrength=0.55, SunSource=fixed, SunX=0.6, SunY=0.8, SunZ=0, and
+// [Post] Enabled=0, [Grass] Enabled=0.
 #include "../src/d3d8to11/d3d8_types.h"
 #include <vector>
 #include <fstream>

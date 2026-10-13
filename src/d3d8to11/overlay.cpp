@@ -232,8 +232,20 @@ void Device::DrawOverlay()
             ImGui::SliderFloat("Warmth", &g_config.warmth, -1.0f, 1.0f, "%.2f");
             if (ImGui::Button("Defaults##post")) {
                 g_config.sunBoost = 0.25f; g_config.shadowCool = 0.5f; g_config.exposure = 1.0f;
-                g_config.contrast = 1.08f; g_config.saturation = 1.1f; g_config.warmth = 0.15f;
+                g_config.contrast = 0.97f; g_config.saturation = 1.09f; g_config.warmth = 0.23f;
             }
+            ImGui::EndDisabled();
+        }
+
+        if (ImGui::CollapsingHeader("Interactive grass", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Creatures bend the grass", &g_config.grassPhysics);
+            ImGui::BeginDisabled(!g_config.grassPhysics);
+            ImGui::SliderFloat("Bend", &g_config.grassPush, 0.0f, 3.0f, "%.2f");
+            ImGui::SliderFloat("Flatten", &g_config.grassFlatten, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Radius", &g_config.grassRadius, 0.2f, 4.0f, "x%.2f");
+            ImGui::SliderInt("Min. bones", &g_config.grassMinBones, 1, 40);
+            ImGui::SetItemTooltip("Skinned models with fewer bones (props, trees) do not push grass.");
+            ImGui::Text("%u creatures pushing grass this frame", m_pusherCount);
             ImGui::EndDisabled();
         }
 

@@ -848,6 +848,8 @@ HRESULT Device::SetVertexShaderConstant(DWORD reg, const void* data, DWORD count
     if (!data || reg + count > kMaxVSConst) return D8ERR_INVALIDCALL;
     memcpy(m_vsConst[reg], data, count * 16);
     m_vsConstDirty = true;
+    if (reg < m_vsWriteLo) m_vsWriteLo = reg;
+    if (reg + count > m_vsWriteHi) m_vsWriteHi = reg + count;
     return S_OK;
 }
 
@@ -1181,14 +1183,14 @@ bool Device::PrepareDraw()
     }
     VertexShader8* vs = m_vertexShaders[idx];
     m_worldKind = WorldShaderKind(vs->parsed);
-    m_worldDraw = (g_config.sunLighting || g_config.postEnabled) && m_worldKind != 0 &&
+    m_worldDraw = SceneFx() && m_worldKind != 0 &&
         (m_psHandle != 0 || m_rs[RS_ZWRITEENABLE]) &&
         m_rt == m_backBuffer && m_ds && m_rs[RS_ZENABLE] &&
         (m_worldKind == 2 || !m_rs[RS_ALPHABLENDENABLE] || m_rs[RS_ALPHATESTENABLE]) &&
         m_viewport.Width == m_backBuffer->m_width && m_viewport.Height == m_backBuffer->m_height;
     m_worldCaster = g_config.sunLighting && m_worldDraw && m_rs[RS_ZWRITEENABLE] && (m_worldKind != 4 || g_config.grassShadows) &&
         (m_worldKind != 2 || g_config.terrainShadows);
-    if ((g_config.sunLighting || g_config.postEnabled) && m_rt == m_backBuffer && m_worldKind != 0) {
+    if (SceneFx() && m_rt == m_backBuffer && m_worldKind != 0) {
         LogOnce(std::string("sun-material-") + std::to_string(m_vsHandle) + "-" + std::to_string(m_psHandle),
             "Sun material VS %lx PS %lx kind %d receiver %d caster %d z %lu write %lu blend %lu alpha %lu",
             m_vsHandle,m_psHandle,m_worldKind,m_worldDraw,m_worldCaster,m_rs[RS_ZENABLE],
@@ -1278,6 +1280,7 @@ bool Device::PrepareDraw()
     }
     ID3D11RasterizerState* raster = GetRasterState();
     if (m_lastRaster != raster) { m_ctx->RSSetState(raster); m_lastRaster = raster; }
+    m_vsWriteLo = kMaxVSConst; m_vsWriteHi = 0; // constants written before the next draw
     return true;
 }
 

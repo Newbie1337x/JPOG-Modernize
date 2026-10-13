@@ -294,6 +294,24 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
     s += "cbuffer VSConstants : register(b0) { float4 c[256]; };\n";
     s += "cbuffer VSExtra : register(b1) { float4 pixelOffset; };\n";
     s += SunBlock(2);
+    const bool grass = WorldShaderKind(decl) == 4;
+    if (grass) {
+        // Interactive grass: creatures near a blade bend it away and flatten it, scaled by the
+        // blade-local height (v0.y, which the game also uses for its wind sway). Pushers are
+        // filled per frame in sun.cpp (CapturePusher).
+        s += "cbuffer Grass : register(b3) { float4 pushers[32]; float4 grassParams; };\n"
+             "float4 GrassPush(float4 p, float h) {\n"
+             "  float hh = abs(h);\n"
+             "  [loop] for (int k = 0; k < (int)grassParams.x; k++) {\n"
+             "    float2 d = p.xz - pushers[k].xz; float dist = length(d); float r = pushers[k].w;\n"
+             "    if (dist >= r) continue;\n"
+             "    float f = 1 - dist / r; f = f * f * (3 - 2 * f);\n"
+             "    float2 dir = dist > 1e-3 ? d / dist : float2(1, 0);\n"
+             "    p.xz += dir * (f * hh * grassParams.y);\n"
+             "    p.y -= h * f * grassParams.z;\n"
+             "  }\n"
+             "  return p; }\n";
+    }
     s += "float4 C(int i) { return (i >= 0 && i < 256) ? c[i] : float4(0, 0, 0, 0); }\n";
     s += kHelpers;
     s += kVSOutputStruct;
@@ -353,8 +371,13 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
         case OP_DST: expr = "float4(1.0, (" + S(1) + ").y * (" + S(2) + ").y, (" + S(1) + ").z, (" + S(2) + ").w)"; break;
         case OP_FRC: expr = "frac(" + S(1) + ")"; break;
         case OP_M4x4: case OP_M4x3: case OP_M3x4: case OP_M3x3: case OP_M3x2: {
-            if (in.op == OP_M4x4 && RegTypeOf(p[2]) == RT_CONST && RegNumOf(p[2]) == 0)
+            if (in.op == OP_M4x4 && RegTypeOf(p[2]) == RT_CONST && RegNumOf(p[2]) == 0) {
+                if (grass && RegTypeOf(p[1]) == RT_TEMP) {
+                    const std::string reg = VSRegister(p[1], 0);
+                    s += "  if (grassParams.x > 0) " + reg + " = GrassPush(" + reg + ", v0.y);\n";
+                }
                 s += "  worldPosition = " + S(1) + ";\n";
+            }
             int rows = (in.op == OP_M4x4 || in.op == OP_M3x4) ? 4 : (in.op == OP_M3x2 ? 2 : 3);
             bool dp4 = in.op == OP_M4x4 || in.op == OP_M4x3;
             expr = "float4(";

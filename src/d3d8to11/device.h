@@ -276,6 +276,15 @@ private:
     bool m_dumped = false;
     void TraceFlush();
     bool EnsureShadowMap();
+    // Scene effects need the camera from the terrain draw (StartSunFrame).
+    bool SceneFx() const { return g_config.sunLighting || g_config.postEnabled || g_config.grassPhysics; }
+    void CapturePusher();
+    void UploadGrass();
+    ComPtr<ID3D11Buffer> m_grassCB;
+    float m_pushers[32][4] = {};
+    UINT m_pusherCount = 0, m_lastBones = 0;
+    bool m_grassUploaded = false;
+    UINT m_vsWriteLo = 0, m_vsWriteHi = 0;
     UINT SupportedSamples(int requested);
     void ApplyMsaa();
     UINT m_msaaApplied = 1;

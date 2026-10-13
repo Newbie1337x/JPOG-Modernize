@@ -146,6 +146,8 @@ bool Device::CreateSunResources()
     // on from the overlay; the map follows [Lighting] ShadowResolution (EnsureShadowMap).
     cb.ByteWidth = (sizeof(ResolveConstants) + 15) & ~15u;
     if (FAILED(m_device->CreateBuffer(&cb, nullptr, &m_resolveCB))) return false;
+    cb.ByteWidth = sizeof(float) * 4 * 33; // Grass: pushers[32], grassParams
+    if (FAILED(m_device->CreateBuffer(&cb, nullptr, &m_grassCB))) return false;
 
     D3D11_SAMPLER_DESC sm = {};
     sm.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
@@ -284,6 +286,8 @@ void Device::StartSunFrame()
     m_sun.settings[2] = g_config.shadowStrength; m_sun.settings[3] = 1.0f / res;
     if (g_config.sunLighting && m_sunDSV) m_ctx->ClearDepthStencilView(m_sunDSV.Get(), D3D11_CLEAR_DEPTH, 1, 0);
     m_sunStarted = true;
+    m_pusherCount = 0;
+    m_grassUploaded = false;
     LogOnce("sun-viewport", "Sun camera viewport %lu,%lu %lux%lu depth %.3f..%.3f; camera rows z %g %g %g %g w %g %g %g %g",
             m_viewport.X, m_viewport.Y, m_viewport.Width, m_viewport.Height, m_viewport.MinZ, m_viewport.MaxZ,
             rows[2][0], rows[2][1], rows[2][2], rows[2][3], rows[3][0], rows[3][1], rows[3][2], rows[3][3]);
@@ -328,9 +332,67 @@ void Device::CaptureGameSun()
     XMStoreFloat3(reinterpret_cast<XMFLOAT3*>(m_gameSun), XMVector3Normalize(XMVectorLerp(prev, w, 0.05f)));
 }
 
+// Skinned draws with enough bones (creatures) push the grass. Bone i is three rows at
+// c[5 + 3i] (the shader indexes c5[a0] with a0 = c4 * index); its translation is the w column.
+// The rows are in the space c0..c3 maps to clip, so c0 and the inverse camera take them to world.
+void Device::CapturePusher()
+{
+    UINT bones = m_lastBones;
+    if (m_vsWriteLo <= 5 && m_vsWriteHi > 5) bones = (m_vsWriteHi - 5) / 3;
+    m_lastBones = bones;
+    if (bones < (UINT)g_config.grassMinBones || bones > 80 || m_pusherCount >= 32) return;
+    float c0[4][4];
+    memcpy(c0, m_vsConst, sizeof(c0));
+    XMMATRIX modelToClip, clipToWorld;
+    LoadRows(c0, modelToClip);
+    LoadRows(m_sun.clipToWorld, clipToWorld);
+    XMMATRIX model = modelToClip * clipToWorld;
+    auto boneAt = [&](UINT i) { const UINT b = 5 + 3 * i; return XMVectorSet(m_vsConst[b][3], m_vsConst[b + 1][3], m_vsConst[b + 2][3], 1); };
+    XMVECTOR root = boneAt(0), lo = root, hi = root;
+    for (UINT i = 1; i < bones; i++) { XMVECTOR t = boneAt(i); lo = XMVectorMin(lo, t); hi = XMVectorMax(hi, t); }
+    XMVECTOR centerModel = (lo + hi) * 0.5f;
+    const float scale = XMVectorGetX(XMVector3Length(XMVector3TransformNormal(XMVectorSet(1, 0, 0, 0), model)));
+    XMVECTOR ext = (hi - lo) * scale;
+    // Footprint: half the larger horizontal extent of the skeleton.
+    float radius = 0.5f * (XMVectorGetX(ext) > XMVectorGetZ(ext) ? XMVectorGetX(ext) : XMVectorGetZ(ext));
+    radius = (radius < 1.0f ? 1.0f : (radius > 15.0f ? 15.0f : radius)) * g_config.grassRadius;
+    XMFLOAT3 p;
+    XMStoreFloat3(&p, XMVector3TransformCoord(centerModel, model));
+    if (!std::isfinite(p.x + p.y + p.z)) return;
+    for (UINT k = 0; k < m_pusherCount; k++) {
+        float dx = m_pushers[k][0] - p.x, dz = m_pushers[k][2] - p.z;
+        if (dx * dx + dz * dz < 1.0f) { if (radius > m_pushers[k][3]) m_pushers[k][3] = radius; return; }
+    }
+    float* q = m_pushers[m_pusherCount++];
+    q[0] = p.x; q[1] = p.y; q[2] = p.z; q[3] = radius;
+    m_grassUploaded = false;
+    TraceSun("Grass pusher: %u bones, centre %.1f %.1f %.1f, radius %.1f", bones, p.x, p.y, p.z, radius);
+    LogOnce("grass-first", "Grass pusher found: %u bones, radius %.1f", bones, radius);
+}
+
+void Device::UploadGrass()
+{
+    if (!m_grassCB) return;
+    if (!m_grassUploaded) {
+        D3D11_MAPPED_SUBRESOURCE map;
+        if (SUCCEEDED(m_ctx->Map(m_grassCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+            float* f = (float*)map.pData;
+            memcpy(f, m_pushers, sizeof(m_pushers));
+            // Only the main view's grass reacts (the 256x256 offscreen pass has its own camera).
+            const bool on = g_config.grassPhysics && m_worldDraw;
+            f[128] = on ? (float)m_pusherCount : 0.0f;
+            f[129] = g_config.grassPush;
+            f[130] = g_config.grassFlatten;
+            f[131] = 0;
+            m_ctx->Unmap(m_grassCB.Get(), 0);
+            m_grassUploaded = on;
+        }
+    }
+    m_ctx->VSSetConstantBuffers(3, 1, m_grassCB.GetAddressOf());
+}
 void Device::UpdateSun(bool shadowPass)
 {
-    if (!g_config.sunLighting && !g_config.postEnabled) {
+    if (!SceneFx()) {
         m_worldDraw = false;
     } else {
         if (m_worldDraw && m_worldKind == 2 && !m_sunStarted && !m_sunResolved) StartSunFrame();
@@ -340,7 +402,10 @@ void Device::UpdateSun(bool shadowPass)
         } else if (m_sunResolved && m_worldCaster) {
             m_lateWorldDraws++;
         }
-        if (m_worldDraw && m_worldKind == 1 && !m_sunResolved && !shadowPass) CaptureGameSun();
+        if (m_worldDraw && m_worldKind == 1 && !m_sunResolved && !shadowPass) {
+            CaptureGameSun();
+            if (g_config.grassPhysics) CapturePusher();
+        }
     }
     m_sun.flags[0] = m_worldDraw ? 1.0f : 0.0f;
     m_sun.flags[1] = shadowPass ? 1.0f : 0.0f;
@@ -356,6 +421,7 @@ void Device::UpdateSun(bool shadowPass)
         }
     }
     m_ctx->VSSetConstantBuffers(2, 1, m_sunCB.GetAddressOf());
+    if (m_worldKind == 4) UploadGrass();
     m_ctx->PSSetConstantBuffers(1, 1, m_sunCB.GetAddressOf());
 }
 
