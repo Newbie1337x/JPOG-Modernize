@@ -688,7 +688,8 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
     if (WorldShaderKind(decl) == 1) {
         // r6 is the skinned normal in the coordinate system consumed by c0.
         // Transform its inverse transpose into the shared terrain world space.
-        s += "  if (sunControl.x > 0.5 && sunFlags.x > 0.5) {\n";
+        // Also needed by the tessellation stages (sunControl.z) to curve the surface.
+        s += "  if ((sunControl.x > 0.5 || sunControl.z > 0.5) && sunFlags.x > 0.5) {\n";
         s += "    float3 basis[3];\n";
         s += "    [unroll] for(int a=0;a<3;a++) {\n";
         s += "      float4 clipAxis=float4(c[0][a],c[1][a],c[2][a],c[3][a]);\n";
@@ -1066,12 +1067,87 @@ std::string GenerateFFPS(const FFKey& k)
     return s;
 }
 
+// ---- tessellation -------------------------------------------------------------------------------
+// PN triangles (Vlachos et al. 2001) between the translated VS and PS. The VS already outputs the
+// shared world position and, with sunControl.z set, the skinned world normal. Edge factors come
+// from the edge's own screen length, so neighbouring patches always agree. The clip position is
+// interpolated from the corners (keeping the game's projection and jitter) plus the curvature
+// offset taken through the camera view-projection.
+
+namespace {
+const char* kTessCommon =
+    "cbuffer Tess : register(b5) { float4 tessViewProj[4]; float4 tessParams; float4 tessScreen; };\n"
+    "struct PatchConst {\n"
+    "  float edges[3] : SV_TessFactor; float inside : SV_InsideTessFactor;\n"
+    "  float3 b210 : B210; float3 b120 : B120; float3 b021 : B021;\n"
+    "  float3 b012 : B012; float3 b102 : B102; float3 b201 : B201; float3 b111 : B111;\n"
+    "};\n";
+}
+
+std::string TessellationHS(bool flipWinding)
+{
+    std::string s = kVSOutputStruct;
+    s += kTessCommon;
+    s +=
+        "float3 SafeNormal(float3 n) { float l = dot(n, n); return l > 1e-12 ? n * rsqrt(l) : 0; }\n"
+        // Control point near pi on edge pi-pj, projected onto the tangent plane at pi.
+        "float3 EdgePoint(float3 pi, float3 pj, float3 ni) { return (2 * pi + pj - dot(pj - pi, ni) * tessParams.z * ni) / 3; }\n"
+        "float2 ToPixels(float4 p) { return p.xy / p.w * tessScreen.xy * 0.5; }\n"
+        "float EdgeFactor(float4 a, float4 b) {\n"
+        "  if (a.w <= 1e-4 || b.w <= 1e-4) return 1;\n"
+        "  return clamp(length(ToPixels(a) - ToPixels(b)) / tessParams.y, 1, tessParams.x); }\n"
+        "PatchConst Constants(InputPatch<VSOut, 3> p) {\n"
+        "  PatchConst o;\n"
+        // Locals, not o.edges[], for the inside factor: reading the outputs back trips fxc.
+        "  float e0 = EdgeFactor(p[1].pos, p[2].pos), e1 = EdgeFactor(p[2].pos, p[0].pos), e2 = EdgeFactor(p[0].pos, p[1].pos);\n"
+        "  o.edges[0] = e0; o.edges[1] = e1; o.edges[2] = e2;\n"
+        "  o.inside = (e0 + e1 + e2) / 3;\n"
+        "  float3 P0 = p[0].world, P1 = p[1].world, P2 = p[2].world;\n"
+        "  float3 N0 = SafeNormal(p[0].normal), N1 = SafeNormal(p[1].normal), N2 = SafeNormal(p[2].normal);\n"
+        "  o.b210 = EdgePoint(P0, P1, N0); o.b120 = EdgePoint(P1, P0, N1);\n"
+        "  o.b021 = EdgePoint(P1, P2, N1); o.b012 = EdgePoint(P2, P1, N2);\n"
+        "  o.b102 = EdgePoint(P2, P0, N2); o.b201 = EdgePoint(P0, P2, N0);\n"
+        "  float3 E = (o.b210 + o.b120 + o.b021 + o.b012 + o.b102 + o.b201) / 6, V = (P0 + P1 + P2) / 3;\n"
+        "  o.b111 = E + (E - V) / 2;\n"
+        "  return o; }\n";
+    s += std::string("[domain(\"tri\")] [partitioning(\"fractional_odd\")] [outputtopology(\"") +
+         (flipWinding ? "triangle_ccw" : "triangle_cw") + "\")]\n";
+    s += "[outputcontrolpoints(3)] [patchconstantfunc(\"Constants\")] [maxtessfactor(16.0)]\n"
+         "VSOut main(InputPatch<VSOut, 3> p, uint i : SV_OutputControlPointID) { return p[i]; }\n";
+    return s;
+}
+
+std::string TessellationDS()
+{
+    std::string s = kVSOutputStruct;
+    s += kTessCommon;
+    s +=
+        "[domain(\"tri\")]\n"
+        "VSOut main(PatchConst c, float3 b : SV_DomainLocation, const OutputPatch<VSOut, 3> p) {\n"
+        "  float u = b.x, v = b.y, w = b.z;\n"
+        "  VSOut o;\n"
+        "#define BARY(f) (p[0].f * u + p[1].f * v + p[2].f * w)\n"
+        "  o.pos = BARY(pos); o.d0 = BARY(d0); o.d1 = BARY(d1);\n"
+        "  o.t0 = BARY(t0); o.t1 = BARY(t1); o.t2 = BARY(t2); o.t3 = BARY(t3);\n"
+        "  o.t4 = BARY(t4); o.t5 = BARY(t5); o.t6 = BARY(t6); o.t7 = BARY(t7);\n"
+        "  o.fog = BARY(fog); o.normal = BARY(normal); o.world = BARY(world);\n"
+        "  float3 pn = p[0].world * u * u * u + p[1].world * v * v * v + p[2].world * w * w * w\n"
+        "    + c.b210 * (3 * u * u * v) + c.b120 * (3 * u * v * v) + c.b201 * (3 * u * u * w)\n"
+        "    + c.b021 * (3 * v * v * w) + c.b102 * (3 * u * w * w) + c.b012 * (3 * v * w * w)\n"
+        "    + c.b111 * (6 * u * v * w);\n"
+        "  float4 d = float4(pn - o.world, 0);\n"
+        "  o.world = pn;\n"
+        "  o.pos += float4(dot(d, tessViewProj[0]), dot(d, tessViewProj[1]), dot(d, tessViewProj[2]), dot(d, tessViewProj[3]));\n"
+        "  return o; }\n";
+    return s;
+}
+
 // ---- compilation --------------------------------------------------------------------------------
 
 typedef HRESULT(WINAPI* D3DCompile_t)(const void*, SIZE_T, const char*, const D3D_SHADER_MACRO*,
                                        ID3DInclude*, const char*, const char*, UINT, UINT, ID3DBlob**, ID3DBlob**);
 
-ComPtr<ID3DBlob> CompileHLSL(const std::string& source, const char* profile, const std::string& debugName)
+ComPtr<ID3DBlob> CompileHLSL(const std::string& source, const char* profile, const std::string& debugName, bool optimize)
 {
     static D3DCompile_t compile = nullptr;
     if (!compile) {
@@ -1087,7 +1163,7 @@ ComPtr<ID3DBlob> CompileHLSL(const std::string& source, const char* profile, con
     }
     ComPtr<ID3DBlob> code, errors;
     HRESULT hr = compile(source.data(), source.size(), debugName.c_str(), nullptr, nullptr, "main", profile,
-                         D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+                         optimize ? D3DCOMPILE_OPTIMIZATION_LEVEL3 : D3DCOMPILE_SKIP_OPTIMIZATION, 0, &code, &errors);
     if (FAILED(hr)) {
         Log("ERROR compiling %s (%s):\n%s\n--- source ---\n%s", debugName.c_str(), profile,
             errors ? (const char*)errors->GetBufferPointer() : "?", source.c_str());

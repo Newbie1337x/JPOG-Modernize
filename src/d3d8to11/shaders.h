@@ -64,7 +64,16 @@ struct FFKey {
 std::string GenerateFFPS(const FFKey& key);
 
 // HLSL compilation (d3dcompiler_47.dll is loaded dynamically).
-ComPtr<ID3DBlob> CompileHLSL(const std::string& source, const char* profile, const std::string& debugName);
+// PN-triangle hull/domain shaders for VSOut patches (see TessConstants).
+std::string TessellationHS(bool flipWinding);
+std::string TessellationDS();
+struct TessConstants {
+    float viewProj[4][4]; // camera world -> clip rows (terrain c0..c3)
+    float params[4];      // max factor, target pixels per sub-edge, curvature, unused
+    float screen[4];      // viewport width, height
+};
+// optimize = false compiles with D3DCOMPILE_SKIP_OPTIMIZATION (see the tessellation hull shader).
+ComPtr<ID3DBlob> CompileHLSL(const std::string& source, const char* profile, const std::string& debugName, bool optimize = true);
 
 // Pixel shader constant buffer layout (b0), shared by translated and fixed-function shaders.
 struct PSConstants {

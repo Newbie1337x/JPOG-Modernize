@@ -564,6 +564,7 @@ void Device::UpdateSun(bool shadowPass)
     m_sun.flags[3] = (float)m_worldKind;
     m_sun.control[0] = g_config.replaceLighting || ActiveMaterial() ? 1.0f : 0.0f;
     m_sun.control[1] = (float)g_config.lightingDebug;
+    m_sun.control[2] = m_tessCandidate && !shadowPass ? 1.0f : 0.0f; // VS emits normals for the hull shader
     m_sun.camera[3] = g_config.normalStrength * (g_config.normalFlipGreen ? -1.0f : 1.0f);
     if (!m_sunUploadedValid || memcmp(&m_sunUploaded, &m_sun, sizeof(m_sun))) {
         D3D11_MAPPED_SUBRESOURCE map;

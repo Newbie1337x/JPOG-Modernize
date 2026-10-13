@@ -84,6 +84,13 @@ struct Config {
     float taaHistory=.72f, fsrSharpness=.5f;
     float waterInteractionStrength = 1.0f;
     int waterDebug = 0;             // 0 shaded, 1 thickness, 2 Fresnel, 3 foam
+    // [Tessellation] PN-triangle smoothing of low-poly models (hull/domain shaders)
+    bool tessellation = true;       // [Tessellation] Enabled
+    bool tessDinosOnly = true;      // [Tessellation] DinosOnly: only textures from dinos_* libraries
+    float tessMaxFactor = 8.0f;     // [Tessellation] MaxFactor: subdivisions per edge, 1..16
+    float tessPixels = 10.0f;       // [Tessellation] PixelsPerEdge: target screen length of a sub-edge
+    float tessCurvature = 1.0f;     // [Tessellation] Curvature: 0 flat .. 1 full PN curvature
+    bool tessFlipWinding = false;   // [Tessellation] FlipWinding: if tessellated models look inside out
     // [Grass] creatures bend and flatten the grass around them
     bool grassPhysics = true;       // [Grass] Enabled
     float grassPush = 0.8f;         // [Grass] Push: sideways bend, in blade heights

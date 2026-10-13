@@ -184,6 +184,15 @@ void LoadConfig()
     if(!(g_config.fsrSharpness>=0 && g_config.fsrSharpness<=1))g_config.fsrSharpness=.5f;
     g_config.waterInteractionStrength=readWater("InteractionStrength",1,0,3);
     g_config.waterDebug=GetPrivateProfileIntA("Water","DebugView",0,ini.c_str());
+    auto readSectionFloat=[&](const char* section,const char* key,float fallback,float lo,float hi){char value[64];
+        GetPrivateProfileStringA(section,key,"",value,sizeof(value),ini.c_str());
+        float f=value[0]?(float)atof(value):fallback;return f>=lo && f<=hi?f:fallback;};
+    g_config.tessellation=GetPrivateProfileIntA("Tessellation","Enabled",1,ini.c_str())!=0;
+    g_config.tessDinosOnly=GetPrivateProfileIntA("Tessellation","DinosOnly",1,ini.c_str())!=0;
+    g_config.tessMaxFactor=readSectionFloat("Tessellation","MaxFactor",8,1,16);
+    g_config.tessPixels=readSectionFloat("Tessellation","PixelsPerEdge",10,2,64);
+    g_config.tessCurvature=readSectionFloat("Tessellation","Curvature",1,0,1.5f);
+    g_config.tessFlipWinding=GetPrivateProfileIntA("Tessellation","FlipWinding",0,ini.c_str())!=0;
     g_config.grassPhysics = GetPrivateProfileIntA("Grass", "Enabled", 1, ini.c_str()) != 0;
     g_config.grassPush = readGrass("Push", 0.8f, 0, 3);
     g_config.grassFlatten = readGrass("Flatten", 0.5f, 0, 1);
@@ -285,6 +294,12 @@ void SaveConfig()
     putFloat("Antialiasing","Sharpness",g_config.fsrSharpness);
     putFloat("Water","InteractionStrength",g_config.waterInteractionStrength);
     putInt("Water","DebugView",g_config.waterDebug);
+    putInt("Tessellation","Enabled",g_config.tessellation);
+    putInt("Tessellation","DinosOnly",g_config.tessDinosOnly);
+    putFloat("Tessellation","MaxFactor",g_config.tessMaxFactor);
+    putFloat("Tessellation","PixelsPerEdge",g_config.tessPixels);
+    putFloat("Tessellation","Curvature",g_config.tessCurvature);
+    putInt("Tessellation","FlipWinding",g_config.tessFlipWinding);
     putInt("Grass", "Enabled", g_config.grassPhysics);
     putFloat("Grass", "Push", g_config.grassPush);
     putFloat("Grass", "Flatten", g_config.grassFlatten);

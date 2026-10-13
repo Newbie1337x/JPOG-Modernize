@@ -356,6 +356,18 @@ void Device::DrawOverlay()
             ImGui::Combo("Water debug",&g_config.waterDebug,debug,8);
             ImGui::EndDisabled();
         }
+        if (ImGui::CollapsingHeader("Tessellation", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Smooth model silhouettes (PN triangles)", &g_config.tessellation);
+            ImGui::Checkbox("Dinosaurs only", &g_config.tessDinosOnly);
+            ImGui::SliderFloat("Max subdivision", &g_config.tessMaxFactor, 1, 16, "%.0f");
+            ImGui::SliderFloat("Pixels per edge", &g_config.tessPixels, 2, 64, "%.0f");
+            ImGui::SetItemTooltip("Smaller = more triangles. Edges are split until a piece is about this long on screen.");
+            ImGui::SliderFloat("Curvature", &g_config.tessCurvature, 0, 1.5f, "%.2f");
+            ImGui::Checkbox("Flip winding", &g_config.tessFlipWinding);
+            ImGui::SetItemTooltip("Enable if tessellated models look inside out.");
+            ImGui::Text("%u tessellated draws this frame", m_tessDrawsShown);
+            if (m_tessFailed) ImGui::TextColored(ImVec4(1, .6f, .2f, 1), "Tessellation disabled after a failure: see the log.");
+        }
         if (ImGui::CollapsingHeader("Interactive grass", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Creatures bend the grass", &g_config.grassPhysics);
             ImGui::BeginDisabled(!g_config.grassPhysics);
