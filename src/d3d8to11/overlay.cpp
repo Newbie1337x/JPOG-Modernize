@@ -53,7 +53,7 @@ void AnglesFromSun(float x, float yUp, float z)
 
 const char* kDebugViews[] = { "Off", "Albedo (replacement)", "Normals (replacement)", "Shadow mask",
                               "Depth normals", "Mask + shadow map", "World grid", "Raw visibility",
-                              "Dump one frame" };
+                              "Dump one frame", "Ambient occlusion only", "Light shafts only" };
 
 } // namespace
 
@@ -234,6 +234,21 @@ void Device::DrawOverlay()
                 g_config.sunBoost = 0.25f; g_config.shadowCool = 0.5f; g_config.exposure = 1.0f;
                 g_config.contrast = 0.97f; g_config.saturation = 1.09f; g_config.warmth = 0.23f;
             }
+            ImGui::EndDisabled();
+        }
+
+        if (ImGui::CollapsingHeader("Ambient occlusion & light shafts", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Ambient occlusion (HBAO)", &g_config.aoEnabled);
+            ImGui::BeginDisabled(!g_config.aoEnabled);
+            ImGui::SliderFloat("AO radius", &g_config.aoRadius, 0.3f, 8.0f, "%.1f units");
+            ImGui::SliderFloat("AO strength", &g_config.aoStrength, 0.0f, 1.0f, "%.2f");
+            ImGui::EndDisabled();
+            ImGui::Checkbox("Light shafts (volumetric sun)", &g_config.shafts);
+            ImGui::SetItemTooltip("Needs sun shadows. Strongest when looking toward the sun.");
+            ImGui::BeginDisabled(!g_config.shafts || !g_config.sunLighting);
+            ImGui::SliderFloat("Shaft strength", &g_config.shaftStrength, 0.0f, 2.0f, "%.2f");
+            ImGui::SliderFloat("Scattering", &g_config.shaftScatter, 0.0f, 0.95f, "%.2f");
+            ImGui::SetItemTooltip("0 = even haze, higher = tighter glow around the sun.");
             ImGui::EndDisabled();
         }
 

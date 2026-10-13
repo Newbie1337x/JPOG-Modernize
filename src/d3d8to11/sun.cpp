@@ -27,6 +27,8 @@ struct ResolveConstants {
     float misc[4];   // debug view, shadow distance, light depth range, shadows on
     float grade0[4]; // exposure, contrast, saturation, warmth
     float grade1[4]; // sun boost, shadow cool, post on, -
+    float fx0[4];    // AO radius (world), AO intensity, AO strength, light shaft strength
+    float fx1[4];    // AO on, shafts on, scattering g, -
 };
 
 const char* kResolveVS =
@@ -34,10 +36,11 @@ const char* kResolveVS =
     "  float2 uv = float2((id << 1) & 2, id & 2);\n"
     "  return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); }\n";
 
-// Compiled twice: MSAA 0 (Texture2D depth) and MSAA 1 (Texture2DMS depth, sample 0).
-const char* kResolvePS =
+// Shared by the effects pass and the resolve pass. Compiled with MSAA 0 (Texture2D depth) and
+// MSAA 1 (Texture2DMS depth, sample 0).
+const char* kSceneCommon =
     "cbuffer Resolve : register(b0) { float4 clipToWorld[4]; float4 lightRows[4]; float4 sunDir;\n"
-    "  float4 params; float4 screen; float4 misc; float4 grade0; float4 grade1; };\n"
+    "  float4 params; float4 screen; float4 misc; float4 grade0; float4 grade1; float4 fx0; float4 fx1; };\n"
     "#if MSAA\n"
     "Texture2DMS<float> sceneDepth : register(t0);\n"
     "float LoadDepth(int2 p) { return sceneDepth.Load(p, 0); }\n"
@@ -46,20 +49,101 @@ const char* kResolvePS =
     "float LoadDepth(int2 p) { return sceneDepth.Load(int3(p, 0)); }\n"
     "#endif\n"
     "Texture2D<float> shadowMap : register(t1);\n"
-    "Texture2D<float4> sceneColor : register(t2);\n"
     "SamplerComparisonState cmp : register(s0);\n"
-    "static const float2 kTaps[12] = { float2(-0.326,-0.406), float2(-0.840,-0.074), float2(-0.696,0.457),\n"
-    "  float2(-0.203,0.621), float2(0.962,-0.195), float2(0.473,-0.480), float2(0.519,0.767),\n"
-    "  float2(0.185,-0.893), float2(0.507,0.064), float2(0.896,0.412), float2(-0.322,-0.933),\n"
-    "  float2(-0.792,-0.598) };\n"
     "float3 Unproject(float2 px, float d) {\n"
     "  float2 ndc = float2(px.x * screen.x * 2 - 1, 1 - px.y * screen.y * 2) - screen.zw;\n"
     "  float4 c = float4(ndc, d, 1);\n"
     "  float4 w = float4(dot(c, clipToWorld[0]), dot(c, clipToWorld[1]), dot(c, clipToWorld[2]), dot(c, clipToWorld[3]));\n"
     "  return w.xyz / w.w; }\n"
     "float3 WorldAt(int2 p) { return Unproject(p + 0.5, LoadDepth(p)); }\n"
+    // Normal from depth: per axis take the neighbour on the same surface (smaller step).
+    "float3 NormalAt(int2 p, float3 P, float3 V) {\n"
+    "  float3 L = WorldAt(p - int2(1, 0)), R = WorldAt(p + int2(1, 0));\n"
+    "  float3 U = WorldAt(p - int2(0, 1)), D = WorldAt(p + int2(0, 1));\n"
+    "  float3 dx = dot(R - P, R - P) < dot(P - L, P - L) ? R - P : P - L;\n"
+    "  float3 dy = dot(D - P, D - P) < dot(P - U, P - U) ? D - P : P - U;\n"
+    "  float3 N = cross(dy, dx); float nl = dot(N, N);\n"
+    "  N = nl > 1e-20 ? N * rsqrt(nl) : normalize(V);\n"
+    "  return dot(N, V) < 0 ? -N : N; }\n"
+    // Linear view depth (1 / homogeneous w of the unprojection) for depth-aware blurring.
+    "float LinearDepth(int2 p) {\n"
+    "  float2 ndc = float2((p.x + 0.5) * screen.x * 2 - 1, 1 - (p.y + 0.5) * screen.y * 2);\n"
+    "  return 1 / dot(float4(ndc, LoadDepth(p), 1), clipToWorld[3]); }\n"
+    // Interleaved gradient noise: per-pixel jitter that the 4x4 blur averages out.
+    "float Ign(float2 px) { return frac(52.9829189 * frac(dot(px, float2(0.06711056, 0.00583715)))); }\n";
+
+// Effects pass -> R16G16: x = ambient occlusion (1 = open), y = sun light scattered toward the
+// camera along the view ray (light shafts).
+const char* kFxMain =
+    "float2 main(float4 pos : SV_Position) : SV_Target {\n"
+    "  int2 p = int2(pos.xy);\n"
+    "  float d = LoadDepth(p);\n"
+    "  bool sky = d >= 0.999999;\n"
+    "  float noise = Ign(pos.xy);\n"
+    "  float3 cam = Unproject(pos.xy, 0);\n"
+    "  float3 P = Unproject(pos.xy, sky ? 0.99999 : d);\n"
+    "  float ao = 1;\n"
+    "  if (!sky && fx1.x > 0.5) {\n"
+    // Normal-oriented horizon-based AO: 6 directions x 4 steps over a world-space radius.
+    "    float3 N = NormalAt(p, P, cam - P);\n"
+    "    float wpp = length(Unproject(pos.xy + float2(1, 0), d) - P);\n"
+    "    float rpx = clamp(fx0.x / max(wpp, 1e-5), 3, 96);\n"
+    "    float occ = 0;\n"
+    "    [unroll] for (int k = 0; k < 6; k++) {\n"
+    "      float ang = (k + noise) * 1.0471976;\n"
+    "      float2 dir = float2(cos(ang), sin(ang));\n"
+    "      float best = 0;\n"
+    "      [unroll] for (int s = 0; s < 4; s++) {\n"
+    "        float2 o = dir * rpx * (s + frac(noise * 3.7 + s * 0.31) + 0.25) / 4;\n"
+    "        int2 q = int2(pos.xy + o);\n"
+    "        float dq = LoadDepth(q);\n"
+    "        if (dq >= 0.999999) continue;\n"
+    "        float3 H = Unproject(q + 0.5, dq) - P;\n"
+    "        float l2 = dot(H, H);\n"
+    "        float h = dot(H, N) * rsqrt(max(l2, 1e-8));\n"
+    "        best = max(best, (h - 0.15) * saturate(1 - l2 / (fx0.x * fx0.x)));\n"
+    "      }\n"
+    "      occ += saturate(best);\n"
+    "    }\n"
+    "    ao = 1 - saturate(occ / 6 * fx0.y);\n"
+    "  }\n"
+    "  float shafts = 0;\n"
+    "  if (fx1.y > 0.5 && misc.w > 0.5) {\n"
+    // March from the camera to the surface (or the shadow distance for the sky) through the
+    // sun's shadow map: lit air scatters light toward the camera (Henyey-Greenstein phase).
+    "    float3 V = P - cam; float len = length(V); float3 dir = V / max(len, 1e-5);\n"
+    "    float tmax = min(len, misc.y);\n"
+    "    float lit = 0;\n"
+    "    [loop] for (int i = 0; i < 24; i++) {\n"
+    "      float4 X = float4(cam + dir * ((i + noise) / 24 * tmax), 1);\n"
+    "      float3 q = float3(dot(X, lightRows[0]), dot(X, lightRows[1]), dot(X, lightRows[2]));\n"
+    "      lit += shadowMap.SampleCmpLevelZero(cmp, q.xy * float2(0.5, -0.5) + 0.5, q.z - params.z);\n"
+    "    }\n"
+    "    lit /= 24;\n"
+    "    float g = fx1.z, cosT = dot(dir, -sunDir.xyz);\n"
+    "    float phase = (1 - g * g) / pow(max(1 + g * g + 2 * g * cosT, 1e-4), 1.5) * 0.25;\n"
+    "    shafts = lit * phase * (tmax / misc.y);\n"
+    "  }\n"
+    "  return float2(ao, shafts); }\n";
+
+const char* kResolveMain =
+    "Texture2D<float4> sceneColor : register(t2);\n"
+    "Texture2D<float2> fxTex : register(t3);\n"
+    "static const float2 kTaps[12] = { float2(-0.326,-0.406), float2(-0.840,-0.074), float2(-0.696,0.457),\n"
+    "  float2(-0.203,0.621), float2(0.962,-0.195), float2(0.473,-0.480), float2(0.519,0.767),\n"
+    "  float2(0.185,-0.893), float2(0.507,0.064), float2(0.896,0.412), float2(-0.322,-0.933),\n"
+    "  float2(-0.792,-0.598) };\n"
     // Soft shoulder above 0.8 so boosted highlights roll off instead of clipping.
     "float3 Shoulder(float3 x) { return x <= 0.8 ? x : 0.8 + 0.2 * (1 - exp(-(x - 0.8) / 0.2)); }\n"
+    // 4x4 depth-aware average of the effects texture (removes the interleaved jitter).
+    "float2 BlurFx(int2 p) {\n"
+    "  float zc = LinearDepth(p); float2 sum = 0; float wsum = 0;\n"
+    "  [unroll] for (int y = -2; y < 2; y++) [unroll] for (int x = -2; x < 2; x++) {\n"
+    "    int2 q = p + int2(x, y);\n"
+    "    float w = 1 / (0.02 + abs(LinearDepth(q) - zc) / max(zc, 1e-4) * 40);\n"
+    "    sum += fxTex.Load(int3(q, 0)) * w; wsum += w;\n"
+    "  }\n"
+    "  return sum / wsum; }\n"
     "float4 main(float4 pos : SV_Position) : SV_Target {\n"
     "  int2 p = int2(pos.xy);\n"
     "  float3 color = sceneColor.Load(int3(p, 0)).rgb;\n"
@@ -69,20 +153,16 @@ const char* kResolvePS =
     "    return v >= 1 ? float4(0.2, 0.2, 0.6, 1) : float4(frac(v * misc.z / 2).xxx, 1); }\n"
     "  float d = LoadDepth(p);\n"
     "  bool sky = d >= 0.999999;\n"
+    "  float2 fx = (fx1.x > 0.5 || fx1.y > 0.5) ? BlurFx(p) : float2(1, 0);\n"
+    "  if (misc.x == 9) return float4(fx.xxx, 1);\n"
+    "  if (misc.x == 10) return float4(saturate(fx.y * fx0.w * 4).xxx, 1);\n"
     "  float shadow = 0, vis = 1;\n"
     "  if (sky && misc.x >= 3) return float4(1, 0.6, 1, 1);\n"
     "  if (!sky && misc.w > 0.5) {\n"
     "    float3 P = Unproject(pos.xy, d);\n"
     "    float3 V = Unproject(pos.xy, 0) - P;\n"
     "    float dist = length(V);\n"
-    // Normal from depth: per axis take the neighbour on the same surface (smaller step).
-    "    float3 L = WorldAt(p - int2(1, 0)), R = WorldAt(p + int2(1, 0));\n"
-    "    float3 U = WorldAt(p - int2(0, 1)), D = WorldAt(p + int2(0, 1));\n"
-    "    float3 dx = dot(R - P, R - P) < dot(P - L, P - L) ? R - P : P - L;\n"
-    "    float3 dy = dot(D - P, D - P) < dot(P - U, P - U) ? D - P : P - U;\n"
-    "    float3 N = cross(dy, dx); float nl = dot(N, N);\n"
-    "    N = nl > 1e-20 ? N * rsqrt(nl) : V / max(dist, 1e-6);\n"
-    "    if (dot(N, V) < 0) N = -N;\n"
+    "    float3 N = NormalAt(p, P, V);\n"
     "    if (misc.x == 4) return float4(N * 0.5 + 0.5, 1);\n"
     "    if (misc.x == 6) { float2 g = frac(P.xz / 8); return float4(g.x < 0.08 || g.y < 0.08 ? float3(1, 0, 0) : frac(P.yyy / 4), 1); }\n"
     "    float ndl = dot(N, sunDir.xyz);\n"
@@ -106,6 +186,10 @@ const char* kResolvePS =
     "  float3 shade = (1 - params.x * shadow) * lerp(float3(1, 1, 1), float3(0.93, 0.96, 1.0), shadow);\n"
     "  if (misc.x == 3) return float4(shade, 1);\n"
     "  float3 c = color * shade;\n"
+    // Ambient occlusion: full in shadow, softer where the sun hits directly.
+    "  if (!sky) c *= lerp(1, fx.x, fx0.z * lerp(0.6, 1, saturate(shadow * 2)));\n"
+    // Light shafts: warm sun light scattered by the air between camera and surface.
+    "  c += float3(1.0, 0.9, 0.72) * fx.y * fx0.w;\n"
     "  if (grade1.z > 0.5) {\n"
     // Sunlight: warm lift where the sun reaches (everything outside the shadow), cool shadows.
     "    float lit = sky ? 0 : 1 - shadow;\n"
@@ -177,12 +261,14 @@ bool Device::CreateSunResources()
         FAILED(m_device->CreateBlendState(&blend, &m_multiplyBlend))) return false;
 
     auto vs = CompileHLSL(kResolveVS, "vs_4_0", "sun_resolve_vs");
-    auto ps = CompileHLSL(std::string("#define MSAA 0\n") + kResolvePS, "ps_4_1", "sun_resolve_ps");
-    auto psMS = CompileHLSL(std::string("#define MSAA 1\n") + kResolvePS, "ps_4_1", "sun_resolve_ps_ms");
-    if (!vs || !ps || !psMS) return false;
-    if (FAILED(m_device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &m_resolveVS)) ||
-        FAILED(m_device->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &m_resolvePS)) ||
-        FAILED(m_device->CreatePixelShader(psMS->GetBufferPointer(), psMS->GetBufferSize(), nullptr, &m_resolvePSMS)))
+    if (!vs || FAILED(m_device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &m_resolveVS)))
+        return false;
+    auto makePS = [&](const char* body, int msaa, const char* name, ComPtr<ID3D11PixelShader>& out) {
+        auto blob = CompileHLSL(std::string(msaa ? "#define MSAA 1\n" : "#define MSAA 0\n") + kSceneCommon + body, "ps_4_1", name);
+        return blob && SUCCEEDED(m_device->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &out));
+    };
+    if (!makePS(kResolveMain, 0, "scene_resolve_ps", m_resolvePS) || !makePS(kResolveMain, 1, "scene_resolve_ps_ms", m_resolvePSMS) ||
+        !makePS(kFxMain, 0, "scene_fx_ps", m_fxPS) || !makePS(kFxMain, 1, "scene_fx_ps_ms", m_fxPSMS))
         return false;
     Log("Sun shadows: enabled %d, %d map, distance %.0f, strength %.2f, sun %s, grass %d, replacement lighting %d, debug %d",
         g_config.sunLighting, g_config.shadowResolution, g_config.shadowDistance, g_config.shadowStrength, g_config.sunFromGame ? "from game" : "fixed",
@@ -506,7 +592,9 @@ void Device::ResolveSun(const char* reason)
     m_sunResolved = true;
     TraceSun("Resolve at %s: %u casters in this segment", reason, m_segmentCasters);
     const bool shadows = g_config.sunLighting && m_segmentCasters && m_sunSRV;
-    if (!shadows && !g_config.postEnabled) return;
+    const bool shafts = shadows && g_config.shafts;
+    const bool fx = g_config.aoEnabled || shafts;
+    if (!shadows && !g_config.postEnabled && !fx) return;
     if (!m_resolvePS || !m_backBuffer || !m_autoDepth || !m_autoDepth->m_srv || !EnsureSceneCopy()) return;
     if (shadows && g_config.lightingDebug == 8 && !m_dumped) {
         if (!m_dumpAt) m_dumpAt = m_frame + 600;
@@ -532,30 +620,54 @@ void Device::ResolveSun(const char* reason)
     rc.grade0[2] = g_config.saturation; rc.grade0[3] = g_config.warmth;
     rc.grade1[0] = g_config.sunBoost; rc.grade1[1] = g_config.shadowCool;
     rc.grade1[2] = g_config.postEnabled ? 1.0f : 0.0f;
+    rc.fx0[0] = g_config.aoRadius; rc.fx0[1] = 1.6f; rc.fx0[2] = g_config.aoStrength; rc.fx0[3] = g_config.shaftStrength;
+    rc.fx1[0] = g_config.aoEnabled ? 1.0f : 0.0f; rc.fx1[1] = shafts ? 1.0f : 0.0f; rc.fx1[2] = g_config.shaftScatter;
     D3D11_MAPPED_SUBRESOURCE map;
     if (FAILED(m_ctx->Map(m_resolveCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
     memcpy(map.pData, &rc, sizeof(rc));
     m_ctx->Unmap(m_resolveCB.Get(), 0);
 
     CopySceneColor();
-    ID3D11RenderTargetView* rtv = m_backBuffer->Rtv();
-    m_ctx->OMSetRenderTargets(1, &rtv, nullptr);
     D3D11_VIEWPORT vp = { 0, 0, w, h, 0, 1 };
     m_ctx->RSSetViewports(1, &vp);
+    const bool ms = m_autoDepth->m_samples > 1;
+    if (fx && EnsureFxTarget()) {
+        // Effects pass: AO + light shafts into m_fxTex, read (blurred) by the resolve below.
+        ID3D11ShaderResourceView* none[4] = {};
+        m_ctx->PSSetShaderResources(0, 4, none);
+        ID3D11RenderTargetView* fxRtv = m_fxRTV.Get();
+        m_ctx->OMSetRenderTargets(1, &fxRtv, nullptr);
+        m_ctx->RSSetState(m_noCull.Get());
+        m_ctx->OMSetBlendState(m_noBlend.Get(), nullptr, 0xffffffff);
+        m_ctx->OMSetDepthStencilState(m_noDepth.Get(), 0);
+        m_ctx->IASetInputLayout(nullptr);
+        m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        m_ctx->VSSetShader(m_resolveVS.Get(), nullptr, 0);
+        m_ctx->PSSetShader(ms ? m_fxPSMS.Get() : m_fxPS.Get(), nullptr, 0);
+        m_ctx->PSSetConstantBuffers(0, 1, m_resolveCB.GetAddressOf());
+        ID3D11ShaderResourceView* in[2] = { m_autoDepth->m_srv.Get(), shadows ? m_sunSRV.Get() : nullptr };
+        m_ctx->PSSetShaderResources(0, 2, in);
+        m_ctx->PSSetSamplers(0, 1, m_sunSampler.GetAddressOf());
+        m_ctx->Draw(3, 0);
+        m_ctx->PSSetShaderResources(0, 2, none);
+    }
+    ID3D11RenderTargetView* rtv = m_backBuffer->Rtv();
+    m_ctx->OMSetRenderTargets(1, &rtv, nullptr);
     m_ctx->RSSetState(m_noCull.Get());
     m_ctx->OMSetBlendState(m_noBlend.Get(), nullptr, 0xffffffff);
     m_ctx->OMSetDepthStencilState(m_noDepth.Get(), 0);
     m_ctx->IASetInputLayout(nullptr);
     m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     m_ctx->VSSetShader(m_resolveVS.Get(), nullptr, 0);
-    m_ctx->PSSetShader(m_autoDepth->m_samples > 1 ? m_resolvePSMS.Get() : m_resolvePS.Get(), nullptr, 0);
+    m_ctx->PSSetShader(ms ? m_resolvePSMS.Get() : m_resolvePS.Get(), nullptr, 0);
     m_ctx->PSSetConstantBuffers(0, 1, m_resolveCB.GetAddressOf());
-    ID3D11ShaderResourceView* srvs[3] = { m_autoDepth->m_srv.Get(), shadows ? m_sunSRV.Get() : nullptr, m_sceneCopySRV.Get() };
-    m_ctx->PSSetShaderResources(0, 3, srvs);
+    ID3D11ShaderResourceView* srvs[4] = { m_autoDepth->m_srv.Get(), shadows ? m_sunSRV.Get() : nullptr, m_sceneCopySRV.Get(),
+                                          fx ? m_fxSRV.Get() : nullptr };
+    m_ctx->PSSetShaderResources(0, 4, srvs);
     m_ctx->PSSetSamplers(0, 1, m_sunSampler.GetAddressOf());
     m_ctx->Draw(3, 0);
-    ID3D11ShaderResourceView* nulls[3] = {};
-    m_ctx->PSSetShaderResources(0, 3, nulls);
+    ID3D11ShaderResourceView* nulls[4] = {};
+    m_ctx->PSSetShaderResources(0, 4, nulls);
 
     // Everything above has to be rebound by the next game draw.
     m_rtDirty = m_viewportDirty = true;
@@ -563,6 +675,23 @@ void Device::ResolveSun(const char* reason)
     m_lastBlend = nullptr; m_lastDepth = nullptr; m_lastRaster = nullptr;
     LogOnce(std::string("sun-resolve-") + reason, "Scene pass at %s: shadows %d (%u casters), post %d",
             reason, shadows, m_segmentCasters, g_config.postEnabled);
+}
+
+bool Device::EnsureFxTarget()
+{
+    const UINT w = m_backBuffer->m_width, h = m_backBuffer->m_height;
+    if (m_fxTex && m_fxW == w && m_fxH == h) return true;
+    m_fxSRV.Reset(); m_fxRTV.Reset(); m_fxTex.Reset();
+    D3D11_TEXTURE2D_DESC td = { w, h, 1, 1, DXGI_FORMAT_R16G16_FLOAT, { 1, 0 }, D3D11_USAGE_DEFAULT,
+                                D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, 0, 0 };
+    if (FAILED(m_device->CreateTexture2D(&td, nullptr, &m_fxTex)) ||
+        FAILED(m_device->CreateRenderTargetView(m_fxTex.Get(), nullptr, &m_fxRTV)) ||
+        FAILED(m_device->CreateShaderResourceView(m_fxTex.Get(), nullptr, &m_fxSRV))) {
+        m_fxTex.Reset();
+        return false;
+    }
+    m_fxW = w; m_fxH = h;
+    return true;
 }
 
 bool Device::EnsureSceneCopy()

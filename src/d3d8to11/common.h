@@ -49,6 +49,13 @@ struct Config {
     float contrast = 0.97f;         // [Post] Contrast
     float saturation = 1.09f;        // [Post] Saturation
     float warmth = 0.23f;           // [Post] Warmth (-1 cold .. 1 warm)
+    // [Effects] ambient occlusion and volumetric light shafts (scene pass, before the HUD)
+    bool aoEnabled = true;          // [Effects] AO
+    float aoRadius = 2.0f;          // [Effects] AORadius (world units)
+    float aoStrength = 0.7f;        // [Effects] AOStrength
+    bool shafts = true;             // [Effects] LightShafts (needs sun shadows)
+    float shaftStrength = 0.35f;    // [Effects] ShaftStrength
+    float shaftScatter = 0.6f;      // [Effects] ShaftScatter: 0 even haze .. 0.9 tight glow toward the sun
     // [Grass] creatures bend and flatten the grass around them
     bool grassPhysics = true;       // [Grass] Enabled
     float grassPush = 0.8f;         // [Grass] Push: sideways bend, in blade heights

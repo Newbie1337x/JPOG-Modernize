@@ -110,6 +110,20 @@ void LoadConfig()
         float f = value[0] ? (float)atof(value) : fallback;
         return f >= lo && f <= hi ? f : fallback;
     };
+    g_config.aoEnabled = GetPrivateProfileIntA("Effects", "AO", 1, ini.c_str()) != 0;
+    g_config.shafts = GetPrivateProfileIntA("Effects", "LightShafts", 1, ini.c_str()) != 0;
+    {
+        auto readFx = [&](const char* key, float fallback, float lo, float hi) {
+            char value[64];
+            GetPrivateProfileStringA("Effects", key, "", value, sizeof(value), ini.c_str());
+            float f = value[0] ? (float)atof(value) : fallback;
+            return f >= lo && f <= hi ? f : fallback;
+        };
+        g_config.aoRadius = readFx("AORadius", 2.0f, 0.2f, 20);
+        g_config.aoStrength = readFx("AOStrength", 0.7f, 0, 1);
+        g_config.shaftStrength = readFx("ShaftStrength", 0.35f, 0, 3);
+        g_config.shaftScatter = readFx("ShaftScatter", 0.6f, 0, 0.95f);
+    }
     g_config.grassPhysics = GetPrivateProfileIntA("Grass", "Enabled", 1, ini.c_str()) != 0;
     g_config.grassPush = readGrass("Push", 0.8f, 0, 3);
     g_config.grassFlatten = readGrass("Flatten", 0.5f, 0, 1);
@@ -162,6 +176,12 @@ void SaveConfig()
     putFloat("Post", "Contrast", g_config.contrast);
     putFloat("Post", "Saturation", g_config.saturation);
     putFloat("Post", "Warmth", g_config.warmth);
+    putInt("Effects", "AO", g_config.aoEnabled);
+    putFloat("Effects", "AORadius", g_config.aoRadius);
+    putFloat("Effects", "AOStrength", g_config.aoStrength);
+    putInt("Effects", "LightShafts", g_config.shafts);
+    putFloat("Effects", "ShaftStrength", g_config.shaftStrength);
+    putFloat("Effects", "ShaftScatter", g_config.shaftScatter);
     putInt("Grass", "Enabled", g_config.grassPhysics);
     putFloat("Grass", "Push", g_config.grassPush);
     putFloat("Grass", "Flatten", g_config.grassFlatten);

@@ -245,7 +245,12 @@ private:
     ComPtr<ID3D11DepthStencilState> m_sunDepth;
     ComPtr<ID3D11RasterizerState> m_sunRaster;
     ComPtr<ID3D11VertexShader> m_resolveVS;
-    ComPtr<ID3D11PixelShader> m_resolvePS, m_resolvePSMS;
+    ComPtr<ID3D11PixelShader> m_resolvePS, m_resolvePSMS, m_fxPS, m_fxPSMS;
+    ComPtr<ID3D11Texture2D> m_fxTex;
+    ComPtr<ID3D11RenderTargetView> m_fxRTV;
+    ComPtr<ID3D11ShaderResourceView> m_fxSRV;
+    UINT m_fxW = 0, m_fxH = 0;
+    bool EnsureFxTarget();
     ComPtr<ID3D11Texture2D> m_sceneCopy;
     ComPtr<ID3D11ShaderResourceView> m_sceneCopySRV;
     UINT m_sceneCopyW = 0, m_sceneCopyH = 0;
@@ -277,7 +282,7 @@ private:
     void TraceFlush();
     bool EnsureShadowMap();
     // Scene effects need the camera from the terrain draw (StartSunFrame).
-    bool SceneFx() const { return g_config.sunLighting || g_config.postEnabled || g_config.grassPhysics; }
+    bool SceneFx() const { return g_config.sunLighting || g_config.postEnabled || g_config.grassPhysics || g_config.aoEnabled; }
     void CapturePusher(UINT firstVertex, UINT numVertices);
     bool GrassCaptureActive() const {
         return g_config.grassPhysics && m_worldDraw && m_worldKind == 1 && m_sunStarted && !m_sunResolved;
