@@ -278,7 +278,11 @@ private:
     bool EnsureShadowMap();
     // Scene effects need the camera from the terrain draw (StartSunFrame).
     bool SceneFx() const { return g_config.sunLighting || g_config.postEnabled || g_config.grassPhysics; }
-    void CapturePusher();
+    void CapturePusher(UINT firstVertex, UINT numVertices);
+    bool GrassCaptureActive() const {
+        return g_config.grassPhysics && m_worldDraw && m_worldKind == 1 && m_sunStarted && !m_sunResolved;
+    }
+    float m_pushBoxes[32][4] = {};  // world x/z footprint per pusher: min x, min z, max x, max z
     void UploadGrass();
     ComPtr<ID3D11Buffer> m_grassCB;
     float m_pushers[32][4] = {};

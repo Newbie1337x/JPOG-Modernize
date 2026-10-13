@@ -332,44 +332,88 @@ void Device::CaptureGameSun()
     XMStoreFloat3(reinterpret_cast<XMFLOAT3*>(m_gameSun), XMVector3Normalize(XMVectorLerp(prev, w, 0.05f)));
 }
 
-// Skinned draws with enough bones (creatures) push the grass. Bone i is three rows at
-// c[5 + 3i] (the shader indexes c5[a0] with a0 = c4 * index); its translation is the w column.
-// The rows are in the space c0..c3 maps to clip, so c0 and the inverse camera take them to world.
-void Device::CapturePusher()
+// Grass pushers: a sample of the draw's own vertices is skinned on the CPU exactly like the
+// skinned vertex shader does (bone rows at c[5 + a0], a0 = c4 * index, weighted by v2), then
+// mapped to world through c0..c3 and the inverse camera. The game uploads the whole 30-bone
+// palette for every skinned draw, so the creature test is the number of *distinct* bones the
+// sampled vertices use: props and buildings use one or a few, animals many.
+void Device::CapturePusher(UINT firstVertex, UINT numVertices)
 {
-    UINT bones = m_lastBones;
-    if (m_vsWriteLo <= 5 && m_vsWriteHi > 5) bones = (m_vsWriteHi - 5) / 3;
-    m_lastBones = bones;
-    if (bones < (UINT)g_config.grassMinBones || bones > 80 || m_pusherCount >= 32) return;
+    if (m_pusherCount >= 32 || !numVertices) return;
+    const size_t idx = m_vsHandle >> 1;
+    if (idx >= m_vertexShaders.size() || !m_vertexShaders[idx]) return;
+    const VSDecl& decl = m_vertexShaders[idx]->parsed;
+    const VSInput *pos = nullptr, *weights = nullptr, *indices = nullptr;
+    for (const VSInput& in : decl.inputs) {
+        if (in.stream != 0) continue;
+        if (in.reg == 0 && in.type == 2) pos = &in;
+        if (in.reg == 2 && in.type == 4) weights = &in;
+        if (in.reg == 3 && in.type == 4) indices = &in;
+    }
+    VertexBuffer* vb = m_streams[0].vb;
+    const UINT stride = m_streams[0].stride;
+    if (!pos || !weights || !indices || !vb || !stride) return;
+    const std::vector<BYTE>& data = vb->m_impl.m_shadow;
+    if ((size_t)(firstVertex + numVertices) * stride > data.size()) return;
+
     float c0[4][4];
     memcpy(c0, m_vsConst, sizeof(c0));
     XMMATRIX modelToClip, clipToWorld;
     LoadRows(c0, modelToClip);
     LoadRows(m_sun.clipToWorld, clipToWorld);
-    XMMATRIX model = modelToClip * clipToWorld;
-    auto boneAt = [&](UINT i) { const UINT b = 5 + 3 * i; return XMVectorSet(m_vsConst[b][3], m_vsConst[b + 1][3], m_vsConst[b + 2][3], 1); };
-    XMVECTOR root = boneAt(0), lo = root, hi = root;
-    for (UINT i = 1; i < bones; i++) { XMVECTOR t = boneAt(i); lo = XMVectorMin(lo, t); hi = XMVectorMax(hi, t); }
-    XMVECTOR centerModel = (lo + hi) * 0.5f;
-    const float scale = XMVectorGetX(XMVector3Length(XMVector3TransformNormal(XMVectorSet(1, 0, 0, 0), model)));
-    XMVECTOR ext = (hi - lo) * scale;
-    // Footprint: half the larger horizontal extent of the skeleton.
-    float radius = 0.5f * (XMVectorGetX(ext) > XMVectorGetZ(ext) ? XMVectorGetX(ext) : XMVectorGetZ(ext));
-    radius = (radius < 1.0f ? 1.0f : (radius > 15.0f ? 15.0f : radius)) * g_config.grassRadius;
-    XMFLOAT3 p;
-    XMStoreFloat3(&p, XMVector3TransformCoord(centerModel, model));
-    if (!std::isfinite(p.x + p.y + p.z)) return;
-    for (UINT k = 0; k < m_pusherCount; k++) {
-        float dx = m_pushers[k][0] - p.x, dz = m_pushers[k][2] - p.z;
-        if (dx * dx + dz * dz < 1.0f) { if (radius > m_pushers[k][3]) m_pushers[k][3] = radius; return; }
+    const XMMATRIX model = modelToClip * clipToWorld;
+    auto color = [](const BYTE* b) { // D3DCOLOR as the shader sees it: (R, G, B, A)
+        return XMFLOAT4(b[2] / 255.0f, b[1] / 255.0f, b[0] / 255.0f, b[3] / 255.0f);
+    };
+    BYTE used[256] = {};
+    UINT distinct = 0;
+    XMVECTOR lo = XMVectorReplicate(1e30f), hi = XMVectorReplicate(-1e30f);
+    const UINT samples = numVertices < 48 ? numVertices : 48;
+    for (UINT k = 0; k < samples; k++) {
+        const BYTE* v = data.data() + (size_t)(firstVertex + (UINT)((uint64_t)k * numVertices / samples)) * stride;
+        float p[4];
+        memcpy(p, v + pos->offset, 12);
+        p[3] = 1;
+        XMFLOAT4 w = color(v + weights->offset), i = color(v + indices->offset);
+        const float wv[4] = { w.x, w.y, w.z, w.w }, iv[4] = { i.x, i.y, i.z, i.w };
+        float out[3] = {};
+        for (int j = 0; j < 4; j++) {
+            if (wv[j] <= 0) continue;
+            const int a0 = (int)std::floor(m_vsConst[4][j] * iv[j] + 0.001f);
+            if (a0 < 0 || 5 + a0 + 2 >= kMaxVSConst) continue;
+            if (!used[a0 & 255]) { used[a0 & 255] = 1; distinct++; }
+            for (int r = 0; r < 3; r++) {
+                const float* row = m_vsConst[5 + a0 + r];
+                out[r] += wv[j] * (row[0] * p[0] + row[1] * p[1] + row[2] * p[2] + row[3] * p[3]);
+            }
+        }
+        XMVECTOR wp = XMVector3TransformCoord(XMVectorSet(out[0], out[1], out[2], 1), model);
+        lo = XMVectorMin(lo, wp);
+        hi = XMVectorMax(hi, wp);
     }
-    float* q = m_pushers[m_pusherCount++];
-    q[0] = p.x; q[1] = p.y; q[2] = p.z; q[3] = radius;
+    XMFLOAT3 l, h;
+    XMStoreFloat3(&l, lo); XMStoreFloat3(&h, hi);
+    if (!std::isfinite(l.x + l.z + h.x + h.z) || h.x - l.x > 200 || h.z - l.z > 200) return;
+    TraceSun("Skinned draw: %u distinct bones, box x %.1f..%.1f y %.1f..%.1f z %.1f..%.1f",
+             distinct, l.x, h.x, l.y, h.y, l.z, h.z);
+    if (distinct < (UINT)g_config.grassMinBones) return;
+    // Body parts of one animal come as separate draws: merge overlapping footprints.
+    for (UINT k = 0; k < m_pusherCount; k++) {
+        float* b = m_pushBoxes[k];
+        if (l.x <= b[2] && h.x >= b[0] && l.z <= b[3] && h.z >= b[1]) {
+            b[0] = b[0] < l.x ? b[0] : l.x; b[1] = b[1] < l.z ? b[1] : l.z;
+            b[2] = b[2] > h.x ? b[2] : h.x; b[3] = b[3] > h.z ? b[3] : h.z;
+            m_grassUploaded = false;
+            return;
+        }
+    }
+    float* b = m_pushBoxes[m_pusherCount];
+    b[0] = l.x; b[1] = l.z; b[2] = h.x; b[3] = h.z;
+    m_pushers[m_pusherCount][1] = h.y; // Y-down: the larger y is the lowest point (feet)
+    m_pusherCount++;
     m_grassUploaded = false;
-    TraceSun("Grass pusher: %u bones, centre %.1f %.1f %.1f, radius %.1f", bones, p.x, p.y, p.z, radius);
-    LogOnce("grass-first", "Grass pusher found: %u bones, radius %.1f", bones, radius);
+    LogOnce("grass-first", "Grass pusher found: %u distinct bones, box %.1f x %.1f", distinct, h.x - l.x, h.z - l.z);
 }
-
 void Device::UploadGrass()
 {
     if (!m_grassCB) return;
@@ -377,6 +421,13 @@ void Device::UploadGrass()
         D3D11_MAPPED_SUBRESOURCE map;
         if (SUCCEEDED(m_ctx->Map(m_grassCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
             float* f = (float*)map.pData;
+            // Footprint circle: box centre, 0.4 of the longer side (animals are long, not round).
+            for (UINT k = 0; k < m_pusherCount; k++) {
+                const float* b = m_pushBoxes[k];
+                float r = 0.4f * ((b[2] - b[0]) > (b[3] - b[1]) ? (b[2] - b[0]) : (b[3] - b[1]));
+                r = (r < 0.8f ? 0.8f : (r > 20.0f ? 20.0f : r)) * g_config.grassRadius;
+                m_pushers[k][0] = (b[0] + b[2]) * 0.5f; m_pushers[k][2] = (b[1] + b[3]) * 0.5f; m_pushers[k][3] = r;
+            }
             memcpy(f, m_pushers, sizeof(m_pushers));
             // Only the main view's grass reacts (the 256x256 offscreen pass has its own camera).
             const bool on = g_config.grassPhysics && m_worldDraw;
@@ -404,7 +455,6 @@ void Device::UpdateSun(bool shadowPass)
         }
         if (m_worldDraw && m_worldKind == 1 && !m_sunResolved && !shadowPass) {
             CaptureGameSun();
-            if (g_config.grassPhysics) CapturePusher();
         }
     }
     m_sun.flags[0] = m_worldDraw ? 1.0f : 0.0f;

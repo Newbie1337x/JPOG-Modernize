@@ -1351,6 +1351,7 @@ HRESULT Device::DrawPrimitive(DWORD type, UINT start, UINT primCount)
     UINT count;
     D3D11_PRIMITIVE_TOPOLOGY topo;
     if (!DrawWithTopology(type, primCount, count, topo)) return D8ERR_INVALIDCALL;
+    if (GrassCaptureActive()) CapturePusher(start, type == D8PT_TRIANGLEFAN ? primCount + 2 : count);
     m_ctx->IASetPrimitiveTopology(topo);
     if (type == D8PT_TRIANGLEFAN) {
         std::vector<WORD> idx;
@@ -1366,9 +1367,10 @@ HRESULT Device::DrawPrimitive(DWORD type, UINT start, UINT primCount)
     return S_OK;
 }
 
-HRESULT Device::DrawIndexedPrimitive(DWORD type, UINT, UINT, UINT startIndex, UINT primCount)
+HRESULT Device::DrawIndexedPrimitive(DWORD type, UINT minIndex, UINT numVertices, UINT startIndex, UINT primCount)
 {
     if (!primCount || !m_indices || !PrepareDraw()) return S_OK;
+    if (GrassCaptureActive()) CapturePusher(m_baseVertex + minIndex, numVertices);
     UINT count;
     D3D11_PRIMITIVE_TOPOLOGY topo;
     if (!DrawWithTopology(type, primCount, count, topo)) return D8ERR_INVALIDCALL;
