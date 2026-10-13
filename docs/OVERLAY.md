@@ -11,6 +11,43 @@ limit, VSync, anisotropic filtering, game gamma, FPS counter) and experimental o
 
 ## Implementation
 
+The `Rendimiento y recursos` section shows frame-time history/peak, CPU wall-time
+inside Present and the FPS limiter, process private/resident RAM with resettable
+baseline, DXGI local process GPU usage/budget when supported, live D3D8 wrapper
+objects, shader variants/state cache sizes, and dynamic buffer capacity.
+GPU timing is opt-in (session-only), sampled every 30 frames with a fixed four-slot
+timestamp/disjoint query ring. Results are read with DONOTFLUSH; no spins/waits.
+Pending slots are never reused; full/disjoint samples are discarded. The inclusive
+GPU total covers first draw preparation through final presentation/overlay rendering,
+not swap-chain Present or the frame limiter. Subsets expose combined AO/shafts,
+shadow/color composition, and water snapshot copies. Geometry shadows, water draws,
+normal maps and grass are not individually timed: compare matched scenes with their
+toggles. Counters count PrepareDraw calls (including failed preparations), not exact
+hardware draw calls. Wrapper object counts do not include internal D3D11 resources.
+Memory growth after repeated identical scenes merits investigation, but caching and
+game allocations can grow legitimately; these counters do not prove a leak.
+
+`[Performance] LogCSV=1` now records once per second even with the panel closed.
+Each session uses a unique `d3d8to11_performance_DATE_TIME_PID_PART.csv` next to
+the executable, with its path announced in the normal log and the panel. Files
+rotate after 36000 rows without overwriting preceding sessions. Each row contains
+average/peak frame times, average Present/limiter waits, sampled inclusive GPU
+timings with age/validity, RAM and GPU local budget/usage, average draw counts,
+live resource counts and caches, MSAA and effect toggles including SSR quality.
+Unknown/disabled/stale GPU timing is `NA`, not zero. GPU timing is now enabled
+by default via `[Performance] MeasureGPU=1`; both switches are persistent through
+Save. Small buffered rows are flushed once per second; this is synchronous disk
+I/O, not a background logging thread. CSV numbers use invariant C locale.
+
+The top button switches all custom scene effects off/on through
+[Renderer] EffectsEnabled. Individual toggles and strengths are preserved;
+Save persists the master switch as well. It covers shadows, ambient occlusion,
+light shafts, colour grading, replacement lighting, normal maps, enhanced water
+and interaction, and interactive grass. Display options (MSAA, filtering,
+gamma, VSync and frame cap) and texture replacements remain independent.
+The grass constant cache explicitly uploads a disabled state when switching
+off, preventing already-bound pusher data from continuing to bend blades.
+
 - `src/d3d8to11/overlay.cpp` draws [Dear ImGui](https://github.com/ocornut/imgui)
   (v1.91.5, vendored in `third_party/imgui`, MIT) with its DX11 backend onto the swap chain
   in `Device::Present`, after the gamma/present pass. The Win32 backend is not used.

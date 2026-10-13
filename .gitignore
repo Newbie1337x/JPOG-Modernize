@@ -2,6 +2,10 @@ out/
 obj/
 *.obj
 *.lib
+!third_party/fsr31/lib/ffx_backend_dx11_x86.lib
+!third_party/fsr31/lib/ffx_fsr3upscaler_x86.lib
+!third_party/fsr31/lib/ffx_frameinterpolation_x86.lib
+!third_party/fsr31/lib/ffx_opticalflow_x86.lib
 *.exp
 *.pdb
 __pycache__/

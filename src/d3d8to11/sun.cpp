@@ -313,6 +313,7 @@ void Device::StartSunFrame()
     XMMATRIX inv = XMMatrixInverse(&det, vp);
     if (std::fabs(XMVectorGetX(det)) < 1e-20f) return;
     StoreRows(inv, m_sun.clipToWorld);
+    memcpy(m_waterViewProjection,rows,sizeof(rows));
     // Camera position: the point that maps to clip (0, 0, z, 0).
     XMVECTOR camH = XMVector4Transform(XMVectorSet(0, 0, 1, 0), inv);
     XMVECTOR cam;
@@ -436,7 +437,7 @@ void Device::CaptureGameSun()
 // sampled vertices use: props and buildings use one or a few, animals many.
 void Device::CapturePusher(UINT firstVertex, UINT numVertices)
 {
-    if (m_pusherCount >= 32 || !numVertices) return;
+    if (!numVertices) return;
     const size_t idx = m_vsHandle >> 1;
     if (idx >= m_vertexShaders.size() || !m_vertexShaders[idx]) return;
     const VSDecl& decl = m_vertexShaders[idx]->parsed;
@@ -490,7 +491,7 @@ void Device::CapturePusher(UINT firstVertex, UINT numVertices)
     }
     XMFLOAT3 l, h;
     XMStoreFloat3(&l, lo); XMStoreFloat3(&h, hi);
-    if (!std::isfinite(l.x + l.z + h.x + h.z) || h.x - l.x > 200 || h.z - l.z > 200) return;
+    if (!std::isfinite(l.x + l.z + h.x + h.z + h.y) || h.x - l.x > 200 || h.z - l.z > 200) return;
     TraceSun("Skinned draw: %u distinct bones, box x %.1f..%.1f y %.1f..%.1f z %.1f..%.1f",
              distinct, l.x, h.x, l.y, h.y, l.z, h.z);
     if (distinct < (UINT)g_config.grassMinBones) return;
@@ -500,10 +501,12 @@ void Device::CapturePusher(UINT firstVertex, UINT numVertices)
         if (l.x <= b[2] && h.x >= b[0] && l.z <= b[3] && h.z >= b[1]) {
             b[0] = b[0] < l.x ? b[0] : l.x; b[1] = b[1] < l.z ? b[1] : l.z;
             b[2] = b[2] > h.x ? b[2] : h.x; b[3] = b[3] > h.z ? b[3] : h.z;
+            m_pushers[k][1]=m_pushers[k][1]>h.y?m_pushers[k][1]:h.y;
             m_grassUploaded = false;
             return;
         }
     }
+    if(m_pusherCount>=32)return;
     float* b = m_pushBoxes[m_pusherCount];
     b[0] = l.x; b[1] = l.z; b[2] = h.x; b[3] = h.z;
     m_pushers[m_pusherCount][1] = h.y; // Y-down: the larger y is the lowest point (feet)
@@ -514,7 +517,8 @@ void Device::CapturePusher(UINT firstVertex, UINT numVertices)
 void Device::UploadGrass()
 {
     if (!m_grassCB) return;
-    if (!m_grassUploaded) {
+    const bool on=g_config.effectsEnabled && g_config.grassPhysics && m_worldDraw;
+    if (!m_grassUploaded || m_grassApplied!=on) {
         D3D11_MAPPED_SUBRESOURCE map;
         if (SUCCEEDED(m_ctx->Map(m_grassCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
             float* f = (float*)map.pData;
@@ -527,13 +531,13 @@ void Device::UploadGrass()
             }
             memcpy(f, m_pushers, sizeof(m_pushers));
             // Only the main view's grass reacts (the 256x256 offscreen pass has its own camera).
-            const bool on = g_config.grassPhysics && m_worldDraw;
             f[128] = on ? (float)m_pusherCount : 0.0f;
             f[129] = g_config.grassPush;
             f[130] = g_config.grassFlatten;
             f[131] = 0;
             m_ctx->Unmap(m_grassCB.Get(), 0);
-            m_grassUploaded = on;
+            m_grassUploaded = true;
+            m_grassApplied = on;
         }
     }
     m_ctx->VSSetConstantBuffers(3, 1, m_grassCB.GetAddressOf());
@@ -558,7 +562,7 @@ void Device::UpdateSun(bool shadowPass)
     m_sun.flags[1] = shadowPass ? 1.0f : 0.0f;
     m_sun.flags[2] = 0;
     m_sun.flags[3] = (float)m_worldKind;
-    m_sun.control[0] = g_config.replaceLighting ? 1.0f : 0.0f;
+    m_sun.control[0] = g_config.replaceLighting || ActiveMaterial() ? 1.0f : 0.0f;
     m_sun.control[1] = (float)g_config.lightingDebug;
     m_sun.camera[3] = g_config.normalStrength * (g_config.normalFlipGreen ? -1.0f : 1.0f);
     if (!m_sunUploadedValid || memcmp(&m_sunUploaded, &m_sun, sizeof(m_sun))) {
@@ -589,6 +593,7 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base)
     m_ctx->OMSetBlendState(m_noBlend.Get(), nullptr, 0xffffffff);
     if (indexed) m_ctx->DrawIndexed(count, start, base); else m_ctx->Draw(count, start);
     ++m_shadowDraws;
+    ++m_perfShadowDraws;
     ++m_segmentCasters;
     // Vertex/pixel shaders, streams and constants remain valid. PrepareDraw restores targets,
     // viewport and the sun-pass flag before the next game draw.
@@ -601,13 +606,16 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base)
 void Device::ResolveSun(const char* reason)
 {
     if (!m_sunStarted || m_sunResolved) return;
+    // JPOG clears depth at the end of the world, before Present. Capture the
+    // current scene's footprints while its camera and pusher list are valid.
+    UpdateWaterInteractions();
     m_sunResolved = true;
     TraceSun("Resolve at %s: %u casters in this segment", reason, m_segmentCasters);
     const bool shadows = g_config.sunLighting && m_segmentCasters && m_sunSRV;
     const bool shafts = shadows && g_config.shafts;
     const bool fx = g_config.aoEnabled || shafts;
-    if (!shadows && !g_config.postEnabled && !fx) return;
-    if (!m_resolvePS || !m_backBuffer || !m_autoDepth || !m_autoDepth->m_srv || !EnsureSceneCopy()) return;
+    if (!shadows && !g_config.postEnabled && !fx) {ResolveTemporal();return;}
+    if (!m_resolvePS || !m_backBuffer || !m_autoDepth || !m_autoDepth->m_srv || !EnsureSceneCopy()) {ResolveTemporal();return;}
     if (shadows && g_config.lightingDebug == 8 && !m_dumped) {
         if (!m_dumpAt) m_dumpAt = m_frame + 600;
         else if (m_frame >= m_dumpAt) { DumpSunFrame(); m_dumped = true; }
@@ -624,6 +632,7 @@ void Device::ResolveSun(const char* reason)
     const float w = (float)m_backBuffer->m_width, h = (float)m_backBuffer->m_height;
     rc.screen[0] = 1.0f / w; rc.screen[1] = 1.0f / h;
     rc.screen[2] = -1.0f / w; rc.screen[3] = 1.0f / h; // VSExtraConstants::pixelOffset
+    float aaX=0,aaY=0;TemporalJitter(aaX,aaY);rc.screen[2]+=aaX;rc.screen[3]+=aaY;
     rc.misc[0] = (float)g_config.lightingDebug;
     rc.misc[1] = g_config.shadowDistance;
     rc.misc[2] = m_sunDepthRange;
@@ -644,6 +653,7 @@ void Device::ResolveSun(const char* reason)
     m_ctx->RSSetViewports(1, &vp);
     const bool ms = m_autoDepth->m_samples > 1;
     if (fx && EnsureFxTarget()) {
+        PerformanceScope perf(m_perf,m_device.Get(),m_ctx.Get(),Performance::Effects);
         // Effects pass: AO + light shafts into m_fxTex, read (blurred) by the resolve below.
         ID3D11ShaderResourceView* none[4] = {};
         m_ctx->PSSetShaderResources(0, 4, none);
@@ -663,6 +673,7 @@ void Device::ResolveSun(const char* reason)
         m_ctx->Draw(3, 0);
         m_ctx->PSSetShaderResources(0, 2, none);
     }
+    PerformanceScope perfResolve(m_perf,m_device.Get(),m_ctx.Get(),Performance::Resolve);
     ID3D11RenderTargetView* rtv = m_backBuffer->Rtv();
     m_ctx->OMSetRenderTargets(1, &rtv, nullptr);
     m_ctx->RSSetState(m_noCull.Get());
@@ -687,6 +698,7 @@ void Device::ResolveSun(const char* reason)
     m_lastBlend = nullptr; m_lastDepth = nullptr; m_lastRaster = nullptr;
     LogOnce(std::string("sun-resolve-") + reason, "Scene pass at %s: shadows %d (%u casters), post %d",
             reason, shadows, m_segmentCasters, g_config.postEnabled);
+    ResolveTemporal();
 }
 
 bool Device::EnsureFxTarget()
@@ -824,5 +836,6 @@ void Device::EndSunFrame()
                 m_earlyCasters, m_lateWorldDraws);
     m_lastCasters = m_shadowDraws;
     m_sunStarted = m_sunResolved = false;
+    m_waterSnapshotReady = false;
     m_shadowDraws = m_earlyCasters = m_lateWorldDraws = 0;
 }

@@ -7,6 +7,7 @@
 // Texture; world draws that sample it on stage 0 get the relief term (shaders.cpp NormalMapCode).
 #include "device.h"
 #include <stdio.h>
+#include <cctype>
 
 namespace {
 
@@ -97,6 +98,26 @@ extern "C" BOOL WINAPI D3D8to11_SetNormalMap(void* texture, const char* path)
         return FALSE;
     }
     tex->m_normalSrv = srv;
+    std::string identity=path;size_t slash=identity.find_last_of("/\\");
+    if(slash!=std::string::npos)identity=identity.substr(slash+1);
+    for(char& c:identity)c=char(std::tolower(static_cast<unsigned char>(c)));
+    tex->m_normalName=identity;
+    // Dinosaur libraries name materials, not textures: the Triceratops skins are the unnamed
+    // textures 5 (adult) and 4 (juvenile); "Tricera" is texture 2 (a Pachycephalosaurus skin).
+    tex->m_materialProfile=identity=="dinos_hellcreek_b__tex5_n.dds"||identity=="dinos_hellcreek_b__tex4_n.dds"?1:
+        identity=="structures_hi__hamburger_n.dds"?2:0;
+    if(tex->m_materialProfile)Log("Material pilot tagged: %s, profile %u (texture-scoped, not object ID)",identity.c_str(),unsigned(tex->m_materialProfile));
     LogOnce("nm-first", "normal maps active (first: %s, %ux%u, %u mips)", path, d.width, d.height, mips);
+    return TRUE;
+}
+
+// Diagnostics: the plugin reports which game texture (<library>__<texture>, "+" when replaced
+// by a mod file) each created texture holds, shown by the panel's skin finder and frame dump.
+extern "C" BOOL WINAPI D3D8to11_SetTextureName(void* texture, const char* name)
+{
+    if (!texture || !name || g_config.useDgVoodoo) return FALSE;
+    ID8BaseTexture* base = (ID8BaseTexture*)texture;
+    if (base->GetType() != D8RTYPE_TEXTURE) return FALSE;
+    static_cast<Texture*>(static_cast<ID8Texture*>(base))->m_name = name;
     return TRUE;
 }

@@ -1,6 +1,17 @@
 // objects.h - D3D8 object implementations on top of D3D11.
 #pragma once
 #include "common.h"
+#include <atomic>
+
+// CPU wrapper lifetime counts, not an estimate of GPU allocation bytes.
+struct ResourceCount {
+    inline static std::atomic<unsigned> live[5]={};
+    unsigned kind;
+    explicit ResourceCount(unsigned k):kind(k){live[k].fetch_add(1,std::memory_order_relaxed);}
+    ~ResourceCount(){live[kind].fetch_sub(1,std::memory_order_relaxed);}
+    ResourceCount(const ResourceCount&)=delete;
+    ResourceCount& operator=(const ResourceCount&)=delete;
+};
 
 class Device;
 
@@ -25,6 +36,7 @@ class VolumeTexture;
 // (back buffer, render target, depth stencil, image surface).
 class Surface : public ID8Surface {
 public:
+    ResourceCount m_count{0};
     Surface(Device* dev, Texture* container, UINT level, UINT w, UINT h, DWORD fmt, DWORD usage, DWORD pool);
     ~Surface();
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** out) override;
@@ -63,6 +75,7 @@ public:
 
 class Texture : public ID8Texture {
 public:
+    ResourceCount m_count{1};
     Texture(Device* dev, UINT w, UINT h, UINT levels, DWORD usage, DWORD fmt, DWORD pool);
     ~Texture();
     bool Create();
@@ -92,6 +105,9 @@ public:
     ComPtr<ID3D11Texture2D> m_tex;
     ComPtr<ID3D11ShaderResourceView> m_srv;
     ComPtr<ID3D11ShaderResourceView> m_normalSrv; // optional normal map (D3D8to11_SetNormalMap)
+    BYTE m_materialProfile=0; // scoped pilot: 1 Triceratops, 2 hamburger-shop ornament
+    std::string m_name;        // <library>__<texture> reported by the plugin, for diagnostics
+    std::string m_normalName;  // basename of the attached normal map, for diagnostics
     std::vector<std::vector<BYTE>> m_shadow; // D3D8-format copy of each level (lazy)
     std::vector<Surface*> m_surfaces;        // one per level, owned
 };
@@ -100,6 +116,7 @@ class Volume;
 
 class VolumeTexture : public ID8VolumeTexture {
 public:
+    ResourceCount m_count{2};
     VolumeTexture(Device* dev, UINT w, UINT h, UINT d, UINT levels, DWORD usage, DWORD fmt, DWORD pool);
     ~VolumeTexture();
     bool Create();
@@ -173,6 +190,7 @@ public:
 
 class VertexBuffer : public ID8VertexBuffer {
 public:
+    ResourceCount m_count{3};
     VertexBuffer(Device* dev, DWORD fvf) : m_dev(dev), m_fvf(fvf) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** out) override;
     ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&m_ref); }
@@ -193,6 +211,7 @@ public:
 
 class IndexBuffer : public ID8IndexBuffer {
 public:
+    ResourceCount m_count{4};
     IndexBuffer(Device* dev, DWORD fmt) : m_dev(dev), m_format(fmt) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** out) override;
     ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&m_ref); }

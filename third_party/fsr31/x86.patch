@@ -1,0 +1,258 @@
+diff --git a/.gitignore b/.gitignore
+index 4b7ec97..6c6b7d5 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -29,6 +29,7 @@ x86/
+ bld/
+ [Bb]in/
+ [Bb]uild/
++[Bb]uild-*/
+ [Oo]bj/
+ [Ll]og/
+ PrecompiledShadersDXIL/
+diff --git a/readme.md b/readme.md
+index ff5bbbe..578e930 100644
+--- a/readme.md
++++ b/readme.md
+@@ -1,6 +1,23 @@
+ ## Build libs
+ Run `BuildFidelityFXDX11.bat` from the `sdk` folder. Compiled libs are located in `sdk\bin`.
+ 
++For 32-bit Windows applications, run `sdk\BuildFidelityFXDX11_x86.bat`.
++This selects the Win32 target, uses `sdk\build-x86`, and builds the DX11 backend,
++FSR1, FSR2, FSR3 upscaler, FSR3, optical flow and frame interpolation host libraries.
++The bundled shader compiler still requires a 64-bit Windows build host. Shader
++bytecode is independent of the CPU target architecture. CMake, Visual Studio C++
++tools with Win32 support and a Windows SDK must be installed.
++
++To include the hardware smoke test, pass `-DFFX_DX11_SMOKE_TEST=ON`. After building,
++run `sdk\build-x86\Release\ffx_dx11_smoke.exe`. It checks backend context lifecycle,
++dispatches three FSR3 upscaler frames and reads back the output. The test requires
++a D3D11 hardware device with feature level 11.1 for the FSR3 shader UAV bindings.
++It does not test frame generation, swap-chain integration or the sample applications.
++Use the SDK CMake project directly; the root sample project still targets x64.
++Consumers must also target Win32, use matching SDK headers and match Debug/Release
++and CRT settings. RelWithDebInfo uses the same library names as Release and the
++script builds it last, so it replaces the Release libraries in `sdk\bin\ffx_sdk`.
++
+ <h1>Welcome to the FidelityFX Super Resolution 3 SDK</h1>
+ 
+ ![alt text](/docs/media/fidelityfxsdk-logo-rescaled.png)
+diff --git a/sdk/BuildFidelityFXDX11.bat b/sdk/BuildFidelityFXDX11.bat
+index c0cbf1c..e10c5fd 100644
+--- a/sdk/BuildFidelityFXDX11.bat
++++ b/sdk/BuildFidelityFXDX11.bat
+@@ -1,6 +1,16 @@
+ @echo off
+ setlocal enabledelayedexpansion
+ 
++:: Select the target independently from the (x64) shader compiler host.
++if not defined FFX_BUILD_ARCH set "FFX_BUILD_ARCH=x64"
++if /I not "%FFX_BUILD_ARCH%"=="x64" if /I not "%FFX_BUILD_ARCH%"=="Win32" (
++    echo Unsupported FFX_BUILD_ARCH: %FFX_BUILD_ARCH%. Use x64 or Win32.
++    exit /b 1
++)
++set "FFX_BUILD_DIR=build"
++if /I "%FFX_BUILD_ARCH%"=="Win32" set "FFX_BUILD_DIR=build-x86"
++pushd "%~dp0"
++
+ echo ===============================================================
+ echo.
+ echo  FidelityFX Build System
+@@ -13,7 +23,8 @@ echo Checking pre-requisites...
+ cmake --version > nul 2>&1
+ if %errorlevel% NEQ 0 (
+     echo Cannot find path to CMake. Is CMake installed? Exiting...
+-    exit /b -1
++    popd
++    exit /b 1
+ ) else (
+     echo CMake Ready.
+ )
+@@ -30,13 +41,16 @@ echo Building FidelityFX SDK (Standalone)
+ echo.
+ 
+ :: Check directories exist and create if not
+-if not exist build\ (
+-	mkdir build 
++cmake -S . -B "%FFX_BUILD_DIR%" -A %FFX_BUILD_ARCH% -DFFX_API_CUSTOM=OFF -DFFX_API_VK=OFF -DFFX_API_DX12=OFF -DFFX_ALL=OFF -DFFX_API_DX11=ON -DFFX_FSR=ON -DFFX_FSR1=OFF -DFFX_FSR2=OFF -DFFX_FI=OFF -DFFX_OF=OFF -DFFX_AUTO_COMPILE_SHADERS=1 %*
++if errorlevel 1 goto :failed
++for %%C in (Debug Release RelWithDebInfo) do (
++    cmake --build "%FFX_BUILD_DIR%" --config %%C --parallel 4 -- /p:CL_MPcount=16
++    if errorlevel 1 goto :failed
+ )
+-cd build
+-cmake -A x64 .. -DFFX_API_CUSTOM=OFF -DFFX_API_VK=OFF -DFFX_API_DX12=OFF -DFFX_ALL=OFF -DFFX_API_DX11=ON -DFFX_FSR=ON -DFFX_FSR1=OFF -DFFX_FSR2=OFF -DFFX_FI=OFF -DFFX_OF=OFF -DFFX_AUTO_COMPILE_SHADERS=1 %*
+-cmake --build ./ --config Debug --parallel 4 -- /p:CL_MPcount=16
+-cmake --build ./ --config Release --parallel 4 -- /p:CL_MPcount=16
+-cmake --build ./ --config RelWithDebInfo --parallel 4 -- /p:CL_MPcount=16
++popd
++exit /b 0
+ 
+-cd..
++:failed
++set "FFX_BUILD_ERROR=%errorlevel%"
++popd
++exit /b %FFX_BUILD_ERROR%
+diff --git a/sdk/BuildFidelityFXDX11_x86.bat b/sdk/BuildFidelityFXDX11_x86.bat
+new file mode 100644
+index 0000000..68de075
+--- /dev/null
++++ b/sdk/BuildFidelityFXDX11_x86.bat
+@@ -0,0 +1,6 @@
++@echo off
++setlocal
++set "FFX_BUILD_ARCH=Win32"
++:: Build the backend and the FSR host APIs for 32-bit applications.
++call "%~dp0BuildFidelityFXDX11.bat" -DFFX_FSR3=ON -DFFX_FSR1=ON -DFFX_FSR2=ON -DFFX_FI=ON -DFFX_OF=ON %*
++exit /b %errorlevel%
+diff --git a/sdk/CMakeLists.txt b/sdk/CMakeLists.txt
+index 2057d3f..2f184ae 100644
+--- a/sdk/CMakeLists.txt
++++ b/sdk/CMakeLists.txt
+@@ -195,3 +195,13 @@ endif()
+ if(FFX_API_VK)
+     add_subdirectory(${FFX_SRC_BACKENDS_PATH}/vk)
+ endif()
++
++option(FFX_DX11_SMOKE_TEST "Build the D3D11 hardware upscaler smoke test" OFF)
++if(FFX_DX11_SMOKE_TEST)
++    if(NOT FFX_API_DX11 OR NOT FFX_FSR3UPSCALER)
++        message(FATAL_ERROR "FFX_DX11_SMOKE_TEST requires FFX_API_DX11 and FFX_FSR3UPSCALER")
++    endif()
++    add_executable(ffx_dx11_smoke tests/dx11_smoke.cpp)
++    target_link_libraries(ffx_dx11_smoke PRIVATE ffx_backend_dx11_${FFX_PLATFORM_NAME} ffx_fsr3upscaler_${FFX_PLATFORM_NAME} d3d11 dxgi)
++    target_compile_features(ffx_dx11_smoke PRIVATE cxx_std_14)
++endif()
+diff --git a/sdk/src/backends/dx11/ffx_dx11.cpp b/sdk/src/backends/dx11/ffx_dx11.cpp
+index 1a2a89f..087038c 100644
+--- a/sdk/src/backends/dx11/ffx_dx11.cpp
++++ b/sdk/src/backends/dx11/ffx_dx11.cpp
+@@ -88,7 +88,9 @@ typedef struct BackendContext_DX11 {
+     uint32_t                constantBufferOffset[FFX_MAX_NUM_CONST_BUFFERS];
+     std::mutex              constantBufferMutex;
+ 
+-    typedef struct alignas(32) EffectContext {
++    // This scalar bookkeeping is placed in caller-provided scratch memory.
++    // Requiring 32-byte alignment here exceeds the scratch-buffer contract.
++    typedef struct EffectContext {
+ 
+         // Resource allocation
+         uint32_t            nextStaticResource;
+@@ -185,7 +187,7 @@ FfxCommandList ffxGetCommandListDX11(ID3D11DeviceContext* deviceContext)
+ }
+ 
+ // register a DX11 resource to the backend
+-FfxResource ffxGetResourceDX11_Fsr31(ID3D11Resource* dx11Resource,
++FfxResource ffxGetResourceDX11_Fsr31(const ID3D11Resource* dx11Resource,
+     FfxResourceDescription                     ffxResDescription,
+     wchar_t const*                             ffxResName,
+     FfxResourceStates                          state /*=FFX_RESOURCE_STATE_COMPUTE_READ*/)
+diff --git a/sdk/tests/dx11_smoke.cpp b/sdk/tests/dx11_smoke.cpp
+new file mode 100644
+index 0000000..5053080
+--- /dev/null
++++ b/sdk/tests/dx11_smoke.cpp
+@@ -0,0 +1,102 @@
++#include <FidelityFX/host/backends/dx11/ffx_dx11.h>
++#include <FidelityFX/host/ffx_fsr3upscaler.h>
++#include <wrl/client.h>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <memory>
++#include <vector>
++
++using Microsoft::WRL::ComPtr;
++static void check(bool ok, const char* stage) {
++    if (!ok) { std::fprintf(stderr, "FAIL: %s\n", stage); std::exit(1); }
++}
++
++int main() {
++    std::printf("Pointer size: %zu bits\n", sizeof(void*) * 8);
++    ComPtr<ID3D11Device> device;
++    ComPtr<ID3D11DeviceContext> commands;
++    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
++    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
++        levels, 2, D3D11_SDK_VERSION, &device, nullptr, &commands);
++    check(SUCCEEDED(hr), "D3D11 hardware device");
++    check(device->GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_1, "FSR3 requires feature level 11.1 for UAV bindings");
++    for (unsigned count : {1u, 3u, 8u}) {
++        const size_t bytes = ffxGetScratchMemorySizeDX11(count);
++        void* scratch = std::calloc(1, bytes);
++        check(scratch != nullptr, "scratch allocation");
++        FfxInterface api = {};
++        check(ffxGetInterfaceDX11(&api, ffxGetDeviceDX11_Fsr31(device.Get()),
++            scratch, bytes, count) == FFX_OK, "backend interface");
++        std::vector<uint32_t> ids(count);
++        for (auto& id : ids) check(api.fpCreateBackendContext(&api, &id) == FFX_OK, "backend context create");
++        for (auto id : ids) check(api.fpDestroyBackendContext(&api, id) == FFX_OK, "backend context destroy");
++        std::free(scratch);
++    }
++    const size_t bytes = ffxGetScratchMemorySizeDX11(1);
++    void* scratch = std::calloc(1, bytes);
++    check(scratch != nullptr, "upscaler scratch");
++    FfxFsr3UpscalerContextDescription desc = {};
++    desc.maxRenderSize = {64, 64};
++    desc.maxUpscaleSize = {128, 128};
++    check(ffxGetInterfaceDX11(&desc.backendInterface, ffxGetDeviceDX11_Fsr31(device.Get()),
++        scratch, bytes, 1) == FFX_OK, "upscaler interface");
++    auto context = std::make_unique<FfxFsr3UpscalerContext>();
++    FfxErrorCode createError = ffxFsr3UpscalerContextCreate(context.get(), &desc);
++    std::printf("FSR3 create result: 0x%08x\n", static_cast<unsigned>(createError));
++    check(createError == FFX_OK, "FSR3 upscaler context");
++    std::puts("FSR3 upscaler context created");
++    auto texture = [&](unsigned size, DXGI_FORMAT format, unsigned bind, unsigned channels, float value) {
++        D3D11_TEXTURE2D_DESC td = {};
++        td.Width = td.Height = size; td.MipLevels = td.ArraySize = 1;
++        td.Format = format; td.SampleDesc.Count = 1; td.BindFlags = bind;
++        std::vector<float> pixels(size * size * channels, value);
++        D3D11_SUBRESOURCE_DATA data = {pixels.data(), size * channels * sizeof(float), 0};
++        ComPtr<ID3D11Texture2D> result;
++        check(SUCCEEDED(device->CreateTexture2D(&td, &data, &result)), "input/output texture");
++        return result;
++    };
++    const unsigned rw = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
++    auto color = texture(64, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D11_BIND_SHADER_RESOURCE, 4, 0.25f);
++    auto depth = texture(64, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE, 1, 0.5f);
++    auto motion = texture(64, DXGI_FORMAT_R32G32_FLOAT, D3D11_BIND_SHADER_RESOURCE, 2, 0.0f);
++    auto dilatedDepth = texture(64, DXGI_FORMAT_R32_FLOAT, rw, 1, 0.0f);
++    auto dilatedMotion = texture(64, DXGI_FORMAT_R32G32_FLOAT, rw, 2, 0.0f);
++    auto previousDepth = texture(64, DXGI_FORMAT_R32_UINT, rw, 1, 0.0f);
++    auto output = texture(128, DXGI_FORMAT_R32G32B32A32_FLOAT, rw, 4, 0.0f);
++    auto resource = [](ID3D11Texture2D* t) {
++        return ffxGetResourceDX11_Fsr31(t, GetFfxResourceDescriptionDX11(t), L"smoke");
++    };
++    FfxFsr3UpscalerDispatchDescription dispatch = {};
++    dispatch.commandList = ffxGetCommandListDX11(commands.Get());
++    dispatch.color = resource(color.Get()); dispatch.depth = resource(depth.Get());
++    dispatch.motionVectors = resource(motion.Get());
++    dispatch.dilatedDepth = resource(dilatedDepth.Get());
++    dispatch.dilatedMotionVectors = resource(dilatedMotion.Get());
++    dispatch.reconstructedPrevNearestDepth = resource(previousDepth.Get());
++    dispatch.output = resource(output.Get());
++    dispatch.renderSize = {64,64}; dispatch.upscaleSize = {128,128};
++    dispatch.motionVectorScale = {64.0f,64.0f};
++    dispatch.frameTimeDelta = 16.667f; dispatch.preExposure = 1.0f;
++    dispatch.cameraNear = 0.1f; dispatch.cameraFar = 1000.0f;
++    dispatch.cameraFovAngleVertical = 1.0f; dispatch.viewSpaceToMetersFactor = 1.0f;
++    for (unsigned frame = 0; frame < 3; ++frame) {
++        dispatch.reset = frame == 0;
++        check(ffxFsr3UpscalerContextDispatch(context.get(), &dispatch) == FFX_OK, "FSR3 dispatch");
++    }
++    D3D11_TEXTURE2D_DESC td;
++    output->GetDesc(&td); td.BindFlags = 0; td.Usage = D3D11_USAGE_STAGING;
++    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
++    ComPtr<ID3D11Texture2D> readback;
++    check(SUCCEEDED(device->CreateTexture2D(&td, nullptr, &readback)), "readback texture");
++    commands->CopyResource(readback.Get(), output.Get());
++    D3D11_MAPPED_SUBRESOURCE mapped = {};
++    check(SUCCEEDED(commands->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &mapped)), "GPU completion/readback");
++    auto pixel = reinterpret_cast<float*>(static_cast<unsigned char*>(mapped.pData) + 64 * mapped.RowPitch) + 64 * 4;
++    std::printf("Output center RGB: %.6f %.6f %.6f\n", pixel[0], pixel[1], pixel[2]);
++    for (unsigned c = 0; c < 3; ++c) check(std::isfinite(pixel[c]) && std::abs(pixel[c] - 0.25f) < 0.03f, "upscaled constant color");
++    commands->Unmap(readback.Get(), 0);
++    check(ffxFsr3UpscalerContextDestroy(context.get()) == FFX_OK, "upscaler destroy");
++    std::free(scratch);
++    std::puts("PASS: backend lifecycle and three FSR3 upscaler frames");
++}

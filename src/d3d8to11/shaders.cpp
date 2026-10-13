@@ -156,6 +156,200 @@ const char* kVSOutputStruct =
     "};\n";
 
 namespace {
+std::string WaterBlock(int slot) {
+    return Fmt("cbuffer Water : register(b%d) { float4 waterClip[4]; float4 waterProject[4]; float4 waterReflection; float4 waterRegions; float4 waterProfiles; float4 waterSwell; float4 waterScreen; float4 waterParams; float4 waterOptical; float4 waterMisc; float4 waterMotion; float4 waterContacts[64]; float4 waterRings[64]; };\n",slot);
+}
+// Shared VS/PS field: identical phase in world space across all water batches.
+std::string WaterSurfaceCode(){
+    return
+        "Texture2D<float> waterOceanMask : register(t12); Texture2D<float> waterTerrain : register(t13);\n"
+        "Texture2D<float> waterShore : register(t14);\n"
+        "SamplerState waterClamp : register(s10);\n"
+        "float WaterShoreDistance(float2 p){\n"
+        " if(waterRegions.x<.5)return 8192;\n"
+        " float2 edge=clamp(p,float2(0,0),1/waterRegions.zw-1);\n"
+        " return waterShore.SampleLevel(waterClamp,(edge+.5)*waterRegions.zw,0)+length(p-edge);}\n"
+        "float2 WaterShoreGradient(float2 p){\n"
+        " return float2(WaterShoreDistance(p+float2(2,0))-WaterShoreDistance(p-float2(2,0)),\n"
+        " WaterShoreDistance(p+float2(0,2))-WaterShoreDistance(p-float2(0,2)))*.25;}\n"
+        "float WaterOceanAt(float3 p){\n"
+        " if(waterRegions.x<.5)return waterRegions.y;\n"
+        " float2 uv=(p.xz+.5)*waterRegions.zw;\n"
+        " if(any(p.xz<0) || any(uv>1))return 1;\n"
+        " return waterOceanMask.SampleLevel(waterClamp,uv,0);}\n"
+        "float WaterCoastFade(float3 p){\n"
+        " if(waterRegions.x<.5)return 1;\n"
+        " float2 uv=(p.xz+.5)*waterRegions.zw;\n"
+        " if(any(p.xz<0) || any(uv>1))return 1;\n"
+        " float depth=waterProfiles.w-waterTerrain.SampleLevel(waterClamp,uv,0);\n"
+        " return smoothstep(.15,max(.3,waterSwell.z),depth);}\n"
+        // Height is positive UP; renderer Y is positive DOWN. Wavelengths are
+        // deliberately long for the legacy mesh. This is analytic, not fluid simulation.
+        "float4 WaterSwellAt(float3 p){\n"
+        " float a=waterSwell.x*WaterOceanAt(p)*WaterCoastFade(p);if(a<=0)return 0;\n"
+        " float scale=1/max(.5,waterSwell.y),t=waterOptical.w;\n"
+        " float2 d0=float2(.93969,.34202),d1=float2(.81915,.57358),d2=float2(.57358,.81915);\n"
+        " float k0=.15708*scale,k1=.29920*scale,k2=.48332*scale;\n"
+        " float q0=dot(p.xz,d0)*k0-t*1.05,q1=dot(p.xz,d1)*k1-t*1.38+1.1,q2=dot(p.xz,d2)*k2-t*1.74+2.0;\n"
+        " float coastDist=WaterShoreDistance(p.xz);\n"
+        " if(coastDist<4096){\n"
+        "   float2 g=-WaterShoreGradient(p.xz);d0=g;d1=g;d2=g;\n"
+        "   q0=-coastDist*k0-t*1.05;q1=-coastDist*k1-t*1.38+1.1;q2=-coastDist*k2-t*1.74+2.0;}\n"
+        // Dominant travelling ridges, not crossing-wave isolated maxima. A mild
+        // second harmonic sharpens the profile; its derivative is kept in sync.
+        " float h=.80*(sin(q0)+.16*sin(2*q0))/1.16+.15*sin(q1)+.05*sin(q2);\n"
+        " float2 gradient=.80*k0*(cos(q0)+.32*cos(2*q0))/1.16*d0+.15*k1*cos(q1)*d1+.05*k2*cos(q2)*d2;\n"
+        // A narrow moving leading crest, not foam wherever total height is high.
+        " float crest=smoothstep(.92,.99,sin(q0))*(1-smoothstep(-.04,.22,cos(q0)));\n"
+        " return float4(h*a,gradient*a,crest*WaterCoastFade(p)*WaterOceanAt(p));}\n";
+}
+std::string WaterPixelCode(int samples) {
+    std::string s = WaterBlock(2);
+    s += WaterSurfaceCode();
+    s += "Texture2D<float4> waterScene : register(t11);\n"
+         "float WaterOcean(VSOut i){return WaterOceanAt(i.world);}\n"
+         "float FoamHash(float2 p){return frac(sin(dot(p,float2(127.1,311.7)))*43758.5453);}\n"
+         "float FoamNoise(float2 p){float2 cell=floor(p),f=frac(p);f=f*f*(3-2*f);\n"
+         " return lerp(lerp(FoamHash(cell),FoamHash(cell+float2(1,0)),f.x),lerp(FoamHash(cell+float2(0,1)),FoamHash(cell+1),f.x),f.y);}\n";
+    if (samples > 1) {
+        s += Fmt("Texture2DMS<float,%d> waterDepth : register(t10);\n",samples);
+        s += Fmt("float WaterDepthAt(int2 p) { float d=1; [unroll] for(int j=0;j<%d;j++) d=min(d,waterDepth.Load(p,j)); return d; }\n", samples);
+    } else s += "Texture2D<float> waterDepth : register(t10); float WaterDepthAt(int2 p) { return waterDepth.Load(int3(p,0)); }\n";
+    s +=
+        "float2 WaterInteractionSlope(VSOut i) {\n"
+        "  float2 slope=0;\n"
+        "  [loop] for(int k=0;k<(int)waterMotion.x;k++) {\n"
+        "    float4 contact=waterContacts[k], ring=waterRings[k];\n"
+        "    float age=waterMotion.z-contact.w;\n"
+        // Feet above the local surface are on dry land. This is evaluated against
+        // each water pixel, so events never turn a land-only contact into a wake.
+        "    if(age<0 || age>ring.w || contact.y<i.world.y-0.10) continue;\n"
+        "    float2 delta=i.world.xz-contact.xz; float distance=length(delta);\n"
+        "    float front=ring.y+age*ring.z, width=0.40+age*0.12;\n"
+        "    float d=distance-front; if(abs(d)>width*3 || distance<0.001) continue;\n"
+        "    float envelope=exp(-d*d/(width*width)-age*1.25)*(1-smoothstep(ring.w-.5,ring.w,age));\n"
+        "    float gradient=ring.x*envelope*(5*cos(d*5)-2*d/(width*width)*sin(d*5));\n"
+        "    slope+=delta/distance*gradient;\n"
+        "  }\n"
+        "  return clamp(slope*waterMotion.y,-0.30,0.30); }\n"
+        // The legacy t0 is a simulation/lookup field, not a validated world
+        // normal map. Generate one continuous gradient field across all UV tiles.
+        "float4 WaterWave(VSOut i) {\n"
+        "  float2 d0=float2(0.93969,0.34202),d1=float2(-0.52992,0.84805),d2=float2(0.25882,-0.96593);\n"
+        "  float ocean=WaterOcean(i);float2 p=i.world.xz; float t=waterOptical.w*lerp(.55,1,ocean);\n"
+        "  float2 slope=d0*(0.035*0.9*cos(dot(p,d0)*0.9-t*0.8))\n"
+        "              +d1*(0.016*1.7*cos(dot(p,d1)*1.7+t*1.1))\n"
+        "              +d2*(0.006*2.8*cos(dot(p,d2)*2.8-t*1.35));\n"
+        "  slope*=waterMisc.y*lerp(waterProfiles.y,waterProfiles.z,ocean);\n"
+        "  slope+=WaterSwellAt(i.world).yz;\n"
+        "  slope+=WaterInteractionSlope(i);\n"
+        "  float3 n=normalize(float3(slope,1));\n"
+        "  return float4(n*0.5+0.5,1); }\n"
+        "float3 WaterUnproject(float2 pixel,float d) {\n"
+        "  float2 ndc=float2(pixel.x*waterScreen.x*2-1,1-pixel.y*waterScreen.y*2)-waterScreen.zw;\n"
+        "  float4 q=float4(ndc,d,1);\n"
+        "  float4 p=float4(dot(q,waterClip[0]),dot(q,waterClip[1]),dot(q,waterClip[2]),dot(q,waterClip[3]));\n"
+        "  return p.xyz / (abs(p.w)>1e-8 ? p.w : 1e-8); }\n"
+        // No history buffers: current-camera snapshot only, avoiding stale reflection ghosts.
+        "bool WaterRayProbe(float3 P,out float2 uv,out float3 sceneP,out float gap) {\n"
+        "  float4 q=float4(P,1); float4 clip=float4(dot(q,waterProject[0]),dot(q,waterProject[1]),dot(q,waterProject[2]),dot(q,waterProject[3]));\n"
+        "  uv=0;sceneP=0;gap=-1; if(clip.w<=0.00001)return false;\n"
+        "  float3 ndc=clip.xyz/clip.w; ndc.xy+=waterScreen.zw;\n"
+        "  uv=float2(ndc.x*.5+.5,.5-ndc.y*.5);\n"
+        "  if(any(uv<waterScreen.xy) || any(uv>1-waterScreen.xy) || ndc.z<0 || ndc.z>1)return false;\n"
+        "  int2 size=int2(1/waterScreen.xy),pixel=clamp(int2(uv*size),int2(0,0),size-1);\n"
+        "  float d=WaterDepthAt(pixel);if(d>=.999999)return true;\n"
+        "  sceneP=WaterUnproject(pixel+.5,d);\n"
+        "  float3 eye=P-sunCamera.xyz;float len=length(eye);\n"
+        "  gap=dot(P-sceneP,eye/max(len,.0001));return true; }\n"
+        "float4 WaterSceneReflection(VSOut i,float3 N,float3 V) {\n"
+        "  if(waterReflection.x<=0)return 0;\n"
+        "  float3 R=normalize(reflect(-V,N));\n"
+        "  if(R.y>=-.005)return 0;\n"
+        "  float3 origin=i.world+N*.06;float lastT=.08,lastGap=-1;\n"
+        "  int steps=(int)waterReflection.z;\n"
+        "  [loop] for(int k=1;k<=steps;k++) {\n"
+        "    float fraction=(float)k/steps,t=.08+waterReflection.y*fraction*fraction;\n"
+        "    float2 uv;float3 sceneP;float gap;\n"
+        "    if(!WaterRayProbe(origin+R*t,uv,sceneP,gap))break;\n"
+        "    if(lastGap<0 && gap>=0) {\n"
+        "      float lo=lastT,hi=t;\n"
+        "      [unroll] for(int j=0;j<5;j++){float mid=(lo+hi)*.5;float2 mu;float3 mp;float mg;\n"
+        "        if(WaterRayProbe(origin+R*mid,mu,mp,mg) && mg>=0)hi=mid;else lo=mid;}\n"
+        "      if(WaterRayProbe(origin+R*hi,uv,sceneP,gap) && gap>=0 && gap<.6 && sceneP.y<i.world.y-.04) {\n"
+        "        float edge=min(min(uv.x,uv.y),min(1-uv.x,1-uv.y));\n"
+        "        float confidence=smoothstep(0,.055,edge)*(1-smoothstep(waterReflection.y*.75,waterReflection.y,hi));\n"
+        "        float2 blur=waterScreen.xy*1.25;\n"
+        "        float3 color=waterScene.SampleLevel(waterClamp,uv,0).rgb*.5;\n"
+        "        color+=(waterScene.SampleLevel(waterClamp,uv+float2(blur.x,0),0).rgb+waterScene.SampleLevel(waterClamp,uv-float2(blur.x,0),0).rgb\n"
+        "          +waterScene.SampleLevel(waterClamp,uv+float2(0,blur.y),0).rgb+waterScene.SampleLevel(waterClamp,uv-float2(0,blur.y),0).rgb)*.125;\n"
+        "        return float4(color,confidence*waterReflection.x);\n"
+        "      }\n"
+        "    }\n"
+        "    lastT=t;lastGap=gap;\n"
+        "  }return 0; }\n"
+        "float4 ApplyWater(float4 original,VSOut i,float4 waveSample,float3 reflected) {\n"
+        "  if(waterParams.x<0.5) return original;\n"
+        "  int2 size=int2(1/waterScreen.xy), pixel=clamp(int2(i.pos.xy),int2(0,0),size-1);\n"
+        "  float d=WaterDepthAt(pixel);\n"
+        "  float3 floorP=WaterUnproject(pixel+0.5,d);\n"
+        // JPOG world Y points downward; only water behind the opaque depth is valid.
+        "  float depth=d>=0.999999 ? waterParams.y*8 : clamp(floorP.y-i.world.y,0,waterParams.y*8);\n"
+        "  float2 wave=waveSample.rg*2-1;\n"
+        "  float ocean=WaterOcean(i);\n"
+        "  float3 N=normalize(float3(wave.x,-(waveSample.b*2-1),wave.y));\n"
+        "  float3 eye=sunCamera.xyz-i.world;\n"
+        "  float3 V=dot(eye,eye)>1e-8 ? normalize(eye) : float3(0,-1,0);\n"
+        "  float4 sceneReflection=WaterSceneReflection(i,N,V);\n"
+        "  reflected=lerp(reflected,sceneReflection.rgb,sceneReflection.a);\n"
+        "  float fresnel=0.02+0.98*pow(1-saturate(abs(dot(N,V))),5);\n"
+        "  float2 uv=(pixel+0.5)*waterScreen.xy;\n"
+        "  float2 warped=clamp(uv+wave*waterOptical.z*lerp(.45,1,ocean)*waterScreen.xy,waterScreen.xy*0.5,1-waterScreen.xy*0.5);\n"
+        "  int2 wp=clamp(int2(warped*size),int2(0,0),size-1);\n"
+        "  if(WaterDepthAt(wp)<i.pos.z-0.00001) warped=uv;\n"
+        "  float3 behind=waterScene.SampleLevel(waterClamp,warped,0).rgb;\n"
+        "  float amount=depth/max(waterParams.y,0.01);\n"
+        "  float3 transmission=exp(-amount*float3(1.6,0.65,0.40));\n"
+        "  float3 deepTint=lerp(float3(.045,.145,.095),float3(.025,.11,.14),ocean);\n"
+        "  float3 tint=lerp(float3(0.16,0.32,0.24),deepTint,saturate(amount));\n"
+        "  float clarity=lerp(1,waterOptical.y,saturate(amount*2));\n"
+        "  float3 through=lerp(tint,behind,transmission*clarity);\n"
+        "  float3 surface=lerp(through,reflected,saturate(fresnel*waterOptical.x));\n"
+        // Surface slope must remain readable from above, where Fresnel is small.
+        // Bounded art-directed body-light contrast and a sun glint; no camera-space
+        // phase/noise and no claim of a complete physically based water model.
+        "  float3 L=dot(sunDirection.xyz,sunDirection.xyz)>.5 ? normalize(sunDirection.xyz):normalize(float3(.4,-.8,.35));\n"
+        "  float ndl=saturate(dot(N,L)),flatNdl=saturate(-L.y);\n"
+        "  float bodyLight=clamp(1+2.5*(ndl-flatNdl),.70,1.30);\n"
+        "  surface*=lerp(1,bodyLight,ocean);\n"
+        "  float3 halfVector=L+V;float3 H=halfVector/max(length(halfVector),.001);\n"
+        "  float glint=pow(saturate(dot(N,H)),96)*(.08+.24*fresnel)*waterOptical.x*ocean;\n"
+        "  surface+=glint*float3(1,.96,.86);\n"
+        // Advancing/receding depth-space fronts plus drifting porous foam, no
+        // permanent uniform white outline. Footprint waves remain independent.
+        "  float phase=waterOptical.w*1.4+FoamNoise(i.world.xz*.09)*2;\n"
+        "  float width=max(.02,waterParams.z)*(.8+.35*sin(phase));\n"
+        "  float band=(1-smoothstep(0,width,depth))*smoothstep(.008,.06,depth);\n"
+        "  float2 drift=waterRegions.x>.5 ? WaterShoreGradient(i.world.xz)*.16:float2(-.11,-.06);\n"
+        "  float2 fp=i.world.xz*1.8+drift*waterOptical.w;\n"
+        "  float cells=FoamNoise(fp)*.65+FoamNoise(fp*2.3+7)*.35;\n"
+        "  float porous=.40+.60*smoothstep(.22,.7,cells);\n"
+        "  float front=.65+.35*sin(depth/max(width,.02)*9+phase*2);\n"
+        "  float shore=band*front*porous*waterParams.w*lerp(waterProfiles.x,1,ocean);\n"
+        "  float crestBreak=smoothstep(.40,.68,FoamNoise(i.world.xz*.28-float2(.06,.02)*waterOptical.w));\n"
+        "  float crest=WaterSwellAt(i.world).w*waterSwell.w*.32*crestBreak*porous;\n"
+        "  float foam=saturate(shore+crest);\n"
+        "  surface=lerp(surface,float3(0.80,0.86,0.78),foam);\n"
+        "  if(waterMisc.x==1) return float4(saturate(amount).xxx,1);\n"
+        "  if(waterMisc.x==2) return float4(fresnel.xxx,1);\n"
+        "  if(waterMisc.x==3) return float4(foam.xxx,1);\n"
+        "  if(waterMisc.x==4) {float disturbance=saturate(length(WaterInteractionSlope(i))*20); return float4(disturbance.xxx,1);}\n"
+        "  if(waterMisc.x==5) return float4(sceneReflection.a.xxx,1);\n"
+        "  if(waterMisc.x==6) return float4(lerp(float3(.1,.8,.2),float3(.05,.3,1),ocean),1);\n"
+        "  if(waterMisc.x==7) return float4(saturate(abs(WaterSwellAt(i.world).x)/max(.001,waterSwell.x)).xxx,1);\n"
+        "  return float4(surface,1); }\n";
+    return s;
+}
 std::string SunBlock(int slot) {
     return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera; };\n", slot);
 }
@@ -192,6 +386,48 @@ std::string NormalMapCode() {
         "  return float4(color.rgb * clamp(relief, 0.35, 1.7), color.a); }\n";
 }
 
+std::string MaterialCode(bool normalMap, int stage){
+    std::string s=
+        "cbuffer Material:register(b3){float4 materialSurface;float4 materialOptics;};\n"
+        "float3 MaterialNormal(VSOut i){\n"
+        " float3 raw=cross(ddy(i.world),ddx(i.world));\n"
+        " if(dot(i.normal,i.normal)>1e-8)raw=i.normal;\n"
+        " if(dot(raw,raw)<1e-12)return float3(0,-1,0);\n"
+        " float3 N=normalize(raw);if(dot(N,sunCamera.xyz-i.world)<0)N=-N;\n";
+    if(normalMap)s+=
+        " float3 n=normalTex.Sample(smp0,i.t0.xy).xyz*2-1;\n"
+        " n.xy*=materialSurface.w;if(sunCamera.w<0)n.y=-n.y;n.z=sqrt(saturate(1-dot(n.xy,n.xy)));\n"
+        " float3 dp1=ddx(i.world),dp2=ddy(i.world);float2 uv1=ddx(i.t0.xy),uv2=ddy(i.t0.xy);\n"
+        " float3 a=cross(dp2,N),b=cross(N,dp1);float3 T=a*uv1.x+b*uv2.x,B=a*uv1.y+b*uv2.y;\n"
+        " float scale=max(dot(T,T),dot(B,B));\n"
+        " if(scale>1e-12)N=normalize((T*n.x+B*n.y)*rsqrt(scale)+N*n.z);\n";
+    s+=
+        " return N;}\n"
+        "float4 ApplyMaterial(float4 color,VSOut i){\n"
+        " if(materialOptics.y>.5){float t=materialOptics.z;\n"
+        "  return float4(t>.5?float3(1,0,0):materialOptics.w<1.5?float3(1,0,1):float3(0,1,1),color.a);}\n"
+        " float3 N=MaterialNormal(i),eye=sunCamera.xyz-i.world;\n"
+        " float3 V=dot(eye,eye)>1e-8?normalize(eye):N,L=normalize(sunDirection.xyz);\n"
+        " float3 halfVector=V+L,H=halfVector/max(length(halfVector),.001);\n"
+        " float nl=saturate(dot(N,L)),nv=max(.001,saturate(dot(N,V))),nh=saturate(dot(N,H)),vh=saturate(dot(V,H));\n"
+        " float rough=clamp(materialSurface.x,.1,1),alpha=rough*rough,a2=alpha*alpha;\n"
+        " float denom=nh*nh*(a2-1)+1,D=a2/(3.14159265*max(denom*denom,.000001));\n"
+        " float k=(rough+1)*(rough+1)/8;float G=nv/(nv*(1-k)+k)*nl/max(nl*(1-k)+k,.001);\n"
+        " float3 F0=materialOptics.x.xxx,F=F0+(1-F0)*pow(1-vh,5);\n"
+        " float3 albedo=pow(max(color.rgb,0),2.2);\n"
+        " float3 spec=D*G*F/max(4*nv*nl,.001)*materialSurface.y;\n"
+        " float3 direct=((1-F)*albedo/3.14159265+spec)*nl*sunSettings.y*3.14159265*float3(1,.95,.84);\n"
+        " float sky=saturate(-N.y*.5+.5);\n"
+        " float3 ambient=albedo*sunSettings.x*lerp(float3(.38,.34,.27),float3(.78,.88,1),sky);\n"
+        // Analytic environment approximation: no cubemap probes or GI claim.
+        " float3 R=reflect(-V,N);float horizon=saturate(-R.y*.5+.5);\n"
+        " float3 environment=lerp(float3(.10,.07,.04),float3(.24,.34,.50),horizon);\n"
+        " float3 envF=F0+(max((1-rough).xxx,F0)-F0)*pow(1-nv,5);\n"
+        " float3 indirectSpec=environment*envF*materialSurface.z*(1-.5*rough);\n"
+        " return float4(pow(max(ambient+direct+indirectSpec,0),1/2.2),color.a);}\n";
+    if(stage==1){size_t p=0;while((p=s.find("i.t0.xy",p))!=std::string::npos){s.replace(p,7,"i.t1.xy");p+=7;}}
+    return s;
+}
 std::string SunPixelCode() {
     return SunBlock(1) +
         // Shadows are applied after the world pass (sun.cpp resolve). In-pass work is only the
@@ -327,6 +563,8 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
     s += "cbuffer VSConstants : register(b0) { float4 c[256]; };\n";
     s += "cbuffer VSExtra : register(b1) { float4 pixelOffset; };\n";
     s += SunBlock(2);
+    s += WaterBlock(4); // b3 belongs to interactive grass
+    s += WaterSurfaceCode();
     const bool grass = WorldShaderKind(decl) == 4;
     if (grass) {
         // Interactive grass: creatures near a blade bend it away and flatten it, scaled by the
@@ -439,6 +677,13 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
     s += "    if (abs(worldH.w) > 1e-6) worldPosition = float4(worldH.xyz/worldH.w,1);\n";
     s += "  }\n";
     s += "  o.world = worldPosition.xyz;\n";
+    s += "  if(waterParams.x>0.5) {\n";
+    s += "    float4 p=float4(dot(oPos,waterClip[0]),dot(oPos,waterClip[1]),dot(oPos,waterClip[2]),dot(oPos,waterClip[3]));\n";
+    s += "    if(abs(p.w)>1e-8) o.world=p.xyz/p.w;\n";
+    s += "    float4 swell=WaterSwellAt(o.world);o.world.y-=swell.x;\n";
+    s += "    if(waterSwell.x>0) {float4 q=float4(o.world,1);\n";
+    s += "      o.pos=float4(dot(q,waterProject[0]),dot(q,waterProject[1]),dot(q,waterProject[2]),dot(q,waterProject[3]));oPos=o.pos;}\n";
+    s += "  }\n";
     s += "  o.normal = 0;\n";
     if (WorldShaderKind(decl) == 1) {
         // r6 is the skinned normal in the coordinate system consumed by c0.
@@ -455,6 +700,7 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
     }
     s += "  if (sunFlags.y > 0.5) o.pos = float4(dot(worldPosition,sunWrite[0]),dot(worldPosition,sunWrite[1]),dot(worldPosition,sunWrite[2]),dot(worldPosition,sunWrite[3]));\n";
     s += "  if (sunFlags.y < 0.5) o.pos.xy += pixelOffset.xy * oPos.w;\n";
+    s += "  if(sunFlags.y<0.5 && (sunFlags.x>0.5 || waterParams.x>0.5)) o.pos.xy+=pixelOffset.zw*oPos.w;\n";
     s += "  o.d0 = saturate(od0);\n  o.d1 = saturate(od1);\n";
     s += "  o.t0 = ot0; o.t1 = ot1; o.t2 = ot2; o.t3 = ot3; o.t4 = ot4; o.t5 = ot5; o.t6 = ot6; o.t7 = ot7;\n";
     s += "  o.fog = oFog.x;\n";
@@ -542,6 +788,28 @@ std::string DestModifiers(DWORD t, const std::string& v)
 
 } // namespace
 
+bool IsWaterPixelShader(const DWORD* func)
+{
+    std::vector<Instr> code;
+    DWORD minor; std::string error;
+    if (!func || (func[0]&0xffff0000)!=0xffff0000 || !Decode(func,true,code,minor,error)) return false;
+    bool pad=false, reflect=false, bump=false;
+    for(const auto& i:code) {
+        if(i.op==OP_TEX && RegNumOf(i.p[0])==0) bump=true;
+        if(i.op==OP_TEXM3x2PAD && RegNumOf(i.p[0])==1) pad=true;
+        if(i.op==OP_TEXM3x2TEX && RegNumOf(i.p[0])==2) reflect=true;
+    }
+    return bump && pad && reflect;
+}
+
+bool PixelShaderSamplesStage(const DWORD* func, int stage)
+{
+    std::vector<Instr> code;DWORD minor;std::string error;
+    if(!func || !Decode(func,true,code,minor,error))return false;
+    for(const auto& i:code)if(i.op==OP_TEX && !i.p.empty() && RegNumOf(i.p[0])==stage)return true;
+    return false;
+}
+
 std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& error)
 {
     if ((func[0] & 0xFFFF0000) != 0xFFFF0000) { error = "not a pixel shader"; return ""; }
@@ -555,7 +823,9 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
     s += TextureDecls(v.texDim);
     s += kVSOutputStruct;
     s += SunPixelCode();
-    if (v.normalMap && v.texDim[0] == 2) s += NormalMapCode();
+    if (v.water) s += WaterPixelCode(v.waterSamples);
+    if (v.normalMap && v.texDim[v.material?v.material-1:0] == 2) s += NormalMapCode();
+    if(v.material)s+=MaterialCode(v.normalMap && v.texDim[v.material-1]==2,v.material-1);
     s += v.shadowOnly ? "void main(VSOut i) {\n" : "float4 main(VSOut i) : SV_Target {\n";
     s += "  float4 cp[8] = c;\n";
     for (const Instr& in : code)
@@ -588,10 +858,12 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
             switch (in.op) {
             case OP_TEX:
                 s += Fmt("  t%d = ", n) + SampleExpr(n, v.texDim, coord) + ";\n";
-                // Captured grass shader multiplies its blade texture by a
-                // terrain colour/light texture. Retain that texture's alpha
-                // but replace its RGB contribution with our own illumination.
-                if (n == 1) s += "  if (relight && sunFlags.w == 4) t1.rgb = 1;\n";
+                // Also use the same continuous wave field for the original
+                // texm3x2 reflection lookup, not just our Fresnel/refraction.
+                if(v.water && n==0) s += "  t0=WaterWave(i);\n";
+                // Grass t1 contains terrain material colour as well as legacy
+                // lighting. Whitening it removes the green tint of the blades.
+                // Preserve it until those two components can be separated.
                 break;
             case OP_TEXCOORD: s += Fmt("  t%d = float4(saturate(i.t%d.xyz), 1.0);\n", n, n); break;
             case OP_TEXKILL: s += "  if (any(" + coord + ".xyz < 0.0)) discard;\n"; break;
@@ -681,8 +953,12 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
     s += AlphaTest(v.alphaFunc, v.a2c);
     if (v.shadowOnly) s += "  return;\n}\n";
     else {
-        if (v.normalMap && v.texDim[0] == 2) s += "  color = ApplyNormalMap(color,i);\n";
-        s += "  color = ApplySun(color,i);\n";
+        if (v.water) s += "  color = ApplyWater(color,i,t0,t2.rgb);\n";
+        if(v.material)s+="  color = ApplyMaterial(color,i);\n";
+        else{
+            if (v.normalMap && v.texDim[0] == 2) s += "  color = ApplyNormalMap(color,i);\n";
+            s += "  color = ApplySun(color,i);\n";
+        }
         if (deferredFog)
             s += "  if (relight && sunControl.y == 0) color.rgb = lerp(color.rgb,i.d1.rgb,saturate(i.d1.w));\n";
         s += "  return color;\n}\n";
@@ -752,7 +1028,8 @@ std::string GenerateFFPS(const FFKey& k)
     s += TextureDecls(dims);
     s += kVSOutputStruct;
     s += SunPixelCode();
-    if (k.normalMap && dims[0] == 2) s += NormalMapCode();
+    if (k.normalMap && dims[k.material?k.material-1:0] == 2) s += NormalMapCode();
+    if(k.material)s+=MaterialCode(k.normalMap && dims[k.material-1]==2,k.material-1);
     s += k.shadowOnly ? "void main(VSOut i) {\n" : "float4 main(VSOut i) : SV_Target {\n";
     s += "  float4 diffuse = i.d0, specular = i.d1, cur = i.d0, temp = 0, tex = 1;\n";
     s += "  if (sunControl.x > 0.5 && sunFlags.x > 0.5 && sunFlags.y < 0.5) { diffuse.rgb=1; specular.rgb=0; cur.rgb=1; }\n";
@@ -784,8 +1061,8 @@ std::string GenerateFFPS(const FFKey& k)
     s += "  float4 color = cur;\n";
     if (k.specular) s += "  color.rgb = saturate(color.rgb + specular.rgb);\n";
     s += AlphaTest(k.alphaFunc, k.a2c);
-    if (!k.shadowOnly && k.normalMap && k.stages[0].texDim == 2) s += "  color = ApplyNormalMap(color,i);\n";
-    s += k.shadowOnly ? "  return;\n}\n" : "  return ApplySun(color,i);\n}\n";
+    if (!k.shadowOnly && !k.material && k.normalMap && k.stages[0].texDim == 2) s += "  color = ApplyNormalMap(color,i);\n";
+    s += k.shadowOnly ? "  return;\n}\n" : k.material ? "  return ApplyMaterial(color,i);\n}\n":"  return ApplySun(color,i);\n}\n";
     return s;
 }
 

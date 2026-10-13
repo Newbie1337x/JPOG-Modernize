@@ -28,6 +28,8 @@ extern const char* kVSOutputStruct;
 std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& error);
 // Recognized main-world geometry; screen-space/UI shaders remain unlit.
 int WorldShaderKind(const VSDecl& decl);
+bool IsWaterPixelShader(const DWORD* func); // captured bump-reflection path, not handles
+bool PixelShaderSamplesStage(const DWORD* func, int stage);
 
 // Pixel shader variant: texture dimension per stage (0 = none, 2 = 2D, 3 = volume) and alpha test.
 struct PSVariant {
@@ -36,6 +38,9 @@ struct PSVariant {
     BYTE shadowOnly = 0;
     BYTE a2c = 0;       // alpha-to-coverage instead of the alpha test discard
     BYTE normalMap = 0; // stage 0 texture has a normal map bound at t9
+    BYTE water = 0;
+    BYTE waterSamples = 0; // copied scene depth: 0 single sample, otherwise 2/4/8
+    BYTE material=0;
     bool operator==(const PSVariant& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
 };
 std::string TranslatePS(const DWORD* func, const PSVariant& variant, std::string& error);
@@ -53,7 +58,8 @@ struct FFKey {
     BYTE shadowOnly;
     BYTE a2c;
     BYTE normalMap;
-    BYTE pad[3];
+    BYTE material;
+    BYTE pad[2];
 };
 std::string GenerateFFPS(const FFKey& key);
 
@@ -84,4 +90,20 @@ struct SunConstants {
     float flags[4];    // lighting enabled, shadow pass, previous map ready, normal kind
     float control[4];  // replace original, debug view, reserved, reserved
     float camera[4];   // camera world position, w = normal map strength
+};
+
+struct WaterConstants {
+    float clipToWorld[4][4];
+    float worldToClip[4][4];
+    float reflection[4]; // SSR strength/enabled, distance, steps, reserved
+    float regions[4];    // mask valid, forced/default ocean factor, inverse native grid W/H
+    float profiles[4];   // lagoon foam, lagoon ripples, ocean ripples, native water height
+    float swell[4];      // amplitude, wavelength scale, coast fade depth, crest foam
+    float screen[4];  // inverse resolution, original clip half-pixel correction
+    float params[4];  // active, absorption depth scale, foam width, foam strength
+    float optical[4]; // reflection, transparency, distortion pixels, time
+    float misc[4];    // debug mode, reserved
+    float motion[4];  // ripple count, interaction strength, unscaled time, reserved
+    float contacts[64][4]; // x, feet Y (downward positive), z, birth time
+    float rings[64][4];    // amplitude, initial radius, expansion speed, lifetime
 };

@@ -21,6 +21,7 @@ void LogOnce(const std::string& key, const char* fmt, ...);
 
 // ---- configuration (d3d8to11.ini next to the game executable) ----------------------------------
 struct Config {
+    bool effectsEnabled = true; // master switch; individual effect settings are preserved
     bool useDgVoodoo = false;   // [Renderer] Backend=dgvoodoo forwards everything to D3D8_dgVoodoo.dll
     int syncInterval = 0;       // [Renderer] VSync
     int fpsLimit = 0;           // [Renderer] FPSLimit (0 = off)
@@ -60,6 +61,29 @@ struct Config {
     bool normalMaps = true;         // [NormalMaps] Enabled
     float normalStrength = 1.5f;    // [NormalMaps] Strength
     bool normalFlipGreen = false;   // [NormalMaps] FlipGreen (OpenGL-style maps)
+    bool waterEnabled = true;       // [Water] depth-aware water, original waves/reflections
+    float waterDepthScale = 6.0f, waterTransparency = 0.80f;
+    float waterReflection = 0.85f, waterFoam = 0.35f, waterFoamWidth = 0.65f;
+    float waterDistortion = 2.0f;    // refraction displacement in pixels
+    float waterRipples = 1.0f, waterSpeed = 1.0f; // continuous world-space waves
+    bool waterInteraction = true;
+    bool waterSSR = true; // scene reflections from the frozen opaque snapshot
+    float waterSSRStrength=1.0f, waterSSRDistance=80.0f;
+    int waterSSRSteps=24;
+    int waterSurfaceMode=0; // 0 native connectivity, 1 force lagoon, 2 force ocean
+    float waterLagoonFoam=.03f,waterLagoonRipples=.25f,waterOceanRipples=1.4f;
+    float waterSwellAmplitude=.65f,waterSwellLength=1.f,waterSwellCoastDepth=3.f,waterCrestFoam=.35f;
+    bool performanceLog=true, performanceGPU=true;
+    bool taa=true, fsr1=true;
+    bool fsr31=true; // experimental native-resolution temporal AA, not frame generation
+    bool frameGeneration=false; // synchronous x2 prototype; requires native AA + VSync
+    bool frameGenerationDebug=false; // show SDK intermediate instead of extra Present
+    bool materialsEnabled=true;
+    float materialSkinRoughness=.58f,materialBuildingRoughness=.78f;
+    float materialSpecular=.85f,materialEnvironment=.25f,materialNormalStrength=.65f;
+    float taaHistory=.72f, fsrSharpness=.5f;
+    float waterInteractionStrength = 1.0f;
+    int waterDebug = 0;             // 0 shaded, 1 thickness, 2 Fresnel, 3 foam
     // [Grass] creatures bend and flatten the grass around them
     bool grassPhysics = true;       // [Grass] Enabled
     float grassPush = 0.8f;         // [Grass] Push: sideways bend, in blade heights

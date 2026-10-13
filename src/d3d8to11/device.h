@@ -1,7 +1,10 @@
 // device.h - IDirect3DDevice8 implemented on D3D11.
 #pragma once
+#include "water_interaction.h"
 #include "objects.h"
 #include "shaders.h"
+#include "performance.h"
+#include "water_regions.h"
 
 struct VertexShader8 {
     std::vector<DWORD> decl, func;
@@ -13,6 +16,7 @@ struct VertexShader8 {
 
 struct PixelShader8 {
     std::vector<DWORD> func;
+    bool samplesStage1=false;
     std::vector<std::pair<PSVariant, ComPtr<ID3D11PixelShader>>> variants;
 };
 
@@ -150,6 +154,11 @@ private:
     bool CreateSunResources();
     void UpdateSun(bool shadowPass);
     void DrawSunShadow(bool indexed, UINT count, UINT start, INT base);
+    bool CreateWaterResources();
+    void PrepareWaterDraw();
+    void UpdateWaterRegions();
+    bool WaterSurfaceHeight(float& height) const;
+    bool EnsureWaterSnapshot();
 
     LONG m_ref = 1;
     Direct3D8* m_d3d;
@@ -177,6 +186,7 @@ private:
     IndexBuffer* m_indices = nullptr;
     UINT m_baseVertex = 0;
     DWORD m_vsHandle = 0, m_psHandle = 0;
+    UINT m_drawFirstVertex=0;
     float m_vsConst[kMaxVSConst][4];
     PSConstants m_psConst = {};
     D3D8Viewport m_viewport = {};
@@ -235,6 +245,51 @@ private:
 
     LARGE_INTEGER m_qpcFreq = {}, m_lastFrame = {};
     UINT64 m_frame = 0;
+    bool EnsureTemporal();
+    struct Fsr31State;
+    Fsr31State* m_fsr31=nullptr;
+    bool m_fsr31Failed=false;
+    UINT64 m_fsr31Frame=~UINT64(0);
+    bool EnsureFsr31();
+    bool ResolveFsr31();
+    void ReleaseFsr31();
+    void Fsr31Jitter(float& x,float& y) const;
+    int ActiveMaterial() const;
+    int MaterialTextureStage() const;
+    bool PrepareMaterial();
+    void TrackSkinTexture();
+    // Skin picker (Insert panel): distinct stage-0 textures of skinned world draws, in draw order.
+    int m_pickSkin=-1;
+    std::vector<Texture*> m_skinList, m_skinListPrev;
+    UINT64 m_skinListFrame=~UINT64(0);
+    bool PickedDraw() const;
+    ComPtr<ID3D11Buffer> m_materialCB;
+    bool m_materialFailed=false;
+    bool m_materialDebug=false;
+    UINT64 m_materialStatsFrame=~UINT64(0);
+    UINT m_materialDraws[3]={};
+    bool m_frameGenFailed=false,m_frameGenReady=false;
+    UINT64 m_generatedPresents=0;
+    UINT64 m_generatedPresentFrame=~UINT64(0);
+    bool PresentGeneratedFrame();
+    void ReplayOverlay();
+    void ResolveTemporal();
+    void TemporalJitter(float& x,float& y) const;
+    ID3D11ShaderResourceView* PrepareFsr(ID3D11ShaderResourceView* source);
+    void FullscreenPass(ID3D11PixelShader*,ID3D11RenderTargetView*,UINT,UINT);
+    ComPtr<ID3D11PixelShader> m_taaPS,m_aaCopyPS,m_fsrEasuPS,m_fsrRcasPS;
+    ComPtr<ID3D11Buffer> m_taaCB,m_fsrCB;
+    ComPtr<ID3D11Texture2D> m_taaColor[2],m_taaDepth[2],m_fsrTex[2];
+    ComPtr<ID3D11RenderTargetView> m_taaColorRTV[2],m_taaDepthRTV[2],m_fsrRTV[2];
+    ComPtr<ID3D11ShaderResourceView> m_taaColorSRV[2],m_taaDepthSRV[2],m_fsrSRV[2];
+    UINT m_taaW=0,m_taaH=0,m_taaSamples=0,m_fsrW=0,m_fsrH=0;
+    bool m_taaValid=false,m_taaFailed=false,m_fsrFailed=false;
+    int m_taaIndex=0;
+    UINT64 m_taaFrame=~UINT64(0);
+    float m_taaPrevVP[4][4]={},m_taaPrevOffset[4]={};
+    Performance m_perf;
+    void RecordPerformance();
+    UINT m_perfDraws=0, m_perfWaterDraws=0, m_perfShadowDraws=0;
     // Sun shadows (sun.cpp). Casters are drawn into m_sunMap as the frame is rendered; once the
     // world is finished, a full-screen pass darkens the back buffer using the scene depth.
     ComPtr<ID3D11Buffer> m_sunCB, m_resolveCB;
@@ -282,16 +337,19 @@ private:
     void TraceFlush();
     bool EnsureShadowMap();
     // Scene effects need the camera from the terrain draw (StartSunFrame).
-    bool SceneFx() const { return g_config.sunLighting || g_config.postEnabled || g_config.grassPhysics || g_config.aoEnabled; }
+    bool SceneFx() const { return g_config.effectsEnabled &&
+        (g_config.sunLighting || g_config.postEnabled || g_config.grassPhysics || g_config.aoEnabled || g_config.waterEnabled || g_config.taa || g_config.fsr31 || g_config.materialsEnabled); }
     void CapturePusher(UINT firstVertex, UINT numVertices);
     // Stage-0 normal map for this draw (world draws only, not the shadow pass).
     ID3D11ShaderResourceView* ActiveNormalMap() const {
-        if (!g_config.normalMaps || !m_worldDraw || m_sun.flags[1] > 0.5f || !m_textures[0] ||
-            m_textures[0]->GetType() != D8RTYPE_TEXTURE) return nullptr;
-        return static_cast<Texture*>(static_cast<ID8Texture*>(m_textures[0]))->m_normalSrv.Get();
+        int stage=ActiveMaterial()?MaterialTextureStage():0;
+        if (!g_config.normalMaps || !m_worldDraw || m_sun.flags[1] > 0.5f || !m_textures[stage] ||
+            m_textures[stage]->GetType() != D8RTYPE_TEXTURE) return nullptr;
+        return static_cast<Texture*>(static_cast<ID8Texture*>(m_textures[stage]))->m_normalSrv.Get();
     }
     bool GrassCaptureActive() const {
-        return g_config.grassPhysics && m_worldDraw && m_worldKind == 1 && m_sunStarted && !m_sunResolved;
+        return (g_config.grassPhysics || (g_config.waterEnabled && g_config.waterInteraction) || (g_config.fsr31 && !m_fsr31Failed)) &&
+            m_worldDraw && m_worldKind == 1 && m_sunStarted && !m_sunResolved;
     }
     float m_pushBoxes[32][4] = {};  // world x/z footprint per pusher: min x, min z, max x, max z
     void UploadGrass();
@@ -299,6 +357,7 @@ private:
     float m_pushers[32][4] = {};
     UINT m_pusherCount = 0, m_lastBones = 0;
     bool m_grassUploaded = false;
+    bool m_grassApplied = false;
     UINT m_vsWriteLo = 0, m_vsWriteHi = 0;
     UINT SupportedSamples(int requested);
     void ApplyMsaa();
@@ -315,5 +374,32 @@ private:
     void StartSunFrame();
     void CaptureGameSun();
     void ResolveSun(const char* reason);
+    ComPtr<ID3D11Buffer> m_waterCB;
+    ComPtr<ID3D11Texture2D> m_waterDepthCopy, m_waterColorCopy;
+    ComPtr<ID3D11ShaderResourceView> m_waterDepthSRV, m_waterColorSRV;
+    ComPtr<ID3D11SamplerState> m_waterSampler;
+    bool m_waterDraw = false, m_waterSnapshotReady = false;
+    UINT m_waterW = 0, m_waterH = 0, m_waterSamples = 0;
+    float m_waterFrameTime = 0; // frozen for every batch sharing an opaque snapshot
+    float m_waterViewProjection[4][4]={};
+    ULONGLONG m_waterTimeOrigin = 0;
+    WaterInteractionState m_waterInteraction;
+    WaterRegionMap m_waterRegions;
+    ComPtr<ID3D11Texture2D> m_waterRegionTexture;
+    ComPtr<ID3D11ShaderResourceView> m_waterRegionSRV;
+    ComPtr<ID3D11Texture2D> m_waterTerrainTexture;
+    ComPtr<ID3D11ShaderResourceView> m_waterTerrainSRV;
+    ComPtr<ID3D11Texture2D> m_waterShoreTexture;
+    ComPtr<ID3D11ShaderResourceView> m_waterShoreSRV;
+    std::vector<float> m_waterRegionHeights;
+    void* m_waterRegionTerrain=nullptr;
+    void* m_waterRegionHeightField=nullptr;
+    UINT m_waterRegionW=0,m_waterRegionH=0,m_waterRegionNext=0;
+    UINT64 m_waterRegionFrame=~UINT64(0);
+    ULONGLONG m_waterRegionRefresh=0;
+    float m_waterRegionLevel=0,m_waterRegionCpuMs=0;
+    bool m_waterRegionReady=false,m_waterNativeAvailable=false,m_waterNativeFault=false;
+    void UpdateWaterInteractions();
+    float WaterTime() const;
     void EndSunFrame();
 };

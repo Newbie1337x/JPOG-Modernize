@@ -136,6 +136,7 @@ Device::Device(Direct3D8* d3d, HWND focus, DWORD flags, D3D8PresentParameters* p
 
 Device::~Device()
 {
+    ReleaseFsr31();
     ShutdownOverlay();
     for (auto& t : m_textures) SetRef(t, (ID8BaseTexture*)nullptr);
     for (auto& s : m_streams) SetRef(s.vb, (VertexBuffer*)nullptr);
@@ -166,6 +167,7 @@ bool Device::Init()
     Log("D3D11 device created (feature level 0x%x)", got);
     if (!CreatePresentResources()) return false;
     if (!CreateSunResources()) { Log("Sun resource creation failed"); return false; }
+    if (!CreateWaterResources()) { Log("Water resource creation failed"); return false; }
     if (!CreateSwapChainAndBackBuffer()) return false;
     return true;
 }
@@ -255,6 +257,9 @@ bool Device::CreateSwapChainAndBackBuffer()
     if (m_backBuffer) { m_backBuffer->m_holdsDeviceRef = false; m_backBuffer->Release(); m_backBuffer = nullptr; }
     if (m_autoDepth) { m_autoDepth->m_holdsDeviceRef = false; m_autoDepth->Release(); m_autoDepth = nullptr; }
     m_msaaApplied = SupportedSamples(g_config.msaa);
+    m_taaValid=false;ReleaseFsr31();
+    m_waterSnapshotReady = false;
+    m_waterInteraction.Clear();
     m_backBuffer = new Surface(this, nullptr, 0, m_pp.BackBufferWidth, m_pp.BackBufferHeight, m_pp.BackBufferFormat,
                                D8USAGE_RENDERTARGET, D8POOL_DEFAULT);
     m_backBuffer->m_samples = m_msaaApplied;
@@ -517,6 +522,7 @@ void Device::ApplyMsaa()
         if (ok) m_ctx->ClearDepthStencilView(m_autoDepth->Dsv(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1, 0);
     }
     m_msaaApplied = want;
+    m_waterSnapshotReady = false;
     m_rtDirty = true;
     Log("MSAA changed to %ux%s", want, ok ? "" : " (surface creation failed)");
 }
@@ -551,6 +557,7 @@ HRESULT Device::SetViewport(const D3D8Viewport* vp)
 
 HRESULT Device::Clear(DWORD count, const D3D8Rect* rects, DWORD flags, DWORD color, float z, DWORD stencil)
 {
+    if((flags & D8CLEAR_ZBUFFER) && m_ds==m_autoDepth) m_waterSnapshotReady=false;
     TraceSun("Clear flags %lu z %.3f rt %s ds %s viewport %ux%u", flags, z, m_rt == m_backBuffer ? "back" : "other",
              m_ds == m_autoDepth ? "auto" : "other", m_viewport.Width, m_viewport.Height);
     if (m_sunStarted && (flags & D8CLEAR_ZBUFFER) && m_ds == m_autoDepth) {
@@ -887,6 +894,7 @@ HRESULT Device::CreatePixelShader(const DWORD* func, DWORD* handle)
     if (!func || !handle) return D8ERR_INVALIDCALL;
     PixelShader8* ps = new PixelShader8();
     ps->func.assign(func, func + ShaderTokenCount(func));
+    ps->samplesStage1=PixelShaderSamplesStage(func,1);
     m_pixelShaders.push_back(ps);
     *handle = (DWORD)m_pixelShaders.size();
     return S_OK;
@@ -1101,6 +1109,9 @@ ID3D11PixelShader* Device::GetPixelShader()
         v.shadowOnly = m_sun.flags[1] > 0.5f ? 1 : 0;
         v.a2c = AlphaToCoverageActive() ? 1 : 0;
         v.normalMap = ActiveNormalMap() ? 1 : 0;
+        v.material = ActiveMaterial() ? BYTE(MaterialTextureStage()+1):0;
+        v.water = m_waterDraw ? 1 : 0;
+        v.waterSamples = m_waterDraw && m_waterSamples>1 ? (BYTE)m_waterSamples : 0;
         if (v.normalMap) LogOnce(std::string("nm-draw-") + std::to_string(m_vsHandle) + "-" + std::to_string(m_psHandle),
                                  "normal map draw: VS 0x%lx PS 0x%lx kind %d", m_vsHandle, m_psHandle, m_worldKind);
         for (auto& e : ps->variants) if (e.first == v) return e.second.Get();
@@ -1139,6 +1150,7 @@ ID3D11PixelShader* Device::GetPixelShader()
     k.shadowOnly = m_sun.flags[1] > 0.5f ? 1 : 0;
     k.a2c = AlphaToCoverageActive() ? 1 : 0;
     k.normalMap = ActiveNormalMap() ? 1 : 0;
+    k.material = ActiveMaterial() ? BYTE(MaterialTextureStage()+1):0;
     std::string key((const char*)&k, sizeof(k));
     auto it = m_ffShaders.find(key);
     if (it != m_ffShaders.end()) return it->second.Get();
@@ -1154,6 +1166,10 @@ ID3D11PixelShader* Device::GetPixelShader()
 
 bool Device::PrepareDraw()
 {
+    if(m_materialStatsFrame!=m_frame){m_materialStatsFrame=m_frame;memset(m_materialDraws,0,sizeof(m_materialDraws));}
+    m_perf.enabled=g_config.performanceGPU;
+    m_perf.Begin(m_device.Get(),m_ctx.Get());
+    ++m_perfDraws;
     // The first depth-less draw to the back buffer after the world is the HUD: apply the
     // sun shadows before it so they never darken the interface.
     if (m_sunStarted && !m_sunResolved && m_rt == m_backBuffer && !m_rs[RS_ZENABLE]) ResolveSun("hud");
@@ -1167,6 +1183,7 @@ bool Device::PrepareDraw()
         VSExtraConstants vx = {};
         vx.pixelOffset[0] = m_viewport.Width ? -1.0f / m_viewport.Width : 0.0f;
         vx.pixelOffset[1] = m_viewport.Height ? 1.0f / m_viewport.Height : 0.0f;
+        if(EnsureTemporal())TemporalJitter(vx.pixelOffset[2],vx.pixelOffset[3]);
         D3D11_MAPPED_SUBRESOURCE map;
         if (SUCCEEDED(m_ctx->Map(m_vsExtraCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
             memcpy(map.pData, &vx, sizeof(vx));
@@ -1187,7 +1204,9 @@ bool Device::PrepareDraw()
     }
     VertexShader8* vs = m_vertexShaders[idx];
     m_worldKind = WorldShaderKind(vs->parsed);
-    m_worldDraw = SceneFx() && m_worldKind != 0 &&
+    bool waterShader=m_psHandle>0 && m_psHandle<=m_pixelShaders.size() && m_pixelShaders[m_psHandle-1] &&
+        IsWaterPixelShader(m_pixelShaders[m_psHandle-1]->func.data());
+    m_worldDraw = SceneFx() && m_worldKind != 0 && !waterShader &&
         (m_psHandle != 0 || m_rs[RS_ZWRITEENABLE]) &&
         m_rt == m_backBuffer && m_ds && m_rs[RS_ZENABLE] &&
         (m_worldKind == 2 || !m_rs[RS_ALPHABLENDENABLE] || m_rs[RS_ALPHATESTENABLE]) &&
@@ -1200,7 +1219,10 @@ bool Device::PrepareDraw()
             m_vsHandle,m_psHandle,m_worldKind,m_worldDraw,m_worldCaster,m_rs[RS_ZENABLE],
             m_rs[RS_ZWRITEENABLE],m_rs[RS_ALPHABLENDENABLE],m_rs[RS_ALPHATESTENABLE]);
     }
+    TrackSkinTexture();
     UpdateSun(false);
+    PrepareWaterDraw();
+    if(m_waterDraw)++m_perfWaterDraws;
     if (m_trace) {
         DWORD cam = 0;
         if (m_worldKind == 2) for (int i = 0; i < 16; i++) cam = cam * 31 + *(const DWORD*)&m_vsConst[i / 4][i % 4];
@@ -1266,6 +1288,7 @@ bool Device::PrepareDraw()
     m_ctx->PSSetShaderResources(0, kMaxStages, srvs);
     ID3D11ShaderResourceView* normalMap = ActiveNormalMap();
     m_ctx->PSSetShaderResources(9, 1, &normalMap);
+    if(!PrepareMaterial())return false;
     m_ctx->PSSetSamplers(0, kMaxStages, samplers);
 
     ID3D11PixelShader* ps = GetPixelShader();
@@ -1276,7 +1299,9 @@ bool Device::PrepareDraw()
     }
     if (m_lastPS != ps) { m_ctx->PSSetShader(ps, nullptr, 0); m_lastPS = ps; }
 
-    ID3D11BlendState* blend = GetBlendState();
+    // Water already composites the opaque snapshot, so alpha blending would
+    // count transmission twice. Other game materials retain their blend state.
+    ID3D11BlendState* blend = m_waterDraw ? m_noBlend.Get() : GetBlendState();
     if (m_lastBlend != blend) { m_ctx->OMSetBlendState(blend, nullptr, 0xFFFFFFFF); m_lastBlend = blend; }
     ID3D11DepthStencilState* depth = GetDepthState();
     if (m_lastDepth != depth || m_lastStencilRef != m_rs[RS_STENCILREF]) {
@@ -1353,6 +1378,7 @@ static std::vector<UINT> FanToList(const std::vector<UINT>& fan)
 
 HRESULT Device::DrawPrimitive(DWORD type, UINT start, UINT primCount)
 {
+    m_drawFirstVertex=start;
     if (!primCount || !PrepareDraw()) return S_OK;
     UINT count;
     D3D11_PRIMITIVE_TOPOLOGY topo;
@@ -1375,6 +1401,7 @@ HRESULT Device::DrawPrimitive(DWORD type, UINT start, UINT primCount)
 
 HRESULT Device::DrawIndexedPrimitive(DWORD type, UINT minIndex, UINT numVertices, UINT startIndex, UINT primCount)
 {
+    m_drawFirstVertex=m_baseVertex+minIndex;
     if (!primCount || !m_indices || !PrepareDraw()) return S_OK;
     if (GrassCaptureActive()) CapturePusher(m_baseVertex + minIndex, numVertices);
     UINT count;
@@ -1406,6 +1433,7 @@ HRESULT Device::DrawIndexedPrimitive(DWORD type, UINT minIndex, UINT numVertices
 
 HRESULT Device::DrawPrimitiveUP(DWORD type, UINT primCount, const void* data, UINT stride)
 {
+    m_drawFirstVertex=0;
     if (!data || !primCount) return D8ERR_INVALIDCALL;
     UINT count;
     D3D11_PRIMITIVE_TOPOLOGY topo;
@@ -1432,6 +1460,7 @@ HRESULT Device::DrawPrimitiveUP(DWORD type, UINT primCount, const void* data, UI
 HRESULT Device::DrawIndexedPrimitiveUP(DWORD type, UINT minIndex, UINT numVertices, UINT primCount,
                                        const void* indices, DWORD indexFmt, const void* data, UINT stride)
 {
+    m_drawFirstVertex=0;
     if (!data || !indices || !primCount) return D8ERR_INVALIDCALL;
     UINT count;
     D3D11_PRIMITIVE_TOPOLOGY topo;
@@ -1490,6 +1519,10 @@ void Device::LimitFrameRate()
 
 HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
 {
+    m_perf.enabled=g_config.performanceGPU;
+    m_perf.Begin(m_device.Get(),m_ctx.Get());
+    m_perf.Tick((double)m_qpcFreq.QuadPart);
+    m_perf.SampleMemory(m_device.Get());
     if (g_config.debugLayer) {
         ComPtr<ID3D11InfoQueue> queue;
         if (SUCCEEDED(m_device.As(&queue))) {
@@ -1541,7 +1574,12 @@ HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
     m_ctx->VSSetConstantBuffers(0, 1, m_clearCB.GetAddressOf());
     m_ctx->PSSetShader(m_presentPS.Get(), nullptr, 0);
     m_ctx->PSSetConstantBuffers(0, 1, m_clearCB.GetAddressOf());
-    ID3D11ShaderResourceView* srvs[2] = { m_backBuffer->ResolvedSrv(), m_gammaSRV.Get() };
+    ID3D11ShaderResourceView* finalScene=PrepareFsr(m_backBuffer->ResolvedSrv());
+    // The upscaler helper changes shader/targets/viewport/CB state. Restore presentation.
+    m_ctx->OMSetRenderTargets(1,&rtv,nullptr);m_ctx->RSSetViewports(1,&vp);
+    m_ctx->VSSetShader(m_fullscreenVS.Get(),nullptr,0);m_ctx->PSSetShader(m_presentPS.Get(),nullptr,0);
+    m_ctx->VSSetConstantBuffers(0,1,m_clearCB.GetAddressOf());m_ctx->PSSetConstantBuffers(0,1,m_clearCB.GetAddressOf());
+    ID3D11ShaderResourceView* srvs[2] = { finalScene, m_gammaSRV.Get() };
     m_ctx->PSSetShaderResources(0, 2, srvs);
     const bool sameSize = m_swapW == m_backBuffer->m_width && m_swapH == m_backBuffer->m_height;
     ID3D11SamplerState* smp[2] = { sameSize ? m_pointClamp.Get() : m_linearClamp.Get(), m_pointClamp.Get() };
@@ -1550,10 +1588,31 @@ HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
     ID3D11ShaderResourceView* nulls[2] = {};
     m_ctx->PSSetShaderResources(0, 2, nulls);
     DrawOverlay();
+    m_perf.Finish(m_ctx.Get());
 
+    LARGE_INTEGER perfStart,perfEnd;QueryPerformanceCounter(&perfStart);
+    if(PresentGeneratedFrame()){
+        // The generated image was shown at the previous VBlank. Restore the
+        // already-rendered real image and replay existing GUI draw data, without
+        // running input/simulation or building a second ImGui frame.
+        m_ctx->OMSetRenderTargets(1,&rtv,nullptr);m_ctx->RSSetViewports(1,&vp);
+        m_ctx->RSSetState(m_noCull.Get());m_ctx->OMSetBlendState(m_noBlend.Get(),nullptr,~0u);
+        m_ctx->OMSetDepthStencilState(m_noDepth.Get(),0);m_ctx->IASetInputLayout(nullptr);
+        m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        m_ctx->VSSetShader(m_fullscreenVS.Get(),nullptr,0);m_ctx->PSSetShader(m_presentPS.Get(),nullptr,0);
+        m_ctx->VSSetConstantBuffers(0,1,m_clearCB.GetAddressOf());m_ctx->PSSetConstantBuffers(0,1,m_clearCB.GetAddressOf());
+        m_ctx->PSSetShaderResources(0,2,srvs);m_ctx->PSSetSamplers(0,2,smp);m_ctx->Draw(3,0);
+        m_ctx->PSSetShaderResources(0,2,nulls);ReplayOverlay();
+    }
     HRESULT hr = m_swap->Present(g_config.syncInterval, 0);
+    QueryPerformanceCounter(&perfEnd);
+    m_perf.presentMs=(perfEnd.QuadPart-perfStart.QuadPart)*1000.0/m_qpcFreq.QuadPart;
     if (FAILED(hr)) LogOnce("presentfail", "Present failed 0x%08lx", hr);
     LimitFrameRate();
+    QueryPerformanceCounter(&perfStart);
+    m_perf.limiterMs=(perfStart.QuadPart-perfEnd.QuadPart)*1000.0/m_qpcFreq.QuadPart;
+    RecordPerformance();
+    m_perfDraws=m_perfWaterDraws=m_perfShadowDraws=0;
     ApplyMsaa(); // after the frame is shown: the rebuilt back buffer starts empty
     m_frame++;
 

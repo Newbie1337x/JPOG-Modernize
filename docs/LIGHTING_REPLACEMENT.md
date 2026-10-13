@@ -1,5 +1,10 @@
 # Replacement lighting: experimental first stage
 
+Grass correction: preserve its second texture RGB. That channel contains
+terrain material colour as well as legacy lighting; whitening it made blades
+look pale/dry. This is a partial correction, not full separation of grass
+albedo and baked lighting. See WATER.md for the subsequent water test build.
+
 The user's goal is replacement of the game's world lighting, including stable
 cast shadows and eventually indirect illumination. The former shadow modulation
 pass did not meet that goal. This revision implements replacement **direct and

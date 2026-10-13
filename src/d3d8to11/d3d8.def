@@ -7,3 +7,4 @@ EXPORTS
     D3D8to11_MouseInput
     D3D8to11_InputBlocked
     D3D8to11_SetNormalMap
+    D3D8to11_SetTextureName

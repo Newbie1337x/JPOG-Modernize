@@ -51,10 +51,26 @@ int main(int argc, char** argv)
         if (!outDir.empty() && !hlsl.empty()) std::ofstream(outDir + fd.cFileName + ".hlsl") << hlsl;
         (good ? ok : fail)++;
         v.shadowOnly = 1;
+        v.material=1;v.normalMap=1;v.shadowOnly=0;
+        hlsl=TranslatePS(code.data(),v,err);
+        good=!hlsl.empty() && CompileHLSL(hlsl,"ps_4_0",std::string("material_")+fd.cFileName);
+        printf("material %-23s %s\n",fd.cFileName,good?"OK":"FAIL");
+        (good ? ok : fail)++;
+        v.material=0;v.normalMap=0;v.shadowOnly=1;
         hlsl = TranslatePS(code.data(), v, err);
         good = !hlsl.empty() && CompileHLSL(hlsl, "ps_4_0", std::string("shadow_") + fd.cFileName);
         printf("shadow %-25s %s\n", fd.cFileName, good ? "OK" : "FAIL");
         (good ? ok : fail)++;
+        if(IsWaterPixelShader(code.data())) {
+            v.shadowOnly=0; v.water=1;
+            for(BYTE samples : {BYTE(0),BYTE(2),BYTE(4),BYTE(8)}) {
+                v.waterSamples=samples;
+                hlsl=TranslatePS(code.data(),v,err);
+                good=!hlsl.empty() && CompileHLSL(hlsl,"ps_4_0","modern_water");
+                printf("water samples %-2u %-18s %s\n",samples,fd.cFileName,good?"OK":"FAIL");
+                (good ? ok : fail)++;
+            }
+        }
     }
     if (h != INVALID_HANDLE_VALUE) FindClose(h);
 

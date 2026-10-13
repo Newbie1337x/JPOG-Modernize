@@ -175,9 +175,60 @@ void Device::DrawOverlay()
         ImGui::SetNextWindowPos(ImVec2(40, 60), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(470 * g_config.overlayScale, 0), ImGuiCond_FirstUseEver);
         ImGui::Begin("JPOG Modernize - D3D11 renderer", nullptr, ImGuiWindowFlags_NoSavedSettings);
+        if(ImGui::Button(g_config.effectsEnabled ? "Desactivar todos los efectos" : "Activar todos los efectos",ImVec2(-1,0))) {
+            g_config.effectsEnabled=!g_config.effectsEnabled;
+            if(!g_config.effectsEnabled)m_waterInteraction.Clear();
+        }
+        ImGui::SetItemTooltip("Sombras, AO, luz, color, normales, agua, pasto, per-pixel, TAA y FSR1. Conserva tus ajustes y las opciones de pantalla.");
+        if(!g_config.effectsEnabled)ImGui::TextDisabled("Efectos pausados. Los ajustes se conservan.");
         ImGui::Text("%.0f FPS  (%.2f ms)   %ux%u", g_ov.fps, g_ov.frameMs, m_swapW, m_swapH);
         ImGui::TextDisabled("Changes apply immediately. Save writes d3d8to11.ini.");
         ImGui::Separator();
+
+        if(ImGui::CollapsingHeader("Rendimiento y recursos")) {
+            ImGui::Checkbox("Medir GPU (1 cuadro de cada 30)",&g_config.performanceGPU);
+            ImGui::Checkbox("Guardar CSV de rendimiento (1/seg)",&g_config.performanceLog);
+            if(m_perf.csvFailed)ImGui::TextColored(ImVec4(1,.4f,.3f,1),"No se pudo escribir el CSV.");
+            else if(!m_perf.csvPath.empty()){ImGui::TextWrapped("CSV: %s",m_perf.csvPath.c_str());}
+            ImGui::Text("Cuadro: %.2f ms  Pico: %.2f ms",m_perf.frameMs,m_perf.peakMs);
+            ImGui::PlotLines("ms/cuadro",m_perf.history,180,m_perf.historyAt%180,nullptr,0,50,ImVec2(0,65));
+            ImGui::Text("CPU espera Present: %.2f ms | Limite FPS: %.2f ms",m_perf.presentMs,m_perf.limiterMs);
+            if(m_perf.failed)ImGui::TextDisabled("Queries GPU no disponibles.");
+            else if(m_perf.enabled && m_perf.valid) {
+                ImGui::Text("GPU render completo: %.3f ms",m_perf.gpu[Performance::Frame]);
+                ImGui::Text("GPU AO + rayos: %.3f ms",m_perf.gpu[Performance::Effects]);
+                ImGui::Text("GPU composicion sombras/color: %.3f ms",m_perf.gpu[Performance::Resolve]);
+                ImGui::Text("GPU copias para agua: %.3f ms",m_perf.gpu[Performance::WaterCopy]);
+                ImGui::Text("GPU temporal (TAA/FSR31/FG): %.3f ms | FSR1: %.3f ms",m_perf.gpu[Performance::Temporal],m_perf.gpu[Performance::Upscale]);
+            } else ImGui::TextDisabled(m_perf.enabled ? "Esperando muestra GPU valida..." : "Medicion GPU apagada.");
+            ImGui::TextDisabled("Tiempos GPU incluidos en el total; no sumarlos.");
+            ImGui::TextDisabled("Agua/normales/pasto/sombras de geometria incluidos en total.");
+            ImGui::Text("Muestras GPU descartadas/ocupadas: %u",m_perf.skipped);
+            const double mib=1048576.0;
+            if(m_perf.memoryValid) {
+                ImGui::Text("RAM privada: %.1f MiB | Pico: %.1f",m_perf.privateBytes/mib,m_perf.peakPrivate/mib);
+                ImGui::Text("RAM residente: %.1f MiB | Delta base: %+.1f",m_perf.workingSet/mib,
+                    (double(m_perf.privateBytes)-double(m_perf.basePrivate))/mib);
+            }
+            if(m_perf.budgetValid)ImGui::Text("GPU local proceso: %.1f / %.1f MiB presupuesto",m_perf.gpuUsage/mib,m_perf.gpuBudget/mib);
+            else ImGui::TextDisabled("Presupuesto GPU no disponible en este driver.");
+            ImGui::Text("Draws: %u | Agua: %u | Sombras extra: %u",m_perfDraws,m_perfWaterDraws,m_perfShadowDraws);
+            ImGui::Text("Objetos vivos: superficies %u, texturas %u, volumen %u",
+                ResourceCount::live[0].load(),ResourceCount::live[1].load(),ResourceCount::live[2].load());
+            ImGui::Text("Buffers vivos: vertices %u, indices %u",ResourceCount::live[3].load(),ResourceCount::live[4].load());
+            ImGui::Text("Caches: blend %u, depth %u, raster %u, sampler %u",
+                unsigned(m_blendStates.size()),unsigned(m_depthStates.size()),unsigned(m_rasterStates.size()),unsigned(m_samplers.size()));
+            unsigned vs=0,ps=0,variants=0;
+            for(auto* s:m_vertexShaders)if(s)++vs;
+            for(auto* s:m_pixelShaders)if(s){++ps;variants+=unsigned(s->variants.size());}
+            ImGui::Text("Shaders vivos: VS %u, PS %u | Variantes %u + FF %u",vs,ps,variants,unsigned(m_ffShaders.size()));
+            ImGui::Text("Buffers dinamicos reservados: %.2f MiB",(double(m_dynVBSize)+m_dynIBSize)/mib);
+            if(ImGui::Button("Reiniciar base y pico")) {
+                m_perf.basePrivate=m_perf.peakPrivate=m_perf.privateBytes;m_perf.peakMs=0;
+            }
+            ImGui::TextDisabled("RAM incluye TODO el juego. Crecimiento no prueba un leak.");
+            ImGui::TextDisabled("Comparar la misma escena; base tras terminar de cargar.");
+        }
 
         if (ImGui::CollapsingHeader("Sun shadows", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Enabled", &g_config.sunLighting);
@@ -261,6 +312,50 @@ void Device::DrawOverlay()
             ImGui::EndDisabled();
         }
 
+        if (ImGui::CollapsingHeader("Water", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Depth-aware water",&g_config.waterEnabled);
+            ImGui::BeginDisabled(!g_config.waterEnabled);
+            const char* surfaces[]={"Automatico: oceano / lagunas","Todo laguna (manual)","Todo oceano (manual)"};
+            ImGui::Combo("Tipo de agua",&g_config.waterSurfaceMode,surfaces,3);
+            ImGui::SetItemTooltip("Auto usa el terreno nativo completo: agua conectada al borde = oceano; encerrada por tierra = laguna. No depende de la camara.");
+            ImGui::SliderFloat("Espuma de lagunas",&g_config.waterLagoonFoam,0,1,"x%.2f");
+            ImGui::SliderFloat("Ondas de lagunas",&g_config.waterLagoonRipples,0,2,"x%.2f");
+            ImGui::SliderFloat("Ondas del oceano",&g_config.waterOceanRipples,0,3,"x%.2f");
+            ImGui::SliderFloat("Altura del oleaje",&g_config.waterSwellAmplitude,0,2,"%.2f units");
+            ImGui::SetItemTooltip("Desplaza vertices del oceano; 0 desactiva. Auto: frentes hacia la costa segun distancia a tierra. Lagunas sin desplazamiento. Limitado por la malla original.");
+            ImGui::SliderFloat("Longitud de olas",&g_config.waterSwellLength,.5f,4,"x%.2f");
+            ImGui::SliderFloat("Suavizado en costa",&g_config.waterSwellCoastDepth,.5f,10,"%.1f units");
+            ImGui::SliderFloat("Espuma en crestas",&g_config.waterCrestFoam,0,1,"%.2f");
+            if(g_config.waterSurfaceMode==0){
+                if(m_waterRegionReady)ImGui::Text("Mapa nativo %ux%u: mar %u, laguna %u muestras",m_waterRegions.width,m_waterRegions.height,m_waterRegions.oceanCells,m_waterRegions.pondCells);
+                else if(m_waterNativeFault)ImGui::TextColored(ImVec4(1,.4f,.3f,1),"Lectura nativa detenida: perfil oceano / override manual.");
+                else if(!m_waterNativeAvailable)ImGui::TextDisabled("Sin mapa nativo aun: perfil oceano hasta obtenerlo.");
+                else if(!m_waterRegionW)ImGui::TextColored(ImVec4(1,.7f,.2f,1),"Esperando altura de agua: azul = fallback, NO clasificacion.");
+                else ImGui::Text("Leyendo terreno: %u / %u muestras",m_waterRegionNext,m_waterRegionW*m_waterRegionH);
+                ImGui::Text("Ultimo paso CPU del mapa: %.3f ms",m_waterRegionCpuMs);
+                ImGui::Text("Nivel nativo muestreado: %.3f",m_waterRegionLevel);
+                if(ImGui::Button("Actualizar mapa de agua"))m_waterRegionRefresh=0;
+            }
+            ImGui::SliderFloat("Absorption depth",&g_config.waterDepthScale,0.5f,20,"%.1f units");
+            ImGui::SliderFloat("Shallow transparency",&g_config.waterTransparency,0,1,"%.2f");
+            ImGui::SliderFloat("Fresnel reflections",&g_config.waterReflection,0,1,"%.2f");
+            ImGui::Checkbox("Scene reflections (SSR)",&g_config.waterSSR);
+            ImGui::SliderFloat("Scene reflection strength",&g_config.waterSSRStrength,0,1,"%.2f");
+            ImGui::SliderFloat("Reflection distance",&g_config.waterSSRDistance,5,250,"%.0f units");
+            ImGui::SliderInt("Reflection steps",&g_config.waterSSRSteps,8,48);
+            ImGui::SetItemTooltip("Higher = more detail and GPU cost. Only reflects visible objects in the opaque snapshot.");
+            ImGui::SliderFloat("Shore foam",&g_config.waterFoam,0,1,"%.2f");
+            ImGui::SliderFloat("Foam depth band",&g_config.waterFoamWidth,0.05f,3,"%.2f units");
+            ImGui::SliderFloat("Refraction distortion",&g_config.waterDistortion,0,10,"%.1f px");
+            ImGui::SliderFloat("Ripple strength",&g_config.waterRipples,0,3,"%.2f");
+            ImGui::SliderFloat("Wave speed",&g_config.waterSpeed,0,3,"%.2f");
+            ImGui::Checkbox("Creature ripples and wakes",&g_config.waterInteraction);
+            ImGui::SliderFloat("Interaction strength",&g_config.waterInteractionStrength,0,3,"%.2f");
+            ImGui::Text("%u tracked ripple pulses",m_waterInteraction.ActiveRipples(WaterTime()));
+            const char* debug[]={"Shaded","Water thickness","Fresnel","Foam","Creature interaction","Scene reflection hits","Ocean blue / lagoon green","Swell height"};
+            ImGui::Combo("Water debug",&g_config.waterDebug,debug,8);
+            ImGui::EndDisabled();
+        }
         if (ImGui::CollapsingHeader("Interactive grass", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Creatures bend the grass", &g_config.grassPhysics);
             ImGui::BeginDisabled(!g_config.grassPhysics);
@@ -290,6 +385,68 @@ void Device::DrawOverlay()
             ImGui::Checkbox("Smooth foliage edges (alpha to coverage)", &g_config.alphaToCoverage);
             ImGui::Checkbox("Apply game brightness/gamma", &g_config.applyGamma);
             ImGui::Checkbox("FPS counter when closed", &g_config.showFps);
+        }
+
+        if(ImGui::CollapsingHeader("Materiales piloto: Triceratops / hamburgueseria",ImGuiTreeNodeFlags_DefaultOpen)){
+            ImGui::Checkbox("Materiales por pixel (comparar on/off)",&g_config.materialsEnabled);
+            ImGui::Text("Dibujos esta imagen: Triceratops %u / hamburguesa %u",m_materialDraws[1],m_materialDraws[2]);
+            ImGui::Checkbox("Diagnostico: Triceratops magenta / hamburguesa cian",&m_materialDebug);
+            ImGui::SetItemTooltip("Color plano solo sobre las texturas piloto. Tricera magenta, hamburguesa cian. Si no cambia de color y el contador es cero, el material no llega al objeto.");
+            {
+                const int n=(int)m_skinListPrev.size();
+                if(m_pickSkin>=n)m_pickSkin=n-1;
+                ImGui::SliderInt("Buscar piel (rojo)",&m_pickSkin,-1,n>0?n-1:0,m_pickSkin<0?"apagado":"%d");
+                ImGui::SetItemTooltip("Recorre las texturas de modelos animados dibujadas en pantalla; la elegida se pinta de rojo.");
+                if(m_pickSkin>=0 && m_pickSkin<n){
+                    Texture* t=m_skinListPrev[m_pickSkin];
+                    ImGui::Text("%s",t->m_name.empty()?"(sin nombre)":t->m_name.c_str());
+                    ImGui::Text("%ux%u fmt %lu, normal: %s",t->m_width,t->m_height,t->m_format,t->m_normalName.empty()?"ninguno":t->m_normalName.c_str());
+                    static int logged=-2;
+                    if(logged!=m_pickSkin){logged=m_pickSkin;Log("Skin picker %d (%s): %ux%u fmt %lu levels %u pool %lu normal %s ptr %p",m_pickSkin,t->m_name.c_str(),t->m_width,t->m_height,t->m_format,t->m_levels,t->m_pool,t->m_normalName.empty()?"none":t->m_normalName.c_str(),(void*)t);}
+                }
+            }
+            ImGui::SliderFloat("Rugosidad de piel",&g_config.materialSkinRoughness,.1f,1,"%.2f");
+            ImGui::SliderFloat("Rugosidad del adorno",&g_config.materialBuildingRoughness,.1f,1,"%.2f");
+            ImGui::SliderFloat("Reflejo especular del sol",&g_config.materialSpecular,0,2,"%.2f");
+            ImGui::SliderFloat("Ambiente del cielo aproximado",&g_config.materialEnvironment,0,1,"%.2f");
+            ImGui::SliderFloat("Relieve del material",&g_config.materialNormalStrength,0,2,"%.2f");
+            ImGui::TextDisabled("Solo dos texturas piloto; no afecta pasto, HUD ni otros edificios.");
+            ImGui::TextDisabled("Rugosidad uniforme por textura; aun sin mascaras piel/cuernos ni cubemaps.");
+            if(m_materialFailed)ImGui::TextColored(ImVec4(1,.6f,.2f,1),"Materiales desactivados por fallo: revisar log.");
+        }
+        if(ImGui::CollapsingHeader("Antialiasing temporal y FSR",ImGuiTreeNodeFlags_DefaultOpen)) {
+            if(ImGui::Checkbox("FSR 3.1 temporal (experimental, Native AA)",&g_config.fsr31)){m_taaValid=false;m_viewportDirty=true;}
+            ImGui::SetItemTooltip("SDK DX11 x86 real. Resolucion nativa, sin generacion de frames. Movimiento de camara; dinosaurios/agua con mascara reactiva conservadora. No reduce aun el coste de renderizado.");
+            if(m_fsr31Failed)ImGui::TextColored(ImVec4(1,.6f,.2f,1),"FSR31 fallo: TAA/FSR1 de respaldo.");
+            else if(m_fsr31)ImGui::Text("FSR31: %s",m_fsr31Frame+1>=m_frame?"activo":"preparado");
+            if(ImGui::Button("Reintentar / reiniciar FSR31")){ReleaseFsr31();m_fsr31Failed=false;}
+            ImGui::TextDisabled("Primera etapa: AA nativo; faltan vectores de animacion completos.");
+            if(ImGui::Checkbox("Frame Generation x2 (prototipo sincrono)",&g_config.frameGeneration)){
+                m_taaValid=false;m_frameGenReady=false;
+                if(g_config.frameGeneration){g_config.fsr31=true;g_config.syncInterval=1;m_frameGenFailed=false;}
+            }
+            ImGui::SetItemTooltip("SDK optical flow + interpolacion. Activa VSync y FSR31. Puede aumentar latencia; requiere salida nativa. HUD semitransparente aproximado. Apagado por defecto.");
+            ImGui::Text("Frames generados presentados: %llu",m_generatedPresents);
+            ImGui::Checkbox("Diagnostico: ver frame intermedio (sin x2)",&g_config.frameGenerationDebug);
+            if(g_config.frameGeneration && g_config.syncInterval!=1)ImGui::TextDisabled("Frame Gen requiere VSync activo.");
+            if(g_config.frameGeneration && (m_backBuffer->m_width!=m_swapW || m_backBuffer->m_height!=m_swapH))ImGui::TextDisabled("Frame Gen requiere entrada y ventana del mismo tamano.");
+            if(m_frameGenFailed)ImGui::TextColored(ImVec4(1,.6f,.2f,1),"Frame Gen fallo: se conservan frames reales y FSR31.");
+            if(ImGui::Checkbox("TAA (experimental, mundo sin HUD)",&g_config.taa))m_taaValid=false;
+            ImGui::SliderFloat("Peso del historial",&g_config.taaHistory,0,.9f,"%.2f");
+            ImGui::SetItemTooltip("Mas alto reduce parpadeo, pero puede dejar rastros. No hay vectores de movimiento por dinosaurio.");
+            ImGui::Checkbox("AMD FSR 1: EASU + RCAS",&g_config.fsr1);
+            ImGui::SliderFloat("Nitidez RCAS",&g_config.fsrSharpness,0,1,"%.2f");
+            ImGui::Text("Entrada %ux%u -> salida %ux%u",m_backBuffer->m_width,m_backBuffer->m_height,m_swapW,m_swapH);
+            if(m_taaFailed)ImGui::TextDisabled("TAA fallo: se conserva MSAA, sin jitter.");
+            else ImGui::Text("TAA historial: %s",m_taaValid ? "activo":"sin historial / apagado");
+            if(m_fsrFailed)ImGui::TextDisabled("FSR1 no disponible: revisar shaders/fsr1 y el log.");
+            else if(m_backBuffer->m_width==m_swapW && m_backBuffer->m_height==m_swapH)
+                ImGui::TextDisabled("Resolucion nativa: RCAS, sin beneficio de reescalado.");
+            else ImGui::TextDisabled("EASU requiere entrada menor y misma relacion de aspecto.");
+            ImGui::TextDisabled("FSR1 no cambia la resolucion interna del juego.");
+            ImGui::TextDisabled("DLSS no disponible: build x86, requiere GPU NVIDIA RTX.");
+            ImGui::TextDisabled("Frame Gen sin scheduler asincrono; no acelera simulacion.");
+            if(ImGui::Button("Reiniciar historial TAA"))m_taaValid=false;
         }
 
         if (ImGui::CollapsingHeader("Experimental")) {
@@ -326,4 +483,7 @@ void Device::ShutdownOverlay()
     ImGui::DestroyContext();
     g_ov.initialized = false;
     InterlockedExchange(&g_ov.open, 0);
+}
+void Device::ReplayOverlay(){
+    if(g_ov.initialized && !g_ov.failed)ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 }
