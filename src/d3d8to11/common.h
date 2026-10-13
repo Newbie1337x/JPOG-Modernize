@@ -56,6 +56,10 @@ struct Config {
     bool shafts = true;             // [Effects] LightShafts (needs sun shadows)
     float shaftStrength = 0.35f;    // [Effects] ShaftStrength
     float shaftScatter = 0.6f;      // [Effects] ShaftScatter: 0 even haze .. 0.9 tight glow toward the sun
+    // [NormalMaps] relief from <texture>_n.dds files (loaded by the texture-replacement plugin)
+    bool normalMaps = true;         // [NormalMaps] Enabled
+    float normalStrength = 0.8f;    // [NormalMaps] Strength
+    bool normalFlipGreen = false;   // [NormalMaps] FlipGreen (OpenGL-style maps)
     // [Grass] creatures bend and flatten the grass around them
     bool grassPhysics = true;       // [Grass] Enabled
     float grassPush = 0.8f;         // [Grass] Push: sideways bend, in blade heights

@@ -157,8 +157,40 @@ const char* kVSOutputStruct =
 
 namespace {
 std::string SunBlock(int slot) {
-    return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; };\n", slot);
+    return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera; };\n", slot);
 }
+// Normal maps (stage 0, t9): relief relative to the sun on top of the game's own lighting. No
+// tangents in JPOG's meshes, so the frame comes from screen-space derivatives of the world position
+// and texture coordinate (Schueler). sunCamera.w = strength, negative = flip green.
+std::string NormalMapCode() {
+    return
+        "Texture2D normalTex : register(t9);\n"
+        "float4 ApplyNormalMap(float4 color, VSOut i) {\n"
+        "  if (sunFlags.x < 0.5 || sunFlags.y > 0.5) return color;\n"
+        "  float3 n = normalTex.Sample(smp0, i.t0.xy).xyz * 2 - 1;\n"
+        "  if (sunCamera.w < 0) n.y = -n.y;\n"
+        "  n.z = sqrt(saturate(1 - dot(n.xy, n.xy)));\n"
+        "  float3 dp1 = ddx(i.world), dp2 = ddy(i.world);\n"
+        "  float2 duv1 = ddx(i.t0.xy), duv2 = ddy(i.t0.xy);\n"
+        // Tangent frame from the derivative-consistent normal cross(dp1, dp2); only the normal
+        // component is turned toward the camera (back faces of foliage).
+        "  float3 N0 = cross(dp1, dp2); float gl = dot(N0, N0);\n"
+        "  if (gl < 1e-20) return color;\n"
+        "  N0 *= rsqrt(gl);\n"
+        "  float3 Ng = dot(N0, sunCamera.xyz - i.world) < 0 ? -N0 : N0;\n"
+        "  float3 dp2perp = cross(dp2, N0), dp1perp = cross(N0, dp1);\n"
+        "  float3 T = dp2perp * duv1.x + dp1perp * duv2.x, B = dp2perp * duv1.y + dp1perp * duv2.y;\n"
+        "  float tl = max(dot(T, T), dot(B, B));\n"
+        "  if (tl < 1e-20) return color;\n"
+        "  float inv = rsqrt(tl);\n"
+        "  float3 Nw = normalize(T * inv * n.x + B * inv * n.y + Ng * n.z);\n"
+        "  float k = abs(sunCamera.w);\n"
+        // Brighter where the detail faces the sun, darker where it turns away; slight cavity term.
+        "  float relief = 1 + k * (saturate(dot(Nw, sunDirection.xyz)) - saturate(dot(Ng, sunDirection.xyz)));\n"
+        "  relief *= lerp(1, n.z, k * 0.35);\n"
+        "  return float4(color.rgb * clamp(relief, 0.35, 1.7), color.a); }\n";
+}
+
 std::string SunPixelCode() {
     return SunBlock(1) +
         // Shadows are applied after the world pass (sun.cpp resolve). In-pass work is only the
@@ -522,6 +554,7 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
     s += TextureDecls(v.texDim);
     s += kVSOutputStruct;
     s += SunPixelCode();
+    if (v.normalMap && v.texDim[0] == 2) s += NormalMapCode();
     s += v.shadowOnly ? "void main(VSOut i) {\n" : "float4 main(VSOut i) : SV_Target {\n";
     s += "  float4 cp[8] = c;\n";
     for (const Instr& in : code)
@@ -647,6 +680,7 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
     s += AlphaTest(v.alphaFunc, v.a2c);
     if (v.shadowOnly) s += "  return;\n}\n";
     else {
+        if (v.normalMap && v.texDim[0] == 2) s += "  color = ApplyNormalMap(color,i);\n";
         s += "  color = ApplySun(color,i);\n";
         if (deferredFog)
             s += "  if (relight && sunControl.y == 0) color.rgb = lerp(color.rgb,i.d1.rgb,saturate(i.d1.w));\n";
@@ -717,6 +751,7 @@ std::string GenerateFFPS(const FFKey& k)
     s += TextureDecls(dims);
     s += kVSOutputStruct;
     s += SunPixelCode();
+    if (k.normalMap && dims[0] == 2) s += NormalMapCode();
     s += k.shadowOnly ? "void main(VSOut i) {\n" : "float4 main(VSOut i) : SV_Target {\n";
     s += "  float4 diffuse = i.d0, specular = i.d1, cur = i.d0, temp = 0, tex = 1;\n";
     s += "  if (sunControl.x > 0.5 && sunFlags.x > 0.5 && sunFlags.y < 0.5) { diffuse.rgb=1; specular.rgb=0; cur.rgb=1; }\n";
@@ -748,6 +783,7 @@ std::string GenerateFFPS(const FFKey& k)
     s += "  float4 color = cur;\n";
     if (k.specular) s += "  color.rgb = saturate(color.rgb + specular.rgb);\n";
     s += AlphaTest(k.alphaFunc, k.a2c);
+    if (!k.shadowOnly && k.normalMap && k.stages[0].texDim == 2) s += "  color = ApplyNormalMap(color,i);\n";
     s += k.shadowOnly ? "  return;\n}\n" : "  return ApplySun(color,i);\n}\n";
     return s;
 }

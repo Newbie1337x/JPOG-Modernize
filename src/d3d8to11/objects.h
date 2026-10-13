@@ -91,6 +91,7 @@ public:
     FormatInfo m_info;
     ComPtr<ID3D11Texture2D> m_tex;
     ComPtr<ID3D11ShaderResourceView> m_srv;
+    ComPtr<ID3D11ShaderResourceView> m_normalSrv; // optional normal map (D3D8to11_SetNormalMap)
     std::vector<std::vector<BYTE>> m_shadow; // D3D8-format copy of each level (lazy)
     std::vector<Surface*> m_surfaces;        // one per level, owned
 };

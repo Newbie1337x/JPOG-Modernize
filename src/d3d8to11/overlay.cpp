@@ -252,6 +252,15 @@ void Device::DrawOverlay()
             ImGui::EndDisabled();
         }
 
+        if (ImGui::CollapsingHeader("Normal maps")) {
+            ImGui::Checkbox("Enabled##normals", &g_config.normalMaps);
+            ImGui::SetItemTooltip("Relief from <texture>_n.dds files in mods\\textures (tools/make_normals.py).");
+            ImGui::BeginDisabled(!g_config.normalMaps);
+            ImGui::SliderFloat("Relief", &g_config.normalStrength, 0.0f, 2.0f, "%.2f");
+            ImGui::Checkbox("Flip green (OpenGL maps)", &g_config.normalFlipGreen);
+            ImGui::EndDisabled();
+        }
+
         if (ImGui::CollapsingHeader("Interactive grass", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Creatures bend the grass", &g_config.grassPhysics);
             ImGui::BeginDisabled(!g_config.grassPhysics);

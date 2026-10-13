@@ -1100,6 +1100,7 @@ ID3D11PixelShader* Device::GetPixelShader()
         v.alphaFunc = alphaFunc;
         v.shadowOnly = m_sun.flags[1] > 0.5f ? 1 : 0;
         v.a2c = AlphaToCoverageActive() ? 1 : 0;
+        v.normalMap = ActiveNormalMap() ? 1 : 0;
         for (auto& e : ps->variants) if (e.first == v) return e.second.Get();
         std::string error;
         std::string hlsl = TranslatePS(ps->func.data(), v, error);
@@ -1135,6 +1136,7 @@ ID3D11PixelShader* Device::GetPixelShader()
     k.specular = m_rs[RS_SPECULARENABLE] ? 1 : 0;
     k.shadowOnly = m_sun.flags[1] > 0.5f ? 1 : 0;
     k.a2c = AlphaToCoverageActive() ? 1 : 0;
+    k.normalMap = ActiveNormalMap() ? 1 : 0;
     std::string key((const char*)&k, sizeof(k));
     auto it = m_ffShaders.find(key);
     if (it != m_ffShaders.end()) return it->second.Get();
@@ -1260,6 +1262,8 @@ bool Device::PrepareDraw()
         samplers[s] = GetSampler(s);
     }
     m_ctx->PSSetShaderResources(0, kMaxStages, srvs);
+    ID3D11ShaderResourceView* normalMap = ActiveNormalMap();
+    m_ctx->PSSetShaderResources(9, 1, &normalMap);
     m_ctx->PSSetSamplers(0, kMaxStages, samplers);
 
     ID3D11PixelShader* ps = GetPixelShader();

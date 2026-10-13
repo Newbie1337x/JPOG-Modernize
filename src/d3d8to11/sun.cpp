@@ -313,6 +313,17 @@ void Device::StartSunFrame()
     XMMATRIX inv = XMMatrixInverse(&det, vp);
     if (std::fabs(XMVectorGetX(det)) < 1e-20f) return;
     StoreRows(inv, m_sun.clipToWorld);
+    // Camera position: the point that maps to clip (0, 0, z, 0).
+    XMVECTOR camH = XMVector4Transform(XMVectorSet(0, 0, 1, 0), inv);
+    XMVECTOR cam;
+    if (std::fabs(XMVectorGetW(camH)) > 1e-12f) {
+        cam = camH / XMVectorSplatW(camH);
+    } else {
+        // Orthographic: no finite eye; put it far back along the view direction.
+        XMVECTOR centre = XMVector3TransformCoord(XMVectorSet(0, 0, 0, 1), inv);
+        cam = centre - XMVector3Normalize(XMVectorSetW(camH, 0)) * 1e5f;
+    }
+    m_sun.camera[0] = XMVectorGetX(cam); m_sun.camera[1] = XMVectorGetY(cam); m_sun.camera[2] = XMVectorGetZ(cam);
 
     // JPOG's world is Y-down: "up" is -Y (camera above the park at y = -55, palm crowns at
     // y = -6 over ground at -1). SunX/Y/Z in the ini use Y-up, so Y is negated here.
@@ -549,6 +560,7 @@ void Device::UpdateSun(bool shadowPass)
     m_sun.flags[3] = (float)m_worldKind;
     m_sun.control[0] = g_config.replaceLighting ? 1.0f : 0.0f;
     m_sun.control[1] = (float)g_config.lightingDebug;
+    m_sun.camera[3] = g_config.normalStrength * (g_config.normalFlipGreen ? -1.0f : 1.0f);
     if (!m_sunUploadedValid || memcmp(&m_sunUploaded, &m_sun, sizeof(m_sun))) {
         D3D11_MAPPED_SUBRESOURCE map;
         if (SUCCEEDED(m_ctx->Map(m_sunCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {

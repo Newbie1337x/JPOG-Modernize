@@ -35,6 +35,7 @@ struct PSVariant {
     BYTE alphaFunc = 0; // 0 = alpha test off, otherwise D3DCMPFUNC
     BYTE shadowOnly = 0;
     BYTE a2c = 0;       // alpha-to-coverage instead of the alpha test discard
+    BYTE normalMap = 0; // stage 0 texture has a normal map bound at t9
     bool operator==(const PSVariant& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
 };
 std::string TranslatePS(const DWORD* func, const PSVariant& variant, std::string& error);
@@ -51,6 +52,8 @@ struct FFKey {
     BYTE specular;
     BYTE shadowOnly;
     BYTE a2c;
+    BYTE normalMap;
+    BYTE pad[3];
 };
 std::string GenerateFFPS(const FFKey& key);
 
@@ -80,4 +83,5 @@ struct SunConstants {
     float settings[4]; // ambient, direct, shadow strength, inverse map size
     float flags[4];    // lighting enabled, shadow pass, previous map ready, normal kind
     float control[4];  // replace original, debug view, reserved, reserved
+    float camera[4];   // camera world position, w = normal map strength
 };

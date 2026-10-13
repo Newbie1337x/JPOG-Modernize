@@ -777,6 +777,9 @@ struct TexReplacement {
     UINT origW, origH;
 };
 static std::unordered_map<unsigned long long, TexReplacement> g_texMods;
+// Normal maps: <library>__<texture>_n.dds, handed to the D3D11 renderer (d3d8.dll export
+// D3D8to11_SetNormalMap) right after the game creates the texture, replaced or not.
+static std::unordered_map<unsigned long long, std::string> g_normalMods;
 static bool g_texModsEnabled = true;
 static int g_texModsUsed = 0;
 
@@ -875,11 +878,20 @@ static void ScanTextureModsDir(const std::string& gameDir, const std::string& fo
         }
         const std::string shown = rel + file;
         const BYTE* blob; UINT size, hw = 0, hh = 0;
+        bool normal = false;
         if (!FindTmlTexture(it->second, tex.c_str(), &blob, &size, &hw, &hh) || size < 16) {
-            LogTexMods("NOT FOUND: %s (%s)", shown.c_str(), "check library/texture name");
-            continue;
+            const bool suffix = tex.size() > 2 && _stricmp(tex.c_str() + tex.size() - 2, "_n") == 0;
+            if (!suffix || !FindTmlTexture(it->second, tex.substr(0, tex.size() - 2).c_str(), &blob, &size, &hw, &hh) || size < 16) {
+                LogTexMods("NOT FOUND: %s (%s)", shown.c_str(), "check library/texture name");
+                continue;
+            }
+            normal = true;
         }
         const unsigned long long key = Fnv64(blob, size);
+        if (normal) {
+            if (!g_normalMods.count(key)) { g_normalMods[key] = folder + file; LogTexMods("normal map: %s%s", shown.c_str(), ""); }
+            continue;
+        }
         if (g_texMods.count(key)) {
             LogTexMods("DUPLICATE (ignored): %s%s", shown.c_str(), "");
             continue;
@@ -911,12 +923,29 @@ typedef HRESULT(WINAPI* D3DXCreateTexMemEx_t)(void* dev, const void* data, UINT 
                                               DWORD colorKey, UINT* srcInfo, void* palette, void** tex);
 static D3DXCreateTexMemEx_t g_origCreateTexMem = nullptr;
 
+typedef BOOL(WINAPI* SetNormalMap_t)(void*, const char*);
+
+static void AttachNormalMap(unsigned long long key, void* texture)
+{
+    if (g_normalMods.empty() || !texture) return;
+    auto it = g_normalMods.find(key);
+    if (it == g_normalMods.end()) return;
+    static SetNormalMap_t setNormal = nullptr;
+    if (!setNormal) {
+        HMODULE d3d8 = GetModuleHandleA("d3d8.dll");
+        setNormal = d3d8 ? (SetNormalMap_t)GetProcAddress(d3d8, "D3D8to11_SetNormalMap") : nullptr;
+        if (!setNormal) return; // dgVoodoo or another d3d8.dll: no normal maps
+    }
+    if (!setNormal(texture, it->second.c_str())) LogTexMods("NORMAL MAP ERROR: %s%s", it->second.c_str(), "");
+}
+
 static HRESULT WINAPI CreateTexMem_Hook(void* dev, const void* data, UINT size, UINT w, UINT h, UINT mips,
                                         DWORD usage, DWORD fmt, DWORD pool, DWORD filter, DWORD mipFilter,
                                         DWORD colorKey, UINT* srcInfo, void* palette, void** tex)
 {
-    if (!g_texMods.empty() && data && size >= 128) {
-        auto it = g_texMods.find(Fnv64((const BYTE*)data, size));
+    const unsigned long long key = data && size >= 128 ? Fnv64((const BYTE*)data, size) : 0;
+    if (!g_texMods.empty() && key) {
+        auto it = g_texMods.find(key);
         if (it != g_texMods.end()) {
             TexReplacement& r = it->second;
             std::vector<BYTE> fileData;
@@ -928,14 +957,17 @@ static HRESULT WINAPI CreateTexMem_Hook(void* dev, const void* data, UINT size, 
                 if (hr >= 0) {
                     if (srcInfo) { srcInfo[0] = r.origW; srcInfo[1] = r.origH; } // D3DXIMAGE_INFO.Width/Height
                     g_texModsUsed++;
+                    if (tex) AttachNormalMap(key, *tex);
                     return hr;
                 }
                 LogTexMods("LOAD ERROR: %s%s", r.path.c_str(), "");
             }
         }
     }
-    return g_origCreateTexMem(dev, data, size, w, h, mips, usage, fmt, pool, filter, mipFilter, colorKey,
-                              srcInfo, palette, tex);
+    HRESULT hr = g_origCreateTexMem(dev, data, size, w, h, mips, usage, fmt, pool, filter, mipFilter, colorKey,
+                                    srcInfo, palette, tex);
+    if (hr >= 0 && key && tex) AttachNormalMap(key, *tex);
+    return hr;
 }
 
 // Raw textures: TTextureResourceHAL::CreateFromMemory5551/4444/8888(w, h, mips, data)
@@ -966,12 +998,16 @@ static bool CreateRawReplacement(BYTE* res, UINT w, UINT h, const void* data, UI
     return true;
 }
 
-static bool __fastcall Raw5551_Hook(BYTE* r, void*, UINT w, UINT h, UINT m, const void* d)
-{ return CreateRawReplacement(r, w, h, d, 2) || g_origRaw[0](r, w, h, m, d); }
-static bool __fastcall Raw4444_Hook(BYTE* r, void*, UINT w, UINT h, UINT m, const void* d)
-{ return CreateRawReplacement(r, w, h, d, 2) || g_origRaw[1](r, w, h, m, d); }
-static bool __fastcall Raw8888_Hook(BYTE* r, void*, UINT w, UINT h, UINT m, const void* d)
-{ return CreateRawReplacement(r, w, h, d, 4) || g_origRaw[2](r, w, h, m, d); }
+static bool RawCreate(int i, BYTE* r, UINT w, UINT h, UINT m, const void* d, UINT bpp)
+{
+    const bool ok = CreateRawReplacement(r, w, h, d, bpp) || g_origRaw[i](r, w, h, m, d);
+    if (ok && d && !g_normalMods.empty()) AttachNormalMap(Fnv64((const BYTE*)d, (size_t)w * h * bpp), *(void**)(r + 0x60));
+    return ok;
+}
+
+static bool __fastcall Raw5551_Hook(BYTE* r, void*, UINT w, UINT h, UINT m, const void* d) { return RawCreate(0, r, w, h, m, d, 2); }
+static bool __fastcall Raw4444_Hook(BYTE* r, void*, UINT w, UINT h, UINT m, const void* d) { return RawCreate(1, r, w, h, m, d, 2); }
+static bool __fastcall Raw8888_Hook(BYTE* r, void*, UINT w, UINT h, UINT m, const void* d) { return RawCreate(2, r, w, h, m, d, 4); }
 
 static void* MakeTrampoline(BYTE* fn, size_t len, void* hook)
 {
@@ -988,7 +1024,7 @@ static void InstallTextureMods()
 {
     if (!g_texModsEnabled) return;
     ScanTextureMods();
-    if (g_texMods.empty()) return;
+    if (g_texMods.empty() && g_normalMods.empty()) return;
     HMODULE rd3d = GetModuleHandleA("TRenderD3DInterface.dll");
     if (!rd3d) return;
     BYTE* fn = (BYTE*)rd3d + 0xf51a;

@@ -124,6 +124,11 @@ void LoadConfig()
         g_config.shaftStrength = readFx("ShaftStrength", 0.35f, 0, 3);
         g_config.shaftScatter = readFx("ShaftScatter", 0.6f, 0, 0.95f);
     }
+    g_config.normalMaps = GetPrivateProfileIntA("NormalMaps", "Enabled", 1, ini.c_str()) != 0;
+    g_config.normalFlipGreen = GetPrivateProfileIntA("NormalMaps", "FlipGreen", 0, ini.c_str()) != 0;
+    GetPrivateProfileStringA("NormalMaps", "Strength", "0.8", buf, sizeof(buf), ini.c_str());
+    g_config.normalStrength = (float)atof(buf);
+    if (!(g_config.normalStrength >= 0 && g_config.normalStrength <= 3)) g_config.normalStrength = 0.8f;
     g_config.grassPhysics = GetPrivateProfileIntA("Grass", "Enabled", 1, ini.c_str()) != 0;
     g_config.grassPush = readGrass("Push", 0.8f, 0, 3);
     g_config.grassFlatten = readGrass("Flatten", 0.5f, 0, 1);
@@ -182,6 +187,9 @@ void SaveConfig()
     putInt("Effects", "LightShafts", g_config.shafts);
     putFloat("Effects", "ShaftStrength", g_config.shaftStrength);
     putFloat("Effects", "ShaftScatter", g_config.shaftScatter);
+    putInt("NormalMaps", "Enabled", g_config.normalMaps);
+    putFloat("NormalMaps", "Strength", g_config.normalStrength);
+    putInt("NormalMaps", "FlipGreen", g_config.normalFlipGreen);
     putInt("Grass", "Enabled", g_config.grassPhysics);
     putFloat("Grass", "Push", g_config.grassPush);
     putFloat("Grass", "Flatten", g_config.grassFlatten);

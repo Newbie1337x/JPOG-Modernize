@@ -284,6 +284,12 @@ private:
     // Scene effects need the camera from the terrain draw (StartSunFrame).
     bool SceneFx() const { return g_config.sunLighting || g_config.postEnabled || g_config.grassPhysics || g_config.aoEnabled; }
     void CapturePusher(UINT firstVertex, UINT numVertices);
+    // Stage-0 normal map for this draw (world draws only, not the shadow pass).
+    ID3D11ShaderResourceView* ActiveNormalMap() const {
+        if (!g_config.normalMaps || !m_worldDraw || m_sun.flags[1] > 0.5f || !m_textures[0] ||
+            m_textures[0]->GetType() != D8RTYPE_TEXTURE) return nullptr;
+        return static_cast<Texture*>(static_cast<ID8Texture*>(m_textures[0]))->m_normalSrv.Get();
+    }
     bool GrassCaptureActive() const {
         return g_config.grassPhysics && m_worldDraw && m_worldKind == 1 && m_sunStarted && !m_sunResolved;
     }
