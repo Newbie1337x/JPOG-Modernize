@@ -1,7 +1,7 @@
 """Generate normal maps for JPOG textures (BC5 DDS with mipmaps).
 
 Usage:
-  python tools/make_normals.py <folder> [--strength 3.0] [--max 1024] [--force] [--skip plants,particles]
+  python tools/make_normals.py <folder> [--strength 6.0] [--max 1024] [--force] [--skip plants,particles]
 
 Walks <folder> recursively (folders starting with "_" are skipped) and, for every
 "<library>__<texture>.dds/.png" that is not itself a normal map, writes
@@ -130,7 +130,7 @@ def convert(src, dst, strength, max_size):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("folder")
-    ap.add_argument("--strength", type=float, default=3.0)
+    ap.add_argument("--strength", type=float, default=6.0)
     ap.add_argument("--max", type=int, default=1024)
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--skip", default="", help="comma-separated folder names to skip")

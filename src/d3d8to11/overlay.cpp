@@ -53,7 +53,7 @@ void AnglesFromSun(float x, float yUp, float z)
 
 const char* kDebugViews[] = { "Off", "Albedo (replacement)", "Normals (replacement)", "Shadow mask",
                               "Depth normals", "Mask + shadow map", "World grid", "Raw visibility",
-                              "Dump one frame", "Ambient occlusion only", "Light shafts only" };
+                              "Dump one frame", "Ambient occlusion only", "Light shafts only", "Normal maps (world normals)" };
 
 } // namespace
 

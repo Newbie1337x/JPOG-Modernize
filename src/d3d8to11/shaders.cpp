@@ -184,6 +184,7 @@ std::string NormalMapCode() {
         "  if (tl < 1e-20) return color;\n"
         "  float inv = rsqrt(tl);\n"
         "  float3 Nw = normalize(T * inv * n.x + B * inv * n.y + Ng * n.z);\n"
+        "  if (sunControl.y == 11) return float4(Nw * 0.5 + 0.5, 1);\n"
         "  float k = abs(sunCamera.w);\n"
         // Brighter where the detail faces the sun, darker where it turns away; slight cavity term.
         "  float relief = 1 + k * (saturate(dot(Nw, sunDirection.xyz)) - saturate(dot(Ng, sunDirection.xyz)));\n"

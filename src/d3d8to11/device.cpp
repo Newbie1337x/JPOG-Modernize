@@ -1101,6 +1101,8 @@ ID3D11PixelShader* Device::GetPixelShader()
         v.shadowOnly = m_sun.flags[1] > 0.5f ? 1 : 0;
         v.a2c = AlphaToCoverageActive() ? 1 : 0;
         v.normalMap = ActiveNormalMap() ? 1 : 0;
+        if (v.normalMap) LogOnce(std::string("nm-draw-") + std::to_string(m_vsHandle) + "-" + std::to_string(m_psHandle),
+                                 "normal map draw: VS 0x%lx PS 0x%lx kind %d", m_vsHandle, m_psHandle, m_worldKind);
         for (auto& e : ps->variants) if (e.first == v) return e.second.Get();
         std::string error;
         std::string hlsl = TranslatePS(ps->func.data(), v, error);

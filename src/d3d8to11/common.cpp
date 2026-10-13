@@ -126,9 +126,9 @@ void LoadConfig()
     }
     g_config.normalMaps = GetPrivateProfileIntA("NormalMaps", "Enabled", 1, ini.c_str()) != 0;
     g_config.normalFlipGreen = GetPrivateProfileIntA("NormalMaps", "FlipGreen", 0, ini.c_str()) != 0;
-    GetPrivateProfileStringA("NormalMaps", "Strength", "0.8", buf, sizeof(buf), ini.c_str());
+    GetPrivateProfileStringA("NormalMaps", "Strength", "1.5", buf, sizeof(buf), ini.c_str());
     g_config.normalStrength = (float)atof(buf);
-    if (!(g_config.normalStrength >= 0 && g_config.normalStrength <= 3)) g_config.normalStrength = 0.8f;
+    if (!(g_config.normalStrength >= 0 && g_config.normalStrength <= 3)) g_config.normalStrength = 1.5f;
     g_config.grassPhysics = GetPrivateProfileIntA("Grass", "Enabled", 1, ini.c_str()) != 0;
     g_config.grassPush = readGrass("Push", 0.8f, 0, 3);
     g_config.grassFlatten = readGrass("Flatten", 0.5f, 0, 1);
