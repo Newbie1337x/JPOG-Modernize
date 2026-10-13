@@ -39,10 +39,14 @@ struct Config {
     float sunAmbient = 0.60f, sunDirect = 0.55f, shadowStrength = 0.55f;
     float sunMinElevation = 0.35f;  // minimum sun height (sin of elevation), avoids endless shadows
     float sunDirection[3] = { -0.35f, 0.82f, -0.45f };
+    int overlayKey = VK_INSERT;     // [Overlay] Key: virtual-key code that opens the settings panel
+    bool showFps = false;           // [Overlay] ShowFPS: small counter while the panel is closed
+    float overlayScale = 1.0f;      // [Overlay] Scale
 };
 extern Config g_config;
 extern std::string g_gameDir;
 void LoadConfig();
+void SaveConfig(); // writes every setting above back to d3d8to11.ini
 
 // ---- formats -----------------------------------------------------------------------------------
 struct FormatInfo {

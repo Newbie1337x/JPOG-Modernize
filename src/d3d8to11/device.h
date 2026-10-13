@@ -270,6 +270,11 @@ private:
     UINT64 m_dumpAt = 0;
     bool m_dumped = false;
     void TraceFlush();
+    bool EnsureShadowMap();
+    void DrawOverlay();     // overlay.cpp
+    void ShutdownOverlay();
+    UINT m_lastCasters = 0;
+    UINT m_sunMapSize = 0;
     void StartSunFrame();
     void CaptureGameSun();
     void ResolveSun(const char* reason);

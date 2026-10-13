@@ -113,21 +113,10 @@ bool Device::CreateSunResources()
     D3D11_BUFFER_DESC cb = { sizeof(SunConstants), D3D11_USAGE_DYNAMIC,
         D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0 };
     if (FAILED(m_device->CreateBuffer(&cb, nullptr, &m_sunCB))) return false;
-    if (!g_config.sunLighting) return true;
+    // Everything but the map itself is small and created up front, so shadows can be switched
+    // on from the overlay; the map follows [Lighting] ShadowResolution (EnsureShadowMap).
     cb.ByteWidth = (sizeof(ResolveConstants) + 15) & ~15u;
     if (FAILED(m_device->CreateBuffer(&cb, nullptr, &m_resolveCB))) return false;
-
-    const UINT size = (UINT)g_config.shadowResolution;
-    D3D11_TEXTURE2D_DESC td = { size, size, 1, 1, DXGI_FORMAT_R32_TYPELESS, { 1, 0 }, D3D11_USAGE_DEFAULT,
-        D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE, 0, 0 };
-    D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
-    dd.Format = DXGI_FORMAT_D32_FLOAT; dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
-    sd.Format = DXGI_FORMAT_R32_FLOAT; sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    sd.Texture2D.MipLevels = 1;
-    if (FAILED(m_device->CreateTexture2D(&td, nullptr, &m_sunMap)) ||
-        FAILED(m_device->CreateDepthStencilView(m_sunMap.Get(), &dd, &m_sunDSV)) ||
-        FAILED(m_device->CreateShaderResourceView(m_sunMap.Get(), &sd, &m_sunSRV))) return false;
 
     D3D11_SAMPLER_DESC sm = {};
     sm.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
@@ -162,15 +151,41 @@ bool Device::CreateSunResources()
     if (FAILED(m_device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &m_resolveVS)) ||
         FAILED(m_device->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &m_resolvePS)))
         return false;
-    Log("Sun shadows: %u map, distance %.0f, strength %.2f, sun %s, grass %d, replacement lighting %d, debug %d",
-        size, g_config.shadowDistance, g_config.shadowStrength, g_config.sunFromGame ? "from game" : "fixed",
+    Log("Sun shadows: enabled %d, %d map, distance %.0f, strength %.2f, sun %s, grass %d, replacement lighting %d, debug %d",
+        g_config.sunLighting, g_config.shadowResolution, g_config.shadowDistance, g_config.shadowStrength, g_config.sunFromGame ? "from game" : "fixed",
         g_config.grassShadows, g_config.replaceLighting, g_config.lightingDebug);
     return true;
 }
 
 // Called on the first full-screen terrain draw of a frame: c0..c3 is the camera's world-to-clip.
+bool Device::EnsureShadowMap()
+{
+    const UINT size = (UINT)g_config.shadowResolution;
+    if (m_sunMap && m_sunMapSize == size) return true;
+    m_sunSRV.Reset(); m_sunDSV.Reset(); m_sunMap.Reset();
+    m_sunMapSize = 0;
+    D3D11_TEXTURE2D_DESC td = { size, size, 1, 1, DXGI_FORMAT_R32_TYPELESS, { 1, 0 }, D3D11_USAGE_DEFAULT,
+        D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE, 0, 0 };
+    D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
+    dd.Format = DXGI_FORMAT_D32_FLOAT; dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.Format = DXGI_FORMAT_R32_FLOAT; sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    sd.Texture2D.MipLevels = 1;
+    if (FAILED(m_device->CreateTexture2D(&td, nullptr, &m_sunMap)) ||
+        FAILED(m_device->CreateDepthStencilView(m_sunMap.Get(), &dd, &m_sunDSV)) ||
+        FAILED(m_device->CreateShaderResourceView(m_sunMap.Get(), &sd, &m_sunSRV))) {
+        LogOnce("sun-map-fail", "Shadow map %u creation failed", size);
+        m_sunSRV.Reset(); m_sunDSV.Reset(); m_sunMap.Reset();
+        return false;
+    }
+    m_sunMapSize = size;
+    Log("Shadow map %ux%u created", size, size);
+    return true;
+}
+
 void Device::StartSunFrame()
 {
+    if (!EnsureShadowMap()) return;
     XMMATRIX vp;
     float rows[4][4];
     memcpy(rows, m_vsConst, sizeof(rows));
@@ -221,7 +236,7 @@ void Device::StartSunFrame()
     XMFLOAT3 l, h;
     XMStoreFloat3(&l, lo); XMStoreFloat3(&h, hi);
     if (!(l.x < h.x) || !std::isfinite(l.x + l.y + l.z + h.x + h.y + h.z)) return;
-    const float res = (float)g_config.shadowResolution;
+    const float res = (float)m_sunMapSize;
     float size = (h.x - l.x > h.y - l.y ? h.x - l.x : h.y - l.y) * 1.15f + 16.0f;
     size = std::ceil(size / 32.0f) * 32.0f; // stable texel size while the camera pans
     const float texel = size / res;
@@ -322,7 +337,7 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base)
     m_ctx->PSSetShader(depthPixel, nullptr, 0);
     m_lastPS = nullptr;
     m_ctx->OMSetRenderTargets(0, nullptr, m_sunDSV.Get());
-    D3D11_VIEWPORT vp = { 0, 0, (float)g_config.shadowResolution, (float)g_config.shadowResolution, 0, 1 };
+    D3D11_VIEWPORT vp = { 0, 0, (float)m_sunMapSize, (float)m_sunMapSize, 0, 1 };
     m_ctx->RSSetViewports(1, &vp);
     m_ctx->RSSetState(m_sunRaster.Get());
     m_ctx->OMSetDepthStencilState(m_sunDepth.Get(), 0);
@@ -352,7 +367,7 @@ void Device::ResolveSun(const char* reason)
     memcpy(rc.lightRows, m_sun.writeRows, sizeof(rc.lightRows));
     memcpy(rc.sunDir, m_sun.direction, sizeof(rc.sunDir));
     rc.params[0] = g_config.shadowStrength;
-    rc.params[1] = 1.0f / g_config.shadowResolution;
+    rc.params[1] = 1.0f / m_sunMapSize;
     rc.params[2] = 1.5f * m_sunTexelWorld / m_sunDepthRange;
     rc.params[3] = 1.5f * m_sunTexelWorld;
     const float w = (float)m_backBuffer->m_width, h = (float)m_backBuffer->m_height;
@@ -424,7 +439,7 @@ void Device::DumpSunFrame()
             for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) fprintf(f, " %.9g", m[r][c]);
             fprintf(f, "\n");
         };
-        fprintf(f, "screen %u %u\nmap %d\n", m_backBuffer->m_width, m_backBuffer->m_height, g_config.shadowResolution);
+        fprintf(f, "screen %u %u\nmap %u\n", m_backBuffer->m_width, m_backBuffer->m_height, m_sunMapSize);
         rows("clipToWorld", m_sun.clipToWorld);
         rows("lightRows", m_sun.writeRows);
         fprintf(f, "sun %.6f %.6f %.6f\ntexel %.6f\ndepthRange %.6f\ncasters %u\n", m_sun.direction[0], m_sun.direction[1],
@@ -484,6 +499,7 @@ void Device::EndSunFrame()
     if (m_sunStarted && (m_earlyCasters || m_lateWorldDraws))
         LogOnce("sun-order", "Sun frame order: %u caster draws before the terrain, %u world draws after the resolve",
                 m_earlyCasters, m_lateWorldDraws);
+    m_lastCasters = m_shadowDraws;
     m_sunStarted = m_sunResolved = false;
     m_shadowDraws = m_earlyCasters = m_lateWorldDraws = 0;
 }

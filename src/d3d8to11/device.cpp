@@ -136,6 +136,7 @@ Device::Device(Direct3D8* d3d, HWND focus, DWORD flags, D3D8PresentParameters* p
 
 Device::~Device()
 {
+    ShutdownOverlay();
     for (auto& t : m_textures) SetRef(t, (ID8BaseTexture*)nullptr);
     for (auto& s : m_streams) SetRef(s.vb, (VertexBuffer*)nullptr);
     SetRef(m_indices, (IndexBuffer*)nullptr);
@@ -1490,6 +1491,7 @@ HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
     m_ctx->Draw(3, 0);
     ID3D11ShaderResourceView* nulls[2] = {};
     m_ctx->PSSetShaderResources(0, 2, nulls);
+    DrawOverlay();
 
     HRESULT hr = m_swap->Present(g_config.syncInterval, 0);
     if (FAILED(hr)) LogOnce("presentfail", "Present failed 0x%08lx", hr);

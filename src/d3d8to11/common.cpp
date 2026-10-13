@@ -81,7 +81,7 @@ void LoadConfig()
         float f = value[0] ? (float)atof(value) : fallback;
         return f >= lo && f <= hi ? f : fallback;
     };
-    g_config.shadowDistance = readFloat("ShadowDistance", 500, 32, 16384);
+    g_config.shadowDistance = readFloat("ShadowDistance", 250, 32, 16384);
     g_config.sunAmbient = readFloat("Ambient", 0.60f, 0.1f, 2);
     g_config.sunDirect = readFloat("SunIntensity", 0.55f, 0, 2);
     g_config.shadowStrength = readFloat("ShadowStrength", 0.55f, 0, 1);
@@ -89,6 +89,47 @@ void LoadConfig()
     g_config.sunDirection[0] = readFloat("SunX", -0.35f, -1, 1);
     g_config.sunDirection[1] = readFloat("SunY", 0.82f, 0.05f, 1);
     g_config.sunDirection[2] = readFloat("SunZ", -0.45f, -1, 1);
+    g_config.overlayKey = GetPrivateProfileIntA("Overlay", "Key", VK_INSERT, ini.c_str());
+    g_config.showFps = GetPrivateProfileIntA("Overlay", "ShowFPS", 0, ini.c_str()) != 0;
+    GetPrivateProfileStringA("Overlay", "Scale", "1.0", buf, sizeof(buf), ini.c_str());
+    g_config.overlayScale = (float)atof(buf);
+    if (!(g_config.overlayScale >= 0.5f && g_config.overlayScale <= 3.0f)) g_config.overlayScale = 1.0f;
+}
+
+void SaveConfig()
+{
+    const std::string ini = g_gameDir + "d3d8to11.ini";
+    auto put = [&](const char* section, const char* key, const char* value) {
+        WritePrivateProfileStringA(section, key, value, ini.c_str());
+    };
+    auto putInt = [&](const char* section, const char* key, int v) { put(section, key, std::to_string(v).c_str()); };
+    auto putFloat = [&](const char* section, const char* key, float v) {
+        char b[32];
+        sprintf_s(b, "%.3f", v);
+        put(section, key, b);
+    };
+    putInt("Renderer", "VSync", g_config.syncInterval);
+    putInt("Renderer", "FPSLimit", g_config.fpsLimit);
+    putInt("Renderer", "Anisotropy", g_config.forceAnisotropy);
+    putInt("Renderer", "ApplyGammaRamp", g_config.applyGamma);
+    putInt("Lighting", "Enabled", g_config.sunLighting);
+    putInt("Lighting", "ShadowResolution", g_config.shadowResolution);
+    putFloat("Lighting", "ShadowDistance", g_config.shadowDistance);
+    putFloat("Lighting", "ShadowStrength", g_config.shadowStrength);
+    put("Lighting", "SunSource", g_config.sunFromGame ? "game" : "fixed");
+    putFloat("Lighting", "SunX", g_config.sunDirection[0]);
+    putFloat("Lighting", "SunY", g_config.sunDirection[1]);
+    putFloat("Lighting", "SunZ", g_config.sunDirection[2]);
+    putFloat("Lighting", "SunMinHeight", g_config.sunMinElevation);
+    putInt("Lighting", "GrassShadows", g_config.grassShadows);
+    putInt("Lighting", "TerrainShadows", g_config.terrainShadows);
+    putInt("Lighting", "DebugView", g_config.lightingDebug);
+    putInt("Lighting", "ReplaceOriginal", g_config.replaceLighting);
+    putFloat("Lighting", "Ambient", g_config.sunAmbient);
+    putFloat("Lighting", "SunIntensity", g_config.sunDirect);
+    putInt("Overlay", "Key", g_config.overlayKey);
+    putInt("Overlay", "ShowFPS", g_config.showFps);
+    putFloat("Overlay", "Scale", g_config.overlayScale);
 }
 
 // ---- formats -----------------------------------------------------------------------------------

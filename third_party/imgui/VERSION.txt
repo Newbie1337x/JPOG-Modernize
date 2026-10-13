@@ -1,0 +1,2 @@
+Dear ImGui v1.91.5 (commit f401021), https://github.com/ocornut/imgui - MIT, see LICENSE.txt.
+Only the core files and the Win32 + DX11 backends are vendored.
