@@ -849,6 +849,13 @@ static bool FindTmlTexture(const std::vector<BYTE>& tml, const char* name, const
         for (const Ent& e : ents)
             if (e.idx == n) { *blob = tml.data() + e.off; *size = e.size; *hdrW = e.w; *hdrH = e.h; return true; }
     }
+    // Libraries can hold more textures than names (dinosaur libraries: 3 names, 6 textures, the
+    // adult and juvenile skins). Texture packs call the unnamed ones "tex<index>".
+    unsigned idx = 0;
+    char tail = 0;
+    if (_strnicmp(name, "tex", 3) == 0 && sscanf_s(name + 3, "%u%c", &idx, &tail, 1) == 1)
+        for (const Ent& e : ents)
+            if (e.idx == idx) { *blob = tml.data() + e.off; *size = e.size; *hdrW = e.w; *hdrH = e.h; return true; }
     return false;
 }
 
@@ -870,43 +877,90 @@ static void ScanTextureModsDir(const std::string& gameDir, const std::string& fo
         size_t sep = file.find("__"), dot = file.rfind('.');
         if (sep == std::string::npos || dot == std::string::npos || dot < sep) continue;
         std::string lib = file.substr(0, sep), tex = file.substr(sep + 2, dot - sep - 2);
-        auto it = tmls.find(lib);
-        if (it == tmls.end()) {
-            std::vector<BYTE> data;
-            ReadWholeFile(gameDir + "Data\\matlibs\\" + lib + ".tml", data);
-            it = tmls.emplace(lib, std::move(data)).first;
-        }
         const std::string shown = rel + file;
-        const BYTE* blob; UINT size, hw = 0, hh = 0;
-        bool normal = false;
-        if (!FindTmlTexture(it->second, tex.c_str(), &blob, &size, &hw, &hh) || size < 16) {
-            const bool suffix = tex.size() > 2 && _stricmp(tex.c_str() + tex.size() - 2, "_n") == 0;
-            if (!suffix || !FindTmlTexture(it->second, tex.substr(0, tex.size() - 2).c_str(), &blob, &size, &hw, &hh) || size < 16) {
-                LogTexMods("NOT FOUND: %s (%s)", shown.c_str(), "check library/texture name");
+        // Most libraries also ship a 16-bit twin (<library>16.tml, raw 1555/4444) that the game
+        // loads instead of the DDS one in some cases (dinosaurs among them). Register both.
+        bool found = false;
+        for (int twin = 0; twin < 2; twin++) {
+            const std::string name = twin ? lib + "16" : lib;
+            auto it = tmls.find(name);
+            if (it == tmls.end()) {
+                std::vector<BYTE> data;
+                ReadWholeFile(gameDir + "Data\\matlibs\\" + name + ".tml", data);
+                it = tmls.emplace(name, std::move(data)).first;
+            }
+            const BYTE* blob; UINT size, hw = 0, hh = 0;
+            bool normal = false;
+            if (!FindTmlTexture(it->second, tex.c_str(), &blob, &size, &hw, &hh) || size < 16) {
+                const bool suffix = tex.size() > 2 && _stricmp(tex.c_str() + tex.size() - 2, "_n") == 0;
+                if (!suffix || !FindTmlTexture(it->second, tex.substr(0, tex.size() - 2).c_str(), &blob, &size, &hw, &hh) || size < 16)
+                    continue;
+                normal = true;
+            }
+            found = true;
+            const char* tag = twin ? " (16-bit twin)" : "";
+            const unsigned long long key = Fnv64(blob, size);
+            if (normal) {
+                if (!g_normalMods.count(key)) { g_normalMods[key] = folder + file; LogTexMods("normal map: %s%s", shown.c_str(), tag); }
                 continue;
             }
-            normal = true;
+            if (g_texMods.count(key)) {
+                LogTexMods("DUPLICATE (ignored): %s%s", shown.c_str(), tag);
+                continue;
+            }
+            TexReplacement r;
+            r.path = folder + file;
+            if (memcmp(blob, "DDS ", 4) == 0) {
+                r.origH = *(const UINT*)(blob + 12);
+                r.origW = *(const UINT*)(blob + 16);
+            } else { // raw texture (1555/4444/8888): size from the .tml entry header
+                r.origW = hw;
+                r.origH = hh;
+            }
+            g_texMods[key] = std::move(r);
+            LogTexMods("ok: %s%s", shown.c_str(), tag);
         }
-        const unsigned long long key = Fnv64(blob, size);
-        if (normal) {
-            if (!g_normalMods.count(key)) { g_normalMods[key] = folder + file; LogTexMods("normal map: %s%s", shown.c_str(), ""); }
-            continue;
+        if (!found) LogTexMods("NOT FOUND: %s (%s)", shown.c_str(), "check library/texture name");
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+}
+
+// Hash of every texture in Data\matlibs -> "<library>__<texture>", so the renderer can name the
+// textures the game creates (diagnostics only; needs the D3D8to11_SetTextureName export).
+static std::unordered_map<unsigned long long, std::string> g_texNames;
+
+static void IndexTextureNames(const std::string& gameDir)
+{
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA((gameDir + "Data\\matlibs\\*.tml").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        std::vector<BYTE> tml;
+        if (!ReadWholeFile(gameDir + "Data\\matlibs\\" + fd.cFileName, tml)) continue;
+        if (tml.size() < 16 || memcmp(tml.data(), "TML1", 4) != 0) continue;
+        std::string lib = fd.cFileName;
+        lib = lib.substr(0, lib.size() - 4);
+        const UINT count = *(const UINT*)(tml.data() + 8);
+        size_t o = 0xc;
+        std::vector<std::pair<UINT, std::pair<size_t, UINT>>> ents;
+        bool ok = true;
+        for (UINT i = 0; i < count; i++) {
+            if (o + 28 > tml.size()) { ok = false; break; }
+            const UINT idx = *(const UINT*)(tml.data() + o), size = *(const UINT*)(tml.data() + o + 4);
+            if (o + 28 + size > tml.size()) { ok = false; break; }
+            ents.push_back({ idx, { o + 28, size } });
+            o += 28 + size;
         }
-        if (g_texMods.count(key)) {
-            LogTexMods("DUPLICATE (ignored): %s%s", shown.c_str(), "");
-            continue;
+        if (!ok || o + 4 > tml.size()) continue;
+        const UINT nnames = *(const UINT*)(tml.data() + o);
+        o += 4;
+        for (const auto& e : ents) {
+            char name[33] = {};
+            if (e.first < nnames && o + 32 * (e.first + 1) <= tml.size()) memcpy(name, tml.data() + o + 32 * e.first, 32);
+            else sprintf_s(name, "tex%u", e.first); // unnamed (see FindTmlTexture)
+            const unsigned long long key = Fnv64(tml.data() + e.second.first, e.second.second);
+            if (!g_texNames.count(key)) g_texNames[key] = lib + "__" + name;
         }
-        TexReplacement r;
-        r.path = folder + file;
-        if (memcmp(blob, "DDS ", 4) == 0) {
-            r.origH = *(const UINT*)(blob + 12);
-            r.origW = *(const UINT*)(blob + 16);
-        } else { // raw texture (1555/4444/8888): size from the .tml entry header
-            r.origW = hw;
-            r.origH = hh;
-        }
-        g_texMods[key] = std::move(r);
-        LogTexMods("ok: %s%s", shown.c_str(), "");
     } while (FindNextFileA(h, &fd));
     FindClose(h);
 }
@@ -916,6 +970,7 @@ static void ScanTextureMods()
     const std::string dir = GameDir();
     std::unordered_map<std::string, std::vector<BYTE>> tmls;
     ScanTextureModsDir(dir, dir + "mods\\textures\\", "", tmls, 0);
+    IndexTextureNames(dir);
 }
 
 typedef HRESULT(WINAPI* D3DXCreateTexMemEx_t)(void* dev, const void* data, UINT size, UINT w, UINT h, UINT mips,
@@ -924,6 +979,25 @@ typedef HRESULT(WINAPI* D3DXCreateTexMemEx_t)(void* dev, const void* data, UINT 
 static D3DXCreateTexMemEx_t g_origCreateTexMem = nullptr;
 
 typedef BOOL(WINAPI* SetNormalMap_t)(void*, const char*);
+
+static void NameTexture(unsigned long long key, void* texture, bool replaced)
+{
+    if (!texture) return;
+    static SetNormalMap_t setName = nullptr; // D3D8to11_SetTextureName has the same signature
+    static bool looked = false;
+    if (!looked) {
+        looked = true;
+        HMODULE d3d8 = GetModuleHandleA("d3d8.dll");
+        setName = d3d8 ? (SetNormalMap_t)GetProcAddress(d3d8, "D3D8to11_SetTextureName") : nullptr;
+    }
+    if (!setName) return;
+    auto it = g_texNames.find(key);
+    char hex[32];
+    sprintf_s(hex, "unknown_%016llx", key);
+    std::string name = it != g_texNames.end() ? it->second : hex;
+    if (replaced) name += " +mod";
+    setName(texture, name.c_str());
+}
 
 static void AttachNormalMap(unsigned long long key, void* texture)
 {
@@ -957,7 +1031,7 @@ static HRESULT WINAPI CreateTexMem_Hook(void* dev, const void* data, UINT size, 
                 if (hr >= 0) {
                     if (srcInfo) { srcInfo[0] = r.origW; srcInfo[1] = r.origH; } // D3DXIMAGE_INFO.Width/Height
                     g_texModsUsed++;
-                    if (tex) AttachNormalMap(key, *tex);
+                    if (tex) { AttachNormalMap(key, *tex); NameTexture(key, *tex, true); }
                     return hr;
                 }
                 LogTexMods("LOAD ERROR: %s%s", r.path.c_str(), "");
@@ -966,8 +1040,7 @@ static HRESULT WINAPI CreateTexMem_Hook(void* dev, const void* data, UINT size, 
     }
     HRESULT hr = g_origCreateTexMem(dev, data, size, w, h, mips, usage, fmt, pool, filter, mipFilter, colorKey,
                                     srcInfo, palette, tex);
-    if (hr >= 0 && key && tex) AttachNormalMap(key, *tex);
-    return hr;
+    if (hr >= 0 && key && tex) { AttachNormalMap(key, *tex); NameTexture(key, *tex, false); }    return hr;
 }
 
 // Raw textures: TTextureResourceHAL::CreateFromMemory5551/4444/8888(w, h, mips, data)
@@ -1000,8 +1073,13 @@ static bool CreateRawReplacement(BYTE* res, UINT w, UINT h, const void* data, UI
 
 static bool RawCreate(int i, BYTE* r, UINT w, UINT h, UINT m, const void* d, UINT bpp)
 {
-    const bool ok = CreateRawReplacement(r, w, h, d, bpp) || g_origRaw[i](r, w, h, m, d);
-    if (ok && d && !g_normalMods.empty()) AttachNormalMap(Fnv64((const BYTE*)d, (size_t)w * h * bpp), *(void**)(r + 0x60));
+    const bool replaced = CreateRawReplacement(r, w, h, d, bpp);
+    const bool ok = replaced || g_origRaw[i](r, w, h, m, d);
+    if (ok && d) {
+        const unsigned long long key = Fnv64((const BYTE*)d, (size_t)w * h * bpp);
+        if (!g_normalMods.empty()) AttachNormalMap(key, *(void**)(r + 0x60));
+        NameTexture(key, *(void**)(r + 0x60), replaced);
+    }
     return ok;
 }
 

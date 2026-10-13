@@ -4,6 +4,17 @@ Put `<library>__<texture>_n.dds` next to a texture in `mods\textures` (any subfo
 name is the texture's name plus `_n`). It works for HD replacements and for original textures
 (no replacement needed). `[NormalMaps]` in `d3d8to11.ini` (or the Insert panel) controls it.
 
+## Texture names in dinosaur libraries
+
+A `.tml` library stores textures by index and a name table; usually name N is texture N.
+Dinosaur libraries (`dinos_*.tml`) have 3 names but 6 textures: the names are materials, and
+each material uses two textures (adult and juvenile skin, see the material table at the end
+of the file). Texture packs, and the plugin, address the unnamed textures as `tex<index>`, so
+`dinos_hellcreek_b__tex5.dds` / `tex4.dds` are the Triceratops adult / juvenile skins, while
+`dinos_hellcreek_b__Tricera.dds` is texture 2 (a Pachycephalosaurus skin). Each mod is also
+matched against the 16-bit twin library (`<library>16.tml`) the game loads in 16-bit modes.
+The Insert panel's skin finder shows the `<library>__<texture>` name of the texture under it.
+
 ## Generating maps
 
 ```
