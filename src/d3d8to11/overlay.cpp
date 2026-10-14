@@ -540,6 +540,8 @@ void Device::DrawOverlay()
             ImGui::Checkbox("Lamp lights (point lights)", &g_config.pointLights);
             ImGui::SliderFloat("Lamp light intensity", &g_config.pointLightIntensity, 0, 16, "%.2f");
             ImGui::SliderFloat("Lamp light radius", &g_config.pointLightRadius, 0.5f, 64, "%.1f");
+            ImGui::SliderFloat("Lamp light warmth", &g_config.pointLightWarmth, 0, 1, "%.2f");
+            ImGui::ColorEdit3("Lamp light tint", g_config.pointLightTint);
             ImGui::Checkbox("Bloom", &g_config.bloom);
             ImGui::SliderFloat("Bloom strength", &g_config.bloomStrength, 0, 4, "%.2f");
             ImGui::SliderFloat("Bloom threshold", &g_config.bloomThreshold, 0, 1, "%.2f");

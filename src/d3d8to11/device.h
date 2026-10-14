@@ -397,12 +397,12 @@ private:
         (g_config.sunLighting || g_config.postEnabled || g_config.grassPhysics || g_config.aoEnabled || g_config.waterEnabled || g_config.taa || g_config.fsr31 || g_config.materialsEnabled); }
     void CapturePusher(UINT firstVertex, UINT numVertices);
     // lights.cpp: night point lights from the emission masks.
-    static const int kMaxPointLights = 32;
+    static const int kMaxPointLights = 64; // shaders.cpp PointLights arrays
     struct PointLightConstants { float count[4]; float pos[kMaxPointLights][4]; float color[kMaxPointLights][4]; };
-    struct LightEmitter { UINT v[3]; float w; float rgb[3]; };
-    struct FrameLight { float pos[3]; float rgb[3]; float w; };
+    struct LightEmitter { float local[3]; BYTE weights[4], indices[4]; float rgb[3]; float weight; UINT count; };
+    struct WorldLight { float pos[3]; float rgb[3]; UINT lastSeen; UINT count; };
     std::unordered_map<unsigned long long, std::vector<LightEmitter>> m_emitterCache;
-    std::vector<FrameLight> m_lightsThisFrame;
+    std::unordered_map<unsigned long long, WorldLight> m_worldLights;
     PointLightConstants m_pointLights = {};
     ComPtr<ID3D11Buffer> m_pointLightCB;
     bool m_pointLightsDirty = true;

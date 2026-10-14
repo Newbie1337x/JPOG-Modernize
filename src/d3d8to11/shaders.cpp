@@ -543,7 +543,9 @@ std::string SunPixelCodeBase() {
         // physically summed and gets a sky/ground tinted ambient. Output goes through exposure and
         // a highlight-only shoulder so values the game kept below 1 are not changed.
         // Night point lights (lights.cpp): pos.w = radius; count.y = inverse-square knee.
-        "cbuffer PointLights : register(b5) { float4 lightCount; float4 lightPos[32]; float4 lightColor[32]; };\n"
+        "cbuffer PointLights : register(b5) { float4 lightCount; float4 lightPos[64]; float4 lightColor[64]; };\n"
+        // Lamp light in output space, added after the night grade so lamps keep their warm colour.
+        "static float3 pointExtra = 0;\n"
         "float3 PointLights(float3 N, float3 P, bool flat) {\n"
         "  float3 sum = 0;\n"
         "  [loop] for (int k = 0; k < (int)lightCount.x; k++) {\n"
@@ -614,6 +616,7 @@ std::string SunPixelCodeBase() {
         "  bool rigid = sunFlags.w == 3 && sunFlags.z > 0.5;\n" // paths, relit with the terrain's light
         "  if (sunFlags.w != 1 && sunFlags.w != 2 && !rigid && !grass) return color;\n"
         "  if (sunControl.y == 1) return color;\n"
+        "  pointExtra = 0;\n"
         "  float3 rawN = cross(ddy(i.world), ddx(i.world));\n"
         "  if (sunFlags.w == 1 && dot(i.normal,i.normal) > 1e-8) rawN = i.normal;\n"
         "  float nlen = dot(rawN, rawN); if (nlen < 1e-12) return color;\n"
@@ -642,8 +645,10 @@ std::string SunPixelCodeBase() {
         "    float3 tint = clamp(baked / max(saturate(A + S * f), 1e-3), 0, 2);\n"
         "    float sunF = f;\n"
         "    if (field) sunF = fieldNdl * min(fieldShadow, lerp(1, fieldNdl > 0.05 ? saturate(f / fieldNdl) : 1, sunControl.w));\n"
-        "    float3 light = GameAmbient(N) + GameSun() * sunF + PointLights(N, i.world, false);\n"
-        "    return float4(LinearToOutput(ToLinear(color.rgb * tint) * light), color.a);\n"
+        "    float3 light = GameAmbient(N) + GameSun() * sunF, albedo = ToLinear(color.rgb * tint);\n"
+        "    float3 outRgb = LinearToOutput(albedo * light);\n"
+        "    pointExtra = LinearToOutput(albedo * (light + PointLights(N, i.world, false))) - outRgb;\n"
+        "    return float4(outRgb, color.a);\n"
         "  }\n"
         // Grass: the game draws it unlit (blade texture blended with the terrain colour map; v0 is
         // only alpha). Relit relative to the game's own light at that spot (its sun, gameSunDir,
@@ -656,8 +661,9 @@ std::string SunPixelCodeBase() {
         "    float3 light = GameAmbient(N) + GameSun() * sunF;\n"
         // The tips (t7.x = blade height) catch the moon (rimColor.w).
         "    light += GameSun() * saturate(i.t7.x * 1.5) * rimColor.w;\n"
-        "    light += PointLights(N, i.world, true) * max(base, 0.05);\n"
-        "    return float4(LinearToOutput(ToLinear(color.rgb) * light / max(base, 0.05)), color.a);\n"
+        "    float3 outRgb = LinearToOutput(ToLinear(color.rgb) * light / max(base, 0.05));\n"
+        "    pointExtra = LinearToOutput(ToLinear(color.rgb) * (light / max(base, 0.05) + PointLights(N, i.world, true))) - outRgb;\n"
+        "    return float4(outRgb, color.a);\n"
         "  }\n"
         // Terrain: the game's per-vertex sun factor (v0.w, passed in t7.x) keeps its smooth slopes.
         "  float ndl = saturate(dot(N, sunDirection.xyz));\n"
@@ -665,7 +671,7 @@ std::string SunPixelCodeBase() {
         "    float baked = saturate(i.t7.x);\n"
         "    ndl = field ? fieldNdl * min(fieldShadow, lerp(1, fieldNdl > 0.05 ? saturate(baked / fieldNdl) : 1, sunControl.w)) : baked;\n"
         "  }\n"
-        "  float3 light = GameAmbient(N) + GameSun() * ndl + PointLights(N, i.world, false);\n"
+        "  float3 light = GameAmbient(N) + GameSun() * ndl;\n"
         "  float3 rim = sunFlags.w == 1 ? RimLight(N, i.world) : 0;\n"
         "  light += rim;\n"
         // Specular (strength todSun.w, roughness and F0 specParams): GGX on a rough skin/leaf
@@ -685,7 +691,11 @@ std::string SunPixelCodeBase() {
         "  }\n"
         // The terrain shader fades its lighting out under distant haze; keep that.
         "  if (sunFlags.w == 2) light = lerp(light, 1, saturate(i.d1.w));\n"
-        "  return float4(LinearToOutput(ToLinear(color.rgb) * light + rim * grassGrade.z + sheen), color.a);\n"
+        "  float3 lin = ToLinear(color.rgb) * light + rim * grassGrade.z + sheen, outRgb = LinearToOutput(lin);\n"
+        "  float3 lamps = PointLights(N, i.world, false);\n"
+        "  if (sunFlags.w == 2) lamps *= saturate(1 - i.d1.w);\n" // not through distant haze
+        "  pointExtra = LinearToOutput(lin + ToLinear(color.rgb) * lamps) - outRgb;\n"
+        "  return float4(outRgb, color.a);\n"
         "}\n"
         // Moonlight: colours fade toward a cool grey (world draws; emission is added afterwards).
         "float3 NightGrade(float3 c) {\n"
@@ -710,6 +720,7 @@ std::string SunPixelCodeBase() {
         "  if (sunFlags.w == 4 && sunFlags.y < 0.5 && grassGrade.w > 0.5)\n"
         "    lit.rgb = lerp(dot(lit.rgb, float3(0.2126, 0.7152, 0.0722)).xxx, lit.rgb, grassGrade.x) * grassGrade.y;\n"
         "  if (nightGrade.w > 0 && sunFlags.x > 0.5) lit.rgb = NightGrade(lit.rgb);\n"
+        "  lit.rgb += pointExtra;\n"
         "  return lit; }\n";
 }
 }

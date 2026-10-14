@@ -46,6 +46,8 @@ struct Config {
     bool pointLights = true;        // [Lighting] PointLights: lamps and signs light their surroundings at night
     float pointLightIntensity = 1.5f; // [Lighting] PointLightIntensity
     float pointLightRadius = 8.0f;  // [Lighting] PointLightRadius (world units)
+    float pointLightTint[3] = { 1.0f, 0.741f, 0.439f }; // [Lighting] PointLightTint (#FFBD70)
+    float pointLightWarmth = 0.75f; // [Lighting] PointLightWarmth: 0 = the mask's colour, 1 = the tint
     bool bloom = true;              // [Lighting] Bloom: glow around bright pixels
     float bloomStrength = 0.6f;     // [Lighting] BloomStrength (at night)
     float bloomThreshold = 0.75f;   // [Lighting] BloomThreshold (picture brightness 0-1)

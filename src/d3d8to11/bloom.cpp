@@ -9,7 +9,7 @@
 namespace {
 struct BloomConstants {
     float source[4]; // 1/source width, 1/source height, threshold, knee
-    float blur[4];   // strength, blur direction x, y (texels), -
+    float blur[4];   // strength, blur direction x, y (texels), night
 };
 
 const char* kBloomCode =
@@ -28,6 +28,9 @@ const char* kBloomCode =
     "  float l = max(c.r, max(c.g, c.b));\n"
     "  float w = saturate((l - source.z + source.w) / (2 * source.w));\n"
     "  w = l > source.z + source.w ? 1 : w * w;\n"
+    // At night (blur.w) the world is graded toward grey: only coloured light (lamps) blooms.
+    "  float chroma = (l - min(c.r, min(c.g, c.b))) / max(l, 1e-3);\n"
+    "  w *= lerp(1, saturate((chroma - 0.15) / 0.25), blur.w);\n"
     "  return float4(c * w, 1); }\n"
     // 9-tap gaussian along blur.yz (in this texture's texels).
     "float4 BlurPS(float4 pos : SV_Position) : SV_Target {\n"
@@ -104,6 +107,7 @@ void Device::ApplyBloom()
     c.source[0] = 1.0f / m_backBuffer->m_width; c.source[1] = 1.0f / m_backBuffer->m_height;
     // Lower threshold at night: lamps and moonlit water are dim in absolute terms.
     c.source[2] = g_config.bloomThreshold * (1 - 0.35f * night); c.source[3] = 0.12f;
+    c.blur[3] = night;
     auto upload = [&](float s, float dx, float dy) {
         c.blur[0] = s; c.blur[1] = dx; c.blur[2] = dy;
         D3D11_MAPPED_SUBRESOURCE map;

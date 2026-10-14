@@ -102,6 +102,13 @@ void LoadConfig()
     g_config.pointLights = GetPrivateProfileIntA("Lighting", "PointLights", 1, ini.c_str()) != 0;
     g_config.pointLightIntensity = readFloat("PointLightIntensity", 1.5f, 0, 16);
     g_config.pointLightRadius = readFloat("PointLightRadius", 8.0f, 0.5f, 64);
+    g_config.pointLightWarmth = readFloat("PointLightWarmth", 0.75f, 0, 1);
+    {
+        char v[64] = {};
+        GetPrivateProfileStringA("Lighting", "PointLightTint", "", v, sizeof(v), ini.c_str());
+        float r, g, b;
+        if (sscanf_s(v, "%f , %f , %f", &r, &g, &b) == 3) { g_config.pointLightTint[0] = r; g_config.pointLightTint[1] = g; g_config.pointLightTint[2] = b; }
+    }
     g_config.bloom = GetPrivateProfileIntA("Lighting", "Bloom", 1, ini.c_str()) != 0;
     g_config.bloomStrength = readFloat("BloomStrength", 0.6f, 0, 4);
     g_config.bloomThreshold = readFloat("BloomThreshold", 0.75f, 0, 1);
@@ -320,6 +327,12 @@ void SaveConfig()
     putInt("Lighting", "PointLights", g_config.pointLights);
     putFloat("Lighting", "PointLightIntensity", g_config.pointLightIntensity);
     putFloat("Lighting", "PointLightRadius", g_config.pointLightRadius);
+    putFloat("Lighting", "PointLightWarmth", g_config.pointLightWarmth);
+    {
+        char v[64];
+        sprintf_s(v, "%.3f,%.3f,%.3f", g_config.pointLightTint[0], g_config.pointLightTint[1], g_config.pointLightTint[2]);
+        WritePrivateProfileStringA("Lighting", "PointLightTint", v, ini.c_str());
+    }
     putInt("Lighting", "Bloom", g_config.bloom);
     putFloat("Lighting", "BloomStrength", g_config.bloomStrength);
     putFloat("Lighting", "BloomThreshold", g_config.bloomThreshold);

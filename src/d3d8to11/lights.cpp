@@ -2,10 +2,12 @@
 //
 // A world draw whose stage-0 texture has an emission mask (normalmap.cpp, mods\emissive) is an
 // emitter. Its triangles are read once from the CPU copies of the vertex/index buffers: the mask
-// is sampled at each triangle's texture centroid and the glowing ones are kept (cached per draw).
-// Every frame they are moved to the world with the draw's bone palette (as CapturePusher), merged
-// into clusters on a grid and the clusters nearest the camera become point lights for the next
-// frame (cbuffer b5, shaders.cpp PointLights), added by the replacement lighting at night.
+// is sampled at each triangle's texture centroid and the glowing ones are merged in object space
+// into a few emitters (one per lamp, cached per draw). Every frame those are moved to the world
+// with the draw's bone palette (as CapturePusher) and kept in a world grid that remembers lights
+// whose objects went off screen for a while, so the light they cast on visible ground stays.
+// At the end of the frame the grid is merged more coarsely with distance and the nearest
+// lights (faded out toward the cut) light the next frame (cbuffer b5, shaders.cpp PointLights).
 #include "device.h"
 #include <algorithm>
 #include <DirectXMath.h>
@@ -20,8 +22,6 @@ XMMATRIX Rows(const float (&rows)[4][4])
     return XMMatrixTranspose(XMLoadFloat4x4(&m));
 }
 
-
-
 // Mask texel (rgb, already tinted) at uv, wrapped.
 void SampleMask(const Texture* t, float u, float v, float out[3])
 {
@@ -31,11 +31,13 @@ void SampleMask(const Texture* t, float u, float v, float out[3])
     const float* p = t->m_emissiveMask + ((size_t)y * n + x) * 3;
     for (int k = 0; k < 3; k++) out[k] = p[k];
 }
+
+const UINT kLightMemoryFrames = 900; // a light whose object is not drawn stays this long
 }
 
 void Device::CaptureEmitters(DWORD type, UINT baseVertex, UINT startIndex, UINT primCount, bool indexed)
 {
-    if (!g_config.pointLights || !g_config.replaceLighting || m_worldKind != 1 || !ActiveEmissive() || m_lightsThisFrame.size() > 4096) return;
+    if (!g_config.pointLights || !g_config.replaceLighting || m_worldKind != 1 || !ActiveEmissive()) return;
     Texture* tex = static_cast<Texture*>(static_cast<ID8Texture*>(m_textures[0]));
     if (!tex->m_emissiveMask) return;
     const size_t idx = m_vsHandle >> 1;
@@ -57,7 +59,7 @@ void Device::CaptureEmitters(DWORD type, UINT baseVertex, UINT startIndex, UINT 
     const IndexBuffer* ib = indexed ? m_indices : nullptr;
     if (indexed && (!ib || ib->m_impl.m_dynamic)) return;
 
-    // Glowing triangles of this draw, found once.
+    // Glowing parts of this draw, found once and merged per lamp in object space.
     const unsigned long long key = ((unsigned long long)(uintptr_t)vb * 1099511628211ull) ^ ((unsigned long long)(uintptr_t)ib << 7) ^
         ((unsigned long long)(uintptr_t)tex << 21) ^ ((unsigned long long)baseVertex << 40) ^ ((unsigned long long)startIndex << 13) ^ primCount ^ (type << 30);
     auto found = m_emitterCache.find(key);
@@ -72,33 +74,56 @@ void Device::CaptureEmitters(DWORD type, UINT baseVertex, UINT startIndex, UINT 
             out = baseVertex + (isz == 4 ? *(const UINT*)p : *(const WORD*)p);
             return true;
         };
-        const UINT tris = (std::min)(primCount, 4096u);
+        const float cell = (std::max)(0.25f, g_config.pointLightRadius * 0.12f);
+        UINT glowing = 0;
+        const UINT tris = (std::min)(primCount, 16384u);
         for (UINT t = 0; t < tris; t++) {
-            LightEmitter e = {};
+            UINT v[3];
             bool ok = true;
             for (int c = 0; c < 3 && ok; c++) {
                 const UINT n = type == D8PT_TRIANGLELIST ? t * 3 + c : t + c;
-                ok = index(n, e.v[c]) && (size_t)(e.v[c] + 1) * stride <= data.size();
+                ok = index(n, v[c]) && (size_t)(v[c] + 1) * stride <= data.size();
             }
-            if (!ok || e.v[0] == e.v[1] || e.v[1] == e.v[2] || e.v[0] == e.v[2]) continue;
-            float u = 0, v = 0;
+            if (!ok || v[0] == v[1] || v[1] == v[2] || v[0] == v[2]) continue;
+            float u = 0, w = 0, p[3] = {};
             for (int c = 0; c < 3; c++) {
-                float t2[2];
-                memcpy(t2, data.data() + (size_t)e.v[c] * stride + uv->offset, 8);
-                u += t2[0] / 3; v += t2[1] / 3;
+                const BYTE* vx = data.data() + (size_t)v[c] * stride;
+                float t2[2], q[3];
+                memcpy(t2, vx + uv->offset, 8);
+                memcpy(q, vx + pos->offset, 12);
+                u += t2[0] / 3; w += t2[1] / 3;
+                for (int k = 0; k < 3; k++) p[k] += q[k] / 3;
             }
-            SampleMask(tex, u, v, e.rgb);
-            e.w = (std::max)(e.rgb[0], (std::max)(e.rgb[1], e.rgb[2]));
-            if (e.w > 0.08f) list.push_back(e);
+            float rgb[3];
+            SampleMask(tex, u, w, rgb);
+            const float bright = (std::max)(rgb[0], (std::max)(rgb[1], rgb[2]));
+            if (bright <= 0.08f || !std::isfinite(p[0] + p[1] + p[2])) continue;
+            glowing++;
+            // Same lamp: within one cell of an emitter already found.
+            LightEmitter* into = nullptr;
+            for (LightEmitter& e : list) {
+                const float dx = e.local[0] / e.weight - p[0], dy = e.local[1] / e.weight - p[1], dz = e.local[2] / e.weight - p[2];
+                if (dx * dx + dy * dy + dz * dz < cell * cell) { into = &e; break; }
+            }
+            if (!into) {
+                if (list.size() >= 256) continue;
+                list.push_back({});
+                into = &list.back();
+                const BYTE* vx = data.data() + (size_t)v[0] * stride;
+                memcpy(into->weights, vx + weights->offset, 4);
+                memcpy(into->indices, vx + indices->offset, 4);
+            }
+            for (int k = 0; k < 3; k++) { into->local[k] += p[k] * bright; into->rgb[k] += rgb[k]; }
+            into->weight += bright;
+            into->count++;
         }
-        if (list.size() > 512) { // keep the brightest
-            std::nth_element(list.begin(), list.begin() + 512, list.end(), [](const LightEmitter& a, const LightEmitter& b) { return a.w > b.w; });
-            list.resize(512);
+        for (LightEmitter& e : list) {
+            for (int k = 0; k < 3; k++) { e.local[k] /= e.weight; e.rgb[k] /= e.count; }
         }
         found = m_emitterCache.emplace(key, std::move(list)).first;
         if (!found->second.empty())
-            LogOnce("emitters-" + tex->m_name + std::to_string(primCount), "Point lights: %u glowing triangles in a draw of %s (%u triangles)",
-                    (UINT)found->second.size(), tex->m_name.c_str(), primCount);
+            LogOnce("emitters-" + tex->m_name + std::to_string(primCount), "Point lights: %u glowing triangles, %u lamps in a draw of %s (%u triangles)",
+                    glowing, (UINT)found->second.size(), tex->m_name.c_str(), primCount);
     }
     if (found->second.empty()) return;
 
@@ -106,13 +131,10 @@ void Device::CaptureEmitters(DWORD type, UINT baseVertex, UINT startIndex, UINT 
     float c0[4][4];
     memcpy(c0, m_vsConst, sizeof(c0));
     const XMMATRIX model = Rows(c0) * Rows(m_sun.clipToWorld);
-    auto world = [&](UINT vi, float out[3]) {
-        const BYTE* v = data.data() + (size_t)vi * stride;
-        float p[3];
-        memcpy(p, v + pos->offset, 12);
-        const BYTE* w = v + weights->offset, *ix = v + indices->offset;
-        const float wv[4] = { w[2] / 255.0f, w[1] / 255.0f, w[0] / 255.0f, w[3] / 255.0f };
-        const float iv[4] = { ix[2] / 255.0f, ix[1] / 255.0f, ix[0] / 255.0f, ix[3] / 255.0f };
+    const float cell = (std::max)(0.25f, g_config.pointLightRadius * 0.12f);
+    for (const LightEmitter& e : found->second) {
+        const float wv[4] = { e.weights[2] / 255.0f, e.weights[1] / 255.0f, e.weights[0] / 255.0f, e.weights[3] / 255.0f };
+        const float iv[4] = { e.indices[2] / 255.0f, e.indices[1] / 255.0f, e.indices[0] / 255.0f, e.indices[3] / 255.0f };
         float o[3] = {};
         for (int j = 0; j < 4; j++) {
             if (wv[j] <= 0) continue;
@@ -120,74 +142,94 @@ void Device::CaptureEmitters(DWORD type, UINT baseVertex, UINT startIndex, UINT 
             if (a0 < 0 || 5 + a0 + 2 >= kMaxVSConst) continue;
             for (int r = 0; r < 3; r++) {
                 const float* row = m_vsConst[5 + a0 + r];
-                o[r] += wv[j] * (row[0] * p[0] + row[1] * p[1] + row[2] * p[2] + row[3]);
+                o[r] += wv[j] * (row[0] * e.local[0] + row[1] * e.local[1] + row[2] * e.local[2] + row[3]);
             }
         }
         XMFLOAT3 f;
         XMStoreFloat3(&f, XMVector3TransformCoord(XMVectorSet(o[0], o[1], o[2], 1), model));
-        out[0] = f.x; out[1] = f.y; out[2] = f.z;
-        return std::isfinite(f.x + f.y + f.z);
-    };
-    for (const LightEmitter& e : found->second) {
-        FrameLight l = {};
-        bool ok = true;
-        for (int c = 0; c < 3 && ok; c++) {
-            float p[3];
-            ok = world(e.v[c], p);
-            for (int k = 0; k < 3; k++) l.pos[k] += p[k] / 3;
+        if (!std::isfinite(f.x + f.y + f.z)) continue;
+        const long long x = (long long)std::floor(f.x / cell), y = (long long)std::floor(f.y / cell), z = (long long)std::floor(f.z / cell);
+        const unsigned long long k = ((unsigned long long)(x & 0x1FFFFF) << 42) | ((unsigned long long)(y & 0x1FFFFF) << 21) | (unsigned long long)(z & 0x1FFFFF);
+        WorldLight& l = m_worldLights[k];
+        if (l.lastSeen != (UINT)(m_frame + 1)) { // first sighting this frame: replace
+            l = {};
+            l.lastSeen = (UINT)(m_frame + 1);
         }
-        if (!ok) continue;
-        for (int k = 0; k < 3; k++) l.rgb[k] = e.rgb[k];
-        l.w = e.w;
-        m_lightsThisFrame.push_back(l);
+        const float n = (float)l.count;
+        l.pos[0] = (l.pos[0] * n + f.x) / (n + 1); l.pos[1] = (l.pos[1] * n + f.y) / (n + 1); l.pos[2] = (l.pos[2] * n + f.z) / (n + 1);
+        const float area = (std::min)(2.0f, 0.6f + 0.2f * std::sqrt((float)e.count));
+        for (int c = 0; c < 3; c++) l.rgb[c] += e.rgb[c] * area;
+        l.count++;
     }
 }
 
-// End of frame: emitting triangles merged into clusters; the nearest become next frame's lights.
+// End of frame: remembered lights merged more coarsely with distance; the nearest light the next frame.
 void Device::BuildPointLights()
 {
     m_pointLights = {};
-    std::vector<FrameLight> tris;
-    tris.swap(m_lightsThisFrame);
+    m_pointLightsShown = 0;
+    if (!g_config.pointLights || !m_tod.active) { m_worldLights.clear(); return; }
     if (m_emitterCache.size() > 8192) m_emitterCache.clear();
-    if (tris.empty() || !g_config.pointLights || !m_tod.active) return;
+    const UINT now = (UINT)(m_frame + 1);
+    for (auto it = m_worldLights.begin(); it != m_worldLights.end();)
+        it = now - it->second.lastSeen > kLightMemoryFrames ? m_worldLights.erase(it) : std::next(it);
+    m_pointLightTris = (UINT)m_worldLights.size();
     const float night = 1 - m_tod.dayW;
-    if (night <= 0.01f) return;
-    const float radius = g_config.pointLightRadius, cell = (std::max)(0.25f, radius * 0.35f);
-    struct Cluster { double p[3]; double rgb[3]; double w; UINT n; };
-    std::unordered_map<unsigned long long, Cluster> grid;
-    for (const FrameLight& t : tris) {
-        const long long x = (long long)std::floor(t.pos[0] / cell), y = (long long)std::floor(t.pos[1] / cell), z = (long long)std::floor(t.pos[2] / cell);
-        const unsigned long long key = ((unsigned long long)(x & 0x1FFFFF) << 42) | ((unsigned long long)(y & 0x1FFFFF) << 21) | (unsigned long long)(z & 0x1FFFFF);
-        Cluster& c = grid[key];
-        for (int k = 0; k < 3; k++) { c.p[k] += t.pos[k] * t.w; c.rgb[k] += t.rgb[k]; }
-        c.w += t.w; c.n++;
-    }
-    struct Light { float pos[3]; float rgb[3]; float dist; };
-    std::vector<Light> lights;
-    lights.reserve(grid.size());
+    if (night <= 0.01f || m_worldLights.empty()) return;
+
+    struct Candidate { float pos[3]; float rgb[3]; float dist; };
+    std::vector<Candidate> all;
+    all.reserve(m_worldLights.size());
     const float* cam = m_sun.camera;
-    for (const auto& g : grid) {
-        const Cluster& c = g.second;
-        Light l;
-        for (int k = 0; k < 3; k++) l.pos[k] = (float)(c.p[k] / c.w);
-        // Average colour of the glowing triangles, a little stronger for larger glowing areas.
-        const float area = (std::min)(2.0f, 0.6f + 0.2f * std::sqrt((float)c.n));
-        for (int k = 0; k < 3; k++) l.rgb[k] = (float)(c.rgb[k] / c.n) * area * g_config.pointLightIntensity * night;
-        const float dx = l.pos[0] - cam[0], dy = l.pos[1] - cam[1], dz = l.pos[2] - cam[2];
-        l.dist = dx * dx + dy * dy + dz * dz;
-        lights.push_back(l);
+    for (const auto& w : m_worldLights) {
+        Candidate c;
+        memcpy(c.pos, w.second.pos, sizeof(c.pos));
+        memcpy(c.rgb, w.second.rgb, sizeof(c.rgb));
+        const float dx = c.pos[0] - cam[0], dy = c.pos[1] - cam[1], dz = c.pos[2] - cam[2];
+        c.dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        all.push_back(c);
     }
-    const size_t n = (std::min)(lights.size(), (size_t)kMaxPointLights);
-    std::partial_sort(lights.begin(), lights.begin() + n, lights.end(), [](const Light& a, const Light& b) { return a.dist < b.dist; });
-    m_pointLights.count[0] = (float)n;
-    m_pointLights.count[1] = 1.0f / (radius * radius * 0.08f); // inverse-square knee (about a third of the radius)
-    for (size_t i = 0; i < n; i++) {
-        for (int k = 0; k < 3; k++) { m_pointLights.pos[i][k] = lights[i].pos[k]; m_pointLights.color[i][k] = lights[i].rgb[k]; }
+    std::sort(all.begin(), all.end(), [](const Candidate& a, const Candidate& b) { return a.dist < b.dist; });
+
+    // Greedy: each light joins a chosen one closer than a distance-scaled merge range.
+    const float radius = g_config.pointLightRadius;
+    struct Chosen { float pos[3]; float rgb[3]; float w; float dist; };
+    std::vector<Chosen> chosen;
+    float cutoff = 1e30f;
+    for (const Candidate& c : all) {
+        const float merge = (std::max)(radius * 0.3f, c.dist * 0.08f);
+        Chosen* into = nullptr;
+        for (Chosen& s : chosen) {
+            const float dx = s.pos[0] / s.w - c.pos[0], dy = s.pos[1] / s.w - c.pos[1], dz = s.pos[2] / s.w - c.pos[2];
+            if (dx * dx + dy * dy + dz * dz < merge * merge) { into = &s; break; }
+        }
+        if (!into) {
+            if (chosen.size() >= (size_t)kMaxPointLights) { cutoff = c.dist; break; }
+            chosen.push_back({});
+            into = &chosen.back();
+            into->dist = c.dist;
+        }
+        const float lum = c.rgb[0] * 0.2126f + c.rgb[1] * 0.7152f + c.rgb[2] * 0.0722f;
+        for (int k = 0; k < 3; k++) { into->pos[k] += c.pos[k] * lum; into->rgb[k] += c.rgb[k]; }
+        into->w += lum;
+    }
+
+    // Colour: the mask's own colour pulled toward the warm lamp tint; faded toward the cut.
+    const float warm = g_config.pointLightWarmth;
+    for (size_t i = 0; i < chosen.size(); i++) {
+        Chosen& s = chosen[i];
+        const float fade = cutoff < 1e29f ? (std::min)(1.0f, (std::max)(0.0f, (cutoff - s.dist) / (cutoff * 0.25f))) : 1.0f;
+        const float lum = s.rgb[0] * 0.2126f + s.rgb[1] * 0.7152f + s.rgb[2] * 0.0722f;
+        for (int k = 0; k < 3; k++) {
+            m_pointLights.pos[i][k] = s.pos[k] / (std::max)(s.w, 1e-6f);
+            const float c = s.rgb[k] + (lum * g_config.pointLightTint[k] - s.rgb[k]) * warm;
+            m_pointLights.color[i][k] = c * g_config.pointLightIntensity * night * fade;
+        }
         m_pointLights.pos[i][3] = radius;
     }
-    m_pointLightsShown = (UINT)n;
-    m_pointLightTris = (UINT)tris.size();
+    m_pointLights.count[0] = (float)chosen.size();
+    m_pointLights.count[1] = 1.0f / (radius * radius * 0.08f); // inverse-square knee (about a third of the radius)
+    m_pointLightsShown = (UINT)chosen.size();
 }
 
 void Device::BindPointLights()
