@@ -329,7 +329,7 @@ std::string WaterPixelCode(int samples) {
         "  float glint=pow(nh,96)*(.08+.24*fresnel)*waterOptical.x*lerp(ocean,1,moon);\n"
         "  surface+=glint*lerp(float3(1,.96,.86),rimColor.rgb,moon);\n"
         // Moonlight on water: a sharp glitter on the wave facets plus a soft path toward the moon.
-        "  surface+=moon*rimColor.rgb*(pow(nh,600)*3.0+pow(nh,60)*0.18)*(.35+.65*fresnel)*waterOptical.x;\n"
+        "  surface+=moon*rimColor.rgb*(pow(nh,900)*1.6+pow(nh,140)*0.05)*(.35+.65*fresnel)*waterOptical.x;\n"
         // Advancing/receding depth-space fronts plus drifting porous foam, no
         // permanent uniform white outline. Footprint waves remain independent.
         "  float phase=waterOptical.w*1.4+FoamNoise(i.world.xz*.09)*2;\n"

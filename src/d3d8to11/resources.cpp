@@ -375,6 +375,11 @@ HRESULT Texture::UnlockRect(UINT level)
 void Texture::Upload(UINT level)
 {
     if (m_shadow[level].empty()) return;
+    if (level == 0 && !m_hashValid) {
+        unsigned long long h = 1469598103934665603ull;
+        for (BYTE b : m_shadow[0]) { h ^= b; h *= 1099511628211ull; }
+        m_contentHash = h; m_hashValid = true;
+    }
     const bool decompress = GetFormatInfo(m_format).blockBytes && m_info.dxgi == DXGI_FORMAT_B8G8R8A8_UNORM;
     UploadLevel(m_dev->Ctx(), m_tex.Get(), level, m_format, m_info, decompress, m_shadow[level].data(),
                 MipSize(m_width, level), MipSize(m_height, level), 1);

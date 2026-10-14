@@ -40,14 +40,14 @@ void Device::PollAutomation()
 
 void Device::CollectDumpTextures()
 {
-    if (!m_texDumpActive || m_frame != m_texDumpFrame || !m_worldDraw || m_sun.flags[1] > .5f) return;
+    if (!m_texDumpActive || m_frame != m_texDumpFrame || m_rt != m_backBuffer || m_sun.flags[1] > .5f) return;
     for (int stage = 0; stage < 2; stage++) {
         if (!m_textures[stage] || m_textures[stage]->GetType() != D8RTYPE_TEXTURE) continue;
         Texture* t = static_cast<Texture*>(static_cast<ID8Texture*>(m_textures[stage]));
-        if (t->m_name.empty()) continue;
+        if (t->m_name.empty() && !t->m_hashValid) continue;
         bool seen = false;
         for (auto& e : m_texDumpList) if (e.first == t) { seen = true; break; }
-        if (!seen) { t->AddRef(); m_texDumpList.push_back({ t, m_worldKind }); }
+        if (!seen) { t->AddRef(); m_texDumpList.push_back({ t, m_worldDraw ? m_worldKind : -1 - (int)(m_vsHandle == 0) }); }
     }
 }
 
@@ -105,11 +105,13 @@ void Device::WriteTextureDump()
     UINT written = 0;
     for (auto& e : m_texDumpList) {
         Texture* t = e.first;
-        std::string file = t->m_name;
+        char hash[24];
+        sprintf_s(hash, "h%016llx", t->m_contentHash);
+        std::string file = t->m_name.empty() ? std::string(hash) : t->m_name;
         for (char& c : file) if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|' || c == '+') c = '_';
         const bool ok = t->m_tex && WriteDds(m_device.Get(), m_ctx.Get(), t->m_tex.Get(), dir + file + ".dds");
         if (ok) written++;
-        if (list) fprintf(list, "%s\tkind %d\t%ux%u\t%s\n", t->m_name.c_str(), e.second, t->m_width, t->m_height, ok ? "ok" : "skipped (format)");
+        if (list) fprintf(list, "%s\t%s\tkind %d\t%ux%u\t%s\n", file.c_str(), hash, e.second, t->m_width, t->m_height, ok ? "ok" : "skipped (format)");
         t->Release();
     }
     if (list) fclose(list);
