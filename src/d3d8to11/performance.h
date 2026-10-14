@@ -1,6 +1,7 @@
 #pragma once
 #include "common.h"
 #include <cstdio>
+#include <intrin.h>
 
 // Fixed query ring. No Flush, spins or blocking GPU readbacks. Times are inclusive.
 struct Performance {
@@ -43,16 +44,20 @@ struct Performance {
     void SampleMemory(ID3D11Device*);
     void Tick(double frequency);
 };
+// Milliseconds per time-stamp counter tick, measured once against QueryPerformanceCounter.
+// The stage clock is read about ten times per draw on sampled frames: rdtsc costs a few
+// nanoseconds where QueryPerformanceCounter costs about 25.
+double TscMilliseconds();
 struct CpuPerformanceScope {
-    Performance& p; int stage; LARGE_INTEGER start={}; bool enabled;
+    Performance& p; int stage; unsigned __int64 start=0; bool enabled;
     __forceinline CpuPerformanceScope(Performance& perf,int s):p(perf),stage(s),enabled(perf.enabled && perf.serial%30==0) {
-        if(enabled){p.cpuMeasured=true;QueryPerformanceCounter(&start);}
+        if(enabled){p.cpuMeasured=true;start=__rdtsc();}
     }
     // Unsampled frames (29 of 30) only store the stage: no call, no clock read.
     __forceinline void Next(int nextStage){if(enabled)Measure();stage=nextStage;}
-    __declspec(noinline) void Measure(){LARGE_INTEGER end;QueryPerformanceCounter(&end);
-        static const double frequency=[](){LARGE_INTEGER q;QueryPerformanceFrequency(&q);return double(q.QuadPart);}();
-        p.cpu[stage]+=(end.QuadPart-start.QuadPart)*1000.0/frequency;start=end;}
+    __declspec(noinline) void Measure(){const unsigned __int64 end=__rdtsc();
+        static const double scale=TscMilliseconds();
+        p.cpu[stage]+=(double)(end-start)*scale;start=end;}
     __forceinline ~CpuPerformanceScope(){if(enabled)Measure();}
 };
 struct PerformanceScope {

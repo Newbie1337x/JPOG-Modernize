@@ -158,3 +158,14 @@ void Performance::SampleMemory(ID3D11Device* d)
         gpuUsage=info.CurrentUsage;gpuBudget=info.Budget;budgetValid=true;
     }
 }
+
+double TscMilliseconds()
+{
+    LARGE_INTEGER f, q0, q1;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&q0);
+    const unsigned __int64 t0 = __rdtsc();
+    do QueryPerformanceCounter(&q1); while (q1.QuadPart - q0.QuadPart < f.QuadPart / 50); // 20 ms
+    const unsigned __int64 t1 = __rdtsc();
+    return (double)(q1.QuadPart - q0.QuadPart) * 1000.0 / f.QuadPart / (double)(t1 - t0);
+}

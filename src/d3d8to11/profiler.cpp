@@ -8,6 +8,10 @@
 // The report (d3d8to11_profile.txt) gives the time per module, the top functions (names from
 // PDBs next to the modules or from export tables, through dbghelp) and the CPU time of every
 // thread of the process in that window, with the module its start address belongs to.
+// Two more views: the hottest source lines of modules with line information (d3d8.dll with
+// its PDB), and, for samples in system modules (d3d11, the driver, ntdll, the CRT), the first
+// caller on the stack that belongs to the game or to us, found by scanning the stack for
+// return addresses that follow a call instruction.
 #include "common.h"
 #include <tlhelp32.h>
 #include <psapi.h>
@@ -18,7 +22,7 @@
 #include <vector>
 
 namespace {
-struct Module { uintptr_t base, end; std::string name; };
+struct Module { uintptr_t base, end; std::string name; bool system; };
 
 std::vector<Module> ListModules()
 {
@@ -34,7 +38,11 @@ std::vector<Module> ListModules()
         std::string name = path;
         const size_t slash = name.find_last_of("\\/");
         if (slash != std::string::npos) name = name.substr(slash + 1);
-        out.push_back({ (uintptr_t)mi.lpBaseOfDll, (uintptr_t)mi.lpBaseOfDll + mi.SizeOfImage, name });
+        std::string lower = path;
+        for (char& ch : lower) ch = (char)tolower((unsigned char)ch);
+        const bool system = lower.find("\\windows\\") != std::string::npos || lower.find("vcruntime") != std::string::npos ||
+            lower.find("msvcp") != std::string::npos || lower.find("ucrtbase") != std::string::npos;
+        out.push_back({ (uintptr_t)mi.lpBaseOfDll, (uintptr_t)mi.lpBaseOfDll + mi.SizeOfImage, name, system });
     }
     return out;
 }
@@ -50,6 +58,31 @@ typedef BOOL(WINAPI* SymInitialize_t)(HANDLE, PCSTR, BOOL);
 typedef BOOL(WINAPI* SymCleanup_t)(HANDLE);
 typedef DWORD(WINAPI* SymSetOptions_t)(DWORD);
 typedef BOOL(WINAPI* SymFromAddr_t)(HANDLE, DWORD64, PDWORD64, PSYMBOL_INFO);
+typedef BOOL(WINAPI* SymGetLine_t)(HANDLE, DWORD64, PDWORD, PIMAGEHLP_LINE64);
+
+const int kStackWords = 96;
+
+// Copies the top of a suspended thread's stack; false if a page is not readable.
+bool CopyStack(DWORD esp, DWORD* out)
+{
+    __try { memcpy(out, (const void*)(uintptr_t)esp, kStackWords * sizeof(DWORD)); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// True when the bytes before a return address are a call: E8 rel32, FF 15 [abs], FF /2 reg or memory.
+bool FollowsCall(uintptr_t r)
+{
+    __try {
+        const BYTE* p = (const BYTE*)r;
+        if (p[-5] == 0xE8) return true;
+        if (p[-6] == 0xFF && (p[-5] & 0x38) == 0x10) return true;  // FF /2 with disp32 (incl. FF 15)
+        if (p[-3] == 0xFF && (p[-2] & 0x38) == 0x10) return true;  // FF /2 disp8
+        if (p[-2] == 0xFF && (p[-1] & 0x38) == 0x10) return true;  // FF /2 register or [reg]
+        if (p[-7] == 0xFF && (p[-6] & 0x38) == 0x10) return true;  // FF /2 SIB + disp32
+        if (p[-4] == 0xFF && (p[-3] & 0x38) == 0x10) return true;  // FF /2 SIB + disp8
+        return false;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
 
 typedef NTSTATUS(NTAPI* NtQueryInformationThread_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
 
@@ -96,6 +129,9 @@ void Run(DWORD target, int seconds, std::string out)
     const std::vector<ThreadTimes> before = SnapshotThreads();
     std::vector<uintptr_t> samples;
     samples.reserve((size_t)seconds * 1100);
+    std::vector<DWORD> stacks;
+    stacks.reserve((size_t)seconds * 1100 * kStackWords);
+    DWORD stack[kStackWords];
     LARGE_INTEGER f, t0, now;
     QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&t0);
@@ -103,7 +139,11 @@ void Run(DWORD target, int seconds, std::string out)
         if (SuspendThread(thread) != (DWORD)-1) {
             CONTEXT c = {};
             c.ContextFlags = CONTEXT_CONTROL;
-            if (GetThreadContext(thread, &c)) samples.push_back((uintptr_t)c.Eip);
+            if (GetThreadContext(thread, &c)) {
+                samples.push_back((uintptr_t)c.Eip);
+                if (!CopyStack(c.Esp, stack)) memset(stack, 0, sizeof(stack));
+                stacks.insert(stacks.end(), stack, stack + kStackWords);
+            }
             ResumeThread(thread);
         }
         Sleep(1);
@@ -130,7 +170,7 @@ void Run(DWORD target, int seconds, std::string out)
     auto symDone = dbghelp ? (SymCleanup_t)GetProcAddress(dbghelp, "SymCleanup") : nullptr;
     bool syms = false;
     if (symInit && symFrom) {
-        if (symOpts) symOpts(0x00000002 /* UNDNAME */ | 0x00000004 /* DEFERRED_LOADS */);
+        if (symOpts) symOpts(0x00000002 /* UNDNAME */ | 0x00000004 /* DEFERRED_LOADS */ | 0x00000010 /* LOAD_LINES */);
         syms = symInit(GetCurrentProcess(), g_gameDir.c_str(), TRUE) != FALSE;
     }
     std::map<std::string, size_t> perFunction;
@@ -152,6 +192,62 @@ void Run(DWORD target, int seconds, std::string out)
         else if (m) { char b[32]; sprintf_s(b, "+0x%05x", (unsigned)((e.first - m->base) & ~0xFFFu)); name += b; }
         perFunction[name] += e.second;
     }
+    // Source lines (only modules whose symbols carry line numbers).
+    auto symLine = dbghelp ? (SymGetLine_t)GetProcAddress(dbghelp, "SymGetLineFromAddr64") : nullptr;
+    std::map<std::string, size_t> perLine;
+    if (syms && symLine) {
+        for (const auto& e : perAddress) {
+            IMAGEHLP_LINE64 line = { sizeof(line) };
+            DWORD disp = 0;
+            if (!symLine(GetCurrentProcess(), e.first, &disp, &line) || !line.FileName) continue;
+            std::string file = line.FileName;
+            const size_t slash = file.find_last_of("\\/");
+            if (slash != std::string::npos) file = file.substr(slash + 1);
+            perLine[file + ":" + std::to_string(line.LineNumber)] += e.second;
+        }
+    }
+    // Samples in system modules, by the first game/proxy caller on the stack.
+    std::map<std::string, size_t> perCaller;
+    auto symbolName = [&](uintptr_t a) {
+        const Module* m = Find(mods, a);
+        std::string s = m ? m->name : "(unknown)";
+        alignas(8) BYTE buffer[sizeof(SYMBOL_INFO) + 512] = {};
+        SYMBOL_INFO* si = (SYMBOL_INFO*)buffer;
+        si->SizeOfStruct = sizeof(SYMBOL_INFO);
+        si->MaxNameLen = 511;
+        DWORD64 disp = 0;
+        if (syms && symFrom(GetCurrentProcess(), a, &disp, si)) s += std::string("!") + si->Name;
+        return s;
+    };
+    std::map<uintptr_t, std::string> names;
+    auto cachedName = [&](uintptr_t a) -> const std::string& {
+        auto it = names.find(a);
+        if (it == names.end()) it = names.emplace(a, symbolName(a)).first;
+        return it->second;
+    };
+    size_t systemSamples = 0;
+    for (size_t i = 0; i < samples.size(); i++) {
+        const Module* m = Find(mods, samples[i]);
+        if (!m || !m->system) continue;
+        systemSamples++;
+        const DWORD* st = &stacks[i * kStackWords];
+        std::string caller = "(no caller found)";
+        for (int w = 0; w < kStackWords; w++) {
+            const Module* cm = Find(mods, st[w]);
+            if (!cm || cm->system || !FollowsCall(st[w])) continue;
+            caller = cachedName(st[w]);
+            IMAGEHLP_LINE64 line = { sizeof(line) };
+            DWORD lineDisp = 0;
+            if (symLine && symLine(GetCurrentProcess(), st[w] - 1, &lineDisp, &line) && line.FileName) {
+                std::string file = line.FileName;
+                const size_t slash = file.find_last_of("\\/");
+                if (slash != std::string::npos) file = file.substr(slash + 1);
+                caller += " (" + file + ":" + std::to_string(line.LineNumber) + ")";
+            }
+            break;
+        }
+        perCaller[caller + "  ->  " + m->name]++;
+    }
     if (syms && symDone) symDone(GetCurrentProcess());
 
     FILE* fp = nullptr;
@@ -172,6 +268,16 @@ void Run(DWORD target, int seconds, std::string out)
         if (d != maxDisp.end()) fprintf(fp, "  %6.2f%%  %s  (samples up to +0x%llx)\n", 100.0 * sorted[i].first / n, sorted[i].second.c_str(), d->second);
         else fprintf(fp, "  %6.2f%%  %s\n", 100.0 * sorted[i].first / n, sorted[i].second.c_str());
     }
+    sorted.clear();
+    for (const auto& e : perLine) sorted.push_back({ e.second, e.first });
+    std::sort(sorted.rbegin(), sorted.rend());
+    fprintf(fp, "\nHot source lines (modules with line information):\n");
+    for (size_t i = 0; i < sorted.size() && i < 60; i++) fprintf(fp, "  %6.2f%%  %s\n", 100.0 * sorted[i].first / n, sorted[i].second.c_str());
+    sorted.clear();
+    for (const auto& e : perCaller) sorted.push_back({ e.second, e.first });
+    std::sort(sorted.rbegin(), sorted.rend());
+    fprintf(fp, "\nSystem-module time (%.2f%% of samples) by first game/proxy caller:\n", 100.0 * systemSamples / n);
+    for (size_t i = 0; i < sorted.size() && i < 60; i++) fprintf(fp, "  %6.2f%%  %s\n", 100.0 * sorted[i].first / n, sorted[i].second.c_str());
     fprintf(fp, "\nCPU time per thread in the window (ms of CPU per second of wall time):\n");
     std::vector<std::pair<double, std::string>> threads;
     for (const ThreadTimes& a : after) {
