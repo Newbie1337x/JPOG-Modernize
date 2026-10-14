@@ -560,7 +560,9 @@ void Device::UpdateSun(bool shadowPass)
     }
     m_sun.flags[0] = m_worldDraw ? 1.0f : 0.0f;
     m_sun.flags[1] = shadowPass ? 1.0f : 0.0f;
-    m_sun.flags[2] = 0;
+    // Rigid pre-lit meshes (paths: vs_002, oD0 = vertex colour * c4) carry the terrain's baked
+    // light; they are relit with the light colours of the last terrain draw.
+    m_sun.flags[2] = m_worldKind == 3 && m_terrainLightValid ? 1.0f : 0.0f;
     m_sun.flags[3] = (float)m_worldKind;
     m_sun.control[0] = g_config.replaceLighting || ActiveMaterial() ? 1.0f : 0.0f;
     m_sun.control[1] = (float)g_config.lightingDebug;
@@ -571,7 +573,10 @@ void Device::UpdateSun(bool shadowPass)
     for (int k = 0; k < 3; k++) {
         float amb = g_config.sunAmbient * 0.75f, sun = g_config.sunDirect * (k == 0 ? 1.0f : k == 1 ? 0.95f : 0.84f);
         if (m_worldKind == 1) { amb = m_vsConst[90][k] * m_vsConst[88][k]; sun = m_vsConst[91][k] * m_vsConst[88][k]; }
-        else if (m_worldKind == 2) { amb = m_vsConst[6][k]; sun = m_vsConst[7][k]; }
+        else if (m_worldKind == 2) {
+            amb = m_vsConst[6][k]; sun = m_vsConst[7][k];
+            if (m_worldDraw && !shadowPass) { m_terrainLight[0][k] = amb; m_terrainLight[1][k] = sun; m_terrainLightValid = true; }
+        } else if (m_worldKind == 3 && m_terrainLightValid) { amb = m_terrainLight[0][k]; sun = m_terrainLight[1][k]; }
         m_sun.gameAmbient[k] = amb; m_sun.gameSun[k] = sun;
     }
     m_sun.gameAmbient[3] = g_config.relightTonemap ? 1.0f : 0.0f;

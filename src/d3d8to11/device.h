@@ -259,6 +259,8 @@ private:
     bool PrepareMaterial();
     void PrepareRelief();           // relief.cpp: decides v.relief and binds cbuffer b4
     bool m_reliefActive = false;
+    float m_terrainLight[2][3] = {};   // last terrain draw's ambient (c6) and sun (c7): relights paths
+    bool m_terrainLightValid = false;
     ComPtr<ID3D11Buffer> m_reliefCB;
     UINT m_reliefDraws = 0, m_reliefDrawsShown = 0;
     // PN-triangle tessellation of eligible skinned draws (tessellation.cpp).

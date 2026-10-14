@@ -9,7 +9,7 @@ constants, instead of invented colours:
 | --- | --- | --- |
 | 1 skinned (dinosaurs, trees, buildings, props), vs_000/vs_001 | `oD0 = (max(N . -c89, 0) * c91 + c90) * c88` | ambient `c90*c88`, sun `c91*c88`, our N and sun direction |
 | 2 terrain, vs_005 | `r9 = v0.w * c7 + c6` (v0.w: baked per-vertex sun factor) | ambient `c6`, sun `c7`, factor `v0.w` (VS passes it in t7.x) |
-| 3 rigid, vs_002 | `oD0 = vertex colour * c4` (pre-lit) | unchanged |
+| 3 rigid (paths), vs_002 | `oD0 = vertex colour * c4` (pre-lit with the terrain's light) | the last terrain draw's `c6`/`c7`; sun factor recovered from the vertex colour's brightness, the remainder kept as tint |
 | 4 grass, vs_010 | terrain colour map in t1 | unchanged |
 
 Lighting is evaluated in linear light (gamma 2.2): ambient `A^2.2`, sun `sat(A+S)^2.2 - sat(A)^2.2`

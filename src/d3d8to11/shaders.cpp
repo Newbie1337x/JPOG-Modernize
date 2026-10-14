@@ -523,14 +523,25 @@ std::string SunPixelCode() {
         "    float3 c = k == 1 ? float3(1, 0.2, 0.2) : k == 2 ? float3(0.2, 1, 0.2) : k == 3 ? float3(0.2, 0.4, 1) : k == 4 ? float3(1, 1, 0.2) : k == 0 ? float3(1, 0.3, 1) : float3(0.5, 0.5, 0.5);\n"
         "    return float4(lerp(color.rgb, c, 0.7), color.a); }\n"
         "  if (sunFlags.x < 0.5 || sunFlags.y > 0.5 || sunControl.x < 0.5) return color;\n"
-        "  if (sunFlags.w != 1 && sunFlags.w != 2) return color;\n" // rigid and grass keep their baked light
+        "  bool rigid = sunFlags.w == 3 && sunFlags.z > 0.5;\n" // paths, relit with the terrain's light
+        "  if (sunFlags.w != 1 && sunFlags.w != 2 && !rigid) return color;\n" // grass keeps its baked light
         "  if (sunControl.y == 1) return color;\n"
         "  float3 rawN = cross(ddy(i.world), ddx(i.world));\n"
         "  if (sunFlags.w == 1 && dot(i.normal,i.normal) > 1e-8) rawN = i.normal;\n"
         "  float nlen = dot(rawN, rawN); if (nlen < 1e-12) return color;\n"
         "  float3 N = rawN * rsqrt(nlen);\n"
-        "  if (sunFlags.w == 2 && N.y > 0) N = -N;\n" // terrain normals point to -Y
+        "  if (sunFlags.w != 1 && N.y > 0) N = -N;\n" // terrain and paths face up (-Y)
         "  if (sunControl.y == 2) return float4(N*0.5+0.5,color.a);\n"
+        // Paths: their vertex colour is the game's light saturate(A + S * f) times a tint. Recover
+        // the sun factor f from its brightness and keep the rest as tint.
+        "  if (rigid) {\n"
+        "    const float3 luma = float3(0.299, 0.587, 0.114);\n"
+        "    float3 A = saturate(gameAmbient.rgb), S = gameSun.rgb, baked = saturate(i.d0.rgb);\n"
+        "    float f = saturate((dot(baked, luma) - dot(A, luma)) / max(dot(S, luma), 1e-3));\n"
+        "    float3 tint = clamp(baked / max(saturate(A + S * f), 1e-3), 0, 2);\n"
+        "    float3 light = GameAmbient(N) + GameSun() * f;\n"
+        "    return float4(LinearToOutput(ToLinear(color.rgb * tint) * light), color.a);\n"
+        "  }\n"
         // Terrain: the game's per-vertex sun factor (v0.w, passed in t7.x) keeps its smooth slopes.
         "  float ndl = sunFlags.w == 2 ? saturate(i.t7.x) : saturate(dot(N, sunDirection.xyz));\n"
         "  float3 light = GameAmbient(N) + GameSun() * ndl;\n"
@@ -929,7 +940,7 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
                      AsFloat(in.p[2]), AsFloat(in.p[3]), AsFloat(in.p[4]));
     s += "  float4 v0 = i.d0, v1 = i.d1;\n";
     s += v.material ? "  bool relight = sunControl.x > 0.5 && sunFlags.x > 0.5 && sunFlags.y < 0.5;\n"
-                    : "  bool relight = sunControl.x > 0.5 && sunFlags.x > 0.5 && sunFlags.y < 0.5 && (sunFlags.w == 1 || sunFlags.w == 2);\n";
+                    : "  bool relight = sunControl.x > 0.5 && sunFlags.x > 0.5 && sunFlags.y < 0.5 && (sunFlags.w == 1 || sunFlags.w == 2 || (sunFlags.w == 3 && sunFlags.z > 0.5));\n";
     s += "  if (relight) { v0.rgb = 1; v1.rgb = 0; }\n";
     s += "  float4 r0 = 0, r1 = 0, t0 = 0, t1 = 0, t2 = 0, t3 = 0;\n";
     s += "  float m0 = 0, m1 = 0;\n";
