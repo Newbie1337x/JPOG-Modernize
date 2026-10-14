@@ -134,6 +134,7 @@ void Run(DWORD target, int seconds, std::string out)
         syms = symInit(GetCurrentProcess(), g_gameDir.c_str(), TRUE) != FALSE;
     }
     std::map<std::string, size_t> perFunction;
+    std::map<std::string, DWORD64> maxDisp;
     for (const auto& e : perAddress) {
         const Module* m = Find(mods, e.first);
         std::string name = m ? m->name : "(unknown)";
@@ -142,7 +143,12 @@ void Run(DWORD target, int seconds, std::string out)
         si->SizeOfStruct = sizeof(SYMBOL_INFO);
         si->MaxNameLen = 511;
         DWORD64 disp = 0;
-        if (syms && symFrom(GetCurrentProcess(), e.first, &disp, si)) name += std::string("!") + si->Name;
+        if (syms && symFrom(GetCurrentProcess(), e.first, &disp, si)) {
+            char at[48];
+            sprintf_s(at, " [+0x%x]", m ? (unsigned)(si->Address - m->base) : 0u);
+            name += std::string("!") + si->Name + at;
+            if (disp > maxDisp[name]) maxDisp[name] = disp;
+        }
         else if (m) { char b[32]; sprintf_s(b, "+0x%05x", (unsigned)((e.first - m->base) & ~0xFFFu)); name += b; }
         perFunction[name] += e.second;
     }
@@ -161,7 +167,11 @@ void Run(DWORD target, int seconds, std::string out)
     for (const auto& e : perFunction) sorted.push_back({ e.second, e.first });
     std::sort(sorted.rbegin(), sorted.rend());
     fprintf(fp, "\nTop functions (render thread):\n");
-    for (size_t i = 0; i < sorted.size() && i < 80; i++) fprintf(fp, "  %6.2f%%  %s\n", 100.0 * sorted[i].first / n, sorted[i].second.c_str());
+    for (size_t i = 0; i < sorted.size() && i < 80; i++) {
+        auto d = maxDisp.find(sorted[i].second);
+        if (d != maxDisp.end()) fprintf(fp, "  %6.2f%%  %s  (samples up to +0x%llx)\n", 100.0 * sorted[i].first / n, sorted[i].second.c_str(), d->second);
+        else fprintf(fp, "  %6.2f%%  %s\n", 100.0 * sorted[i].first / n, sorted[i].second.c_str());
+    }
     fprintf(fp, "\nCPU time per thread in the window (ms of CPU per second of wall time):\n");
     std::vector<std::pair<double, std::string>> threads;
     for (const ThreadTimes& a : after) {

@@ -21,6 +21,7 @@
 #include <vector>
 #include <unordered_map>
 #include <stdarg.h>
+#include <xmmintrin.h>
 #include "d3d8_profiler.h"
 #include "camera_math.h"
 #include "camera_settings.h"
@@ -36,6 +37,7 @@ static bool  g_freeKeyboard = true;
 static float g_remX = 0.0f, g_remY = 0.0f;
 static HWND g_gameWnd = nullptr;
 static bool g_modernCamera = true;
+static bool g_gameFastPaths = true;
 static float g_cameraResponse = 0.12f;
 static float g_dragPanSensitivity = 0.0015f;
 static float g_dragRotateSensitivity = 0.0018f;
@@ -1543,6 +1545,7 @@ static void LoadConfig(HMODULE self)
     if (g_minimapBottom < 32 || g_minimapBottom > 160) g_minimapBottom = 56;
     g_texModsEnabled = GetPrivateProfileIntA("Mods", "TextureReplacement", 1, path) != 0;
     g_profileD3D8 = GetPrivateProfileIntA("Debug", "ProfileD3D8", 0, path) != 0;
+    g_gameFastPaths = GetPrivateProfileIntA("Performance", "GameFastPaths", 1, path) != 0;
     g_borderless = GetPrivateProfileIntA("Display", "Borderless", 1, path) != 0;
     g_forceWindowed = g_borderless; // borderless = forced windowed + no borders
     g_altF4 = GetPrivateProfileIntA("Display", "AltF4Quit", 1, path) != 0;
@@ -1894,6 +1897,61 @@ static void ApplyPatches()
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Game-side fast paths: same results as the game's own code, less CPU on the render thread.
+
+// ARenderer::RenderTerrain sorts the visible terrain sections by distance with a binary search
+// and an insertion into an array of {section, distance} pairs; the insertion (SimJP 0x479860,
+// thiscall (index, count)) shifts the tail one 8-byte element at a time, reloading the array
+// pointer for every element. With ~2000 sections that is the hottest function of the exe.
+struct SectionArray { int grow, count, capacity; unsigned __int64* data; };
+typedef void(__fastcall* InsertGap_t)(SectionArray*, void*, int, int);
+static InsertGap_t g_origInsertGap;
+
+static void __fastcall InsertGap_Hook(SectionArray* a, void*, int index, int n)
+{
+    if (n < 0 || a->count + n > a->capacity) { g_origInsertGap(a, nullptr, index, n); return; } // growth: game's allocator
+    if (index < a->count) memmove(a->data + index + n, a->data + index, (size_t)(a->count - index) * sizeof(*a->data));
+    a->count += n;
+}
+
+// Toshi::TMatrix44::Multiply(const TMatrix44& a, const TMatrix44& b) (TKernelInterface +0x1bd90):
+// this.row[r] = b[r].x * a.row0 + b[r].y * a.row1 + b[r].z * a.row2 + b[r].w * a.row3, in x87.
+// The original writes as it reads, so a result that overlaps a or b keeps the original code.
+typedef void(__fastcall* MatMul_t)(float*, void*, const float*, const float*);
+static MatMul_t g_origMatMul;
+
+static void __fastcall MatMul_Hook(float* r, void*, const float* a, const float* b)
+{
+    if (r == a || r == b) { g_origMatMul(r, nullptr, a, b); return; }
+    const __m128 a0 = _mm_loadu_ps(a), a1 = _mm_loadu_ps(a + 4), a2 = _mm_loadu_ps(a + 8), a3 = _mm_loadu_ps(a + 12);
+    for (int i = 0; i < 16; i += 4) {
+        __m128 v = _mm_mul_ps(a0, _mm_set1_ps(b[i]));
+        v = _mm_add_ps(v, _mm_mul_ps(a1, _mm_set1_ps(b[i + 1])));
+        v = _mm_add_ps(v, _mm_mul_ps(a2, _mm_set1_ps(b[i + 2])));
+        v = _mm_add_ps(v, _mm_mul_ps(a3, _mm_set1_ps(b[i + 3])));
+        _mm_storeu_ps(r + i, v);
+    }
+}
+
+static void InstallGameFastPaths()
+{
+    if (!g_gameFastPaths) return;
+    BYTE* gap = (BYTE*)0x479860;
+    static const unsigned char gapSig[] = { 0x57, 0x56, 0x55, 0x53, 0x83, 0xEC, 0x1C, 0x8B, 0xF9, 0x8B, 0x74, 0x24, 0x30 };
+    if (BytesMatch(gap, gapSig, sizeof(gapSig)))
+        g_origInsertGap = (InsertGap_t)MakeTrampoline(gap, 7, (void*)&InsertGap_Hook);
+    HMODULE kernel = GetModuleHandleA("TKernelInterface.dll");
+    BYTE* mul = kernel ? (BYTE*)kernel + 0x1bd90 : nullptr;
+    static const unsigned char mulSig[] = { 0x53, 0x8B, 0xD9, 0x8B, 0x4C, 0x24, 0x08, 0x8B, 0x54, 0x24, 0x0C, 0x33, 0xC0, 0xEB, 0x05, 0x90, 0xD9, 0x5C, 0x03 };
+    if (mul && BytesMatch(mul, mulSig, sizeof(mulSig)))
+        g_origMatMul = (MatMul_t)MakeTrampoline(mul, 7, (void*)&MatMul_Hook);
+    char line[96];
+    sprintf_s(line, "JPOG: game fast paths: terrain sort %s, matrix multiply %s\n",
+        g_origInsertGap ? "on" : "off", g_origMatMul ? "on" : "off");
+    OutputDebugStringA(line);
+}
+
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH) {
@@ -1902,6 +1960,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
         ApplyPatches();
         InstallD3DHooks();
         InstallTextureMods();
+        InstallGameFastPaths();
         if (g_borderless) {
             HANDLE t = CreateThread(nullptr, 0, BorderlessThread, nullptr, 0, nullptr);
             if (t) CloseHandle(t);
