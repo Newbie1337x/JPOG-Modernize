@@ -236,8 +236,11 @@ extern "C" __declspec(dllexport) BOOL WINAPI JPOGCamera_MouseInput(LONG dx, LONG
     return TRUE;
 }
 
+static void InstallSkinFastPath();
+
 static bool __fastcall ScrollingUpdate_Hook(BYTE* state, void*, float dt)
 {
+    InstallSkinFastPath();
     BYTE* camera = ActiveWorldCamera();
     BYTE* inputMap = g_cameraInputMap ? *g_cameraInputMap : nullptr;
     const bool allowed = g_modernCamera && camera && inputMap &&
@@ -2000,6 +2003,240 @@ static void __fastcall MatMul_Hook(float* r, void*, const float* a, const float*
     }
 }
 
+// Toshi::TAABox::ComparePlane(const TPlane&) (TKernelInterface +0x8210): box = {centre, half
+// extents}, plane = {normal, d}. d = centre.n - plane.d, r = extents.|n|: -1 when d + r < 0
+// (outside), 1 when d - r > 0 (inside), else 0. The original goes through three calls (Abs and
+// two DotProducts) in x87; the distances are kept in double like the original's spill.
+static int __fastcall ComparePlane_Hook(const float* box, void*, const float* plane)
+{
+    const double d = (double)box[0] * plane[0] + (double)box[1] * plane[1] + (double)box[2] * plane[2] - plane[3];
+    const double r = (double)box[3] * fabsf(plane[0]) + (double)box[4] * fabsf(plane[1]) + (double)box[5] * fabsf(plane[2]);
+    if (d + r < 0.0) return -1;
+    return d - r > 0.0 ? 1 : 0;
+}
+
+// AWallManager::CullQuadTree(x, z, halfX, halfZ, planes, mask) (SimJP 0x5ef870): fences and walls
+// by 32x32 terrain cells. The same steps as the original, which spends most of its time in x87
+// float-to-int conversions that reload the FPU control word; the game's own helpers do the work.
+namespace wall {
+typedef bool(__fastcall* CellCached_t)(BYTE* cell, void*, int x, int z);              // 0x5f1ff0
+typedef void(__fastcall* CellSetKey_t)(BYTE* cell, void*, int x, int z);              // 0x5f1fd0
+typedef void(__fastcall* FillCache_t)(BYTE* self, void*, BYTE* cell, int x0, int z0, int x1, int z1); // 0x5ef2b0
+typedef void(__fastcall* AddCell_t)(BYTE* cell, void*, BYTE* list, int planes, unsigned mask); // 0x5f1140
+typedef BYTE*(__fastcall* GetRootTask_t)(void* app, void*);                           // 0x484db0
+typedef BYTE*(__fastcall* GetContext_t)(BYTE* renderer, void*);
+typedef float(__fastcall* GetHeight_t)(BYTE* heightField, void*, int x, int z);
+static const float* const kLeaf = (const float*)0xd315fc;
+static const float* const kHalf = (const float*)0xd31600;
+static const float* const kGrow = (const float*)0xd31608;
+static const float* const kLift = (const float*)0xd3160c;
+static const float* const kNoHeight = (const float*)0xd31610;
+static BYTE** const kSimJPTerrain = (BYTE**)0x85006c;
+static GetHeight_t getHeight;
+static GetContext_t getContext;
+
+// The original takes a counted reference to the renderer around GetCurrentRenderContext.
+static BYTE* RenderContext()
+{
+    BYTE* renderer = *(BYTE**)(((GetRootTask_t)0x484db0)((void*)0x8b8580, nullptr) + 0xd0);
+    if (renderer) {
+        ++*(int*)(renderer + 4);
+        if (--*(int*)(renderer + 4) == 0) ((void(__fastcall*)(BYTE*, void*))(*(void***)renderer)[1])(renderer, nullptr);
+    }
+    return getContext(renderer, nullptr);
+}
+
+static void AddCell(BYTE* self, int x, int z, unsigned mask)
+{
+    const int index = (x & 15) + (z & 15) * 16;
+    BYTE* cell = *(BYTE**)(self + 0xf8) + index * 0x30;
+    if (cell[0x20]) return;
+    if (!((CellCached_t)0x5f1ff0)(cell, nullptr, x, z)) {
+        ((CellSetKey_t)0x5f1fd0)(cell, nullptr, x, z);
+        ((FillCache_t)0x5ef2b0)(self, nullptr, cell, x * 32, z * 32, x * 32 + 32, z * 32 + 32);
+    }
+    ((AddCell_t)0x5f1140)(cell, nullptr, self + 0x538, 6, mask);
+    cell[0x20] = 1;
+    const int n = (*(int*)(self + 0x500))++;
+    *(short*)(self + self[0x4f8] * 0x1fe + 0xfc + n * 2) = (short)index;
+}
+}
+
+static void __fastcall CullQuadTree_Hook(BYTE* self, void*, float x, float z, float hx, float hz, const float* planes, unsigned mask)
+{
+    using namespace wall;
+    const bool leafX = hx <= *kLeaf, leafZ = hz <= *kLeaf;
+    BYTE* field = *(BYTE**)(*kSimJPTerrain + 0x28);
+    float box[6] = { x, *kNoHeight, z, hx + *kGrow, 12.0f, hz + *kGrow };
+    const int ix = _mm_cvtt_ss2si(_mm_set_ss(x)), iz = _mm_cvtt_ss2si(_mm_set_ss(z));
+    if (ix >= 0 && ix < *(int*)(field + 0x38) && iz >= 0 && iz < *(int*)(field + 0x3c))
+        box[1] = -getHeight(field, nullptr, ix, iz);
+    box[1] = box[1] - *kLift;
+    const float* plane = planes;
+    for (unsigned bit = 1; bit < 64; bit <<= 1, plane += 4) {
+        if (!(mask & bit)) continue;
+        const int side = ComparePlane_Hook(box, nullptr, plane);
+        if (side == 1) mask ^= bit;
+        else if (side == -1) return;
+    }
+    if (!mask) { // wholly inside: every cell under the box
+        BYTE* context = RenderContext();
+        int x0 = _mm_cvtt_ss2si(_mm_set_ss(x - hx)), z0 = _mm_cvtt_ss2si(_mm_set_ss(z - hz));
+        int x1 = _mm_cvtt_ss2si(_mm_set_ss(x + hx)), z1 = _mm_cvtt_ss2si(_mm_set_ss(z + hz));
+        if (x1 <= 0 || z1 <= 0) return;
+        *(unsigned*)(context + 0xc) = 0;
+        x0 = max(x0, 0);
+        z0 = max(z0, 0);
+        field = *(BYTE**)(*kSimJPTerrain + 0x28);
+        if (x1 >= *(int*)(field + 0x38)) x1 = *(int*)(field + 0x38) - 1;
+        if (z1 >= *(int*)(field + 0x3c)) z1 = *(int*)(field + 0x3c) - 1;
+        x0 >>= 5; z0 >>= 5; x1 >>= 5; z1 >>= 5;
+        for (int cz = z0; cz < z1; cz++)
+            for (int cx = x0; cx < x1; cx++) AddCell(self, cx, cz, 0);
+        return;
+    }
+    if (!leafX || !leafZ) {
+        const float qx = hx * *kHalf, qz = hz * *kHalf;
+        CullQuadTree_Hook(self, nullptr, x - qx, z - qz, qx, qz, planes, mask);
+        CullQuadTree_Hook(self, nullptr, x - qx, z + qz, qx, qz, planes, mask);
+        CullQuadTree_Hook(self, nullptr, x + qx, z - qz, qx, qz, planes, mask);
+        CullQuadTree_Hook(self, nullptr, x + qx, z + qz, qx, qz, planes, mask);
+        return;
+    }
+    // Leaf: the cell under the box corner, x87 extended sum truncated through 64 bits.
+    const unsigned cx = (unsigned)(long long)((double)x - hx), cz = (unsigned)(long long)((double)z - hz);
+    if (cx >= *(unsigned*)(field + 0x38) || cz >= *(unsigned*)(field + 0x3c)) return;
+    BYTE* context = RenderContext();
+    const int index = ((cx >> 5) & 15) + ((cz >> 5) & 15) * 16;
+    if ((*(BYTE**)(self + 0xf8))[index * 0x30 + 0x20]) return;
+    *(unsigned*)(context + 0xc) = mask;
+    AddCell(self, cx >> 5, cz >> 5, mask);
+}
+
+// Toshi::TSkinShaderHAL::Render (TSkinShaderD3D +0x2570), vertex-shader path: for every submesh
+// the bone matrices go up one at a time, each transposed in x87 and sent with its own
+// SetVertexShaderConstant(5 + 3 * bone, m, 3) and TD3DAssert. The loop (+0x2fbc .. +0x3036) is
+// replaced by one SSE transpose pass and one call. On entry EBX = device, EDX = submesh (bone
+// count at +0x24, palette indices at +0x28), [EBP-0xe0] = bone palette (matrices at
+// +0x1c + index * 0x5c); the code at +0x303e expects ECX and ESI unchanged.
+static const DWORD kSkinLoopRva = 0x2fbc, kSkinResumeRva = 0x303e;
+static void* g_skinResume;
+static volatile LONG g_skinPatchState; // 0 not yet, 1 done or given up
+
+static void __cdecl SkinBones(void** device, const BYTE* submesh, const BYTE* palette, DWORD count)
+{
+    typedef HRESULT(__stdcall* SetVSConst_t)(void*, DWORD, const void*, DWORD);
+    const SetVSConst_t setConst = (SetVSConst_t)(*(void***)device)[0x13c / 4];
+    alignas(16) float rows[80 * 12];
+    DWORD reg = 5;
+    for (DWORD first = 0; first < count; first += 80) {
+        const DWORD n = min(count - first, 80u);
+        for (DWORD j = 0; j < n; j++) {
+            const DWORD index = *(const DWORD*)(submesh + 0x28 + (first + j) * 4);
+            const float* m = (const float*)(palette + 0x1c + index * 0x5c);
+            __m128 r0 = _mm_loadu_ps(m), r1 = _mm_loadu_ps(m + 4), r2 = _mm_loadu_ps(m + 8), r3 = _mm_loadu_ps(m + 12);
+            _MM_TRANSPOSE4_PS(r0, r1, r2, r3);
+            _mm_store_ps(rows + j * 12, r0);
+            _mm_store_ps(rows + j * 12 + 4, r1);
+            _mm_store_ps(rows + j * 12 + 8, r2);
+        }
+        setConst(device, reg, rows, n * 3);
+        reg += n * 3;
+    }
+}
+
+static __declspec(naked) void SkinBones_Stub()
+{
+    __asm {
+        pushad
+        push edi                    // count
+        push dword ptr [ebp - 0xe0] // palette
+        push edx                    // submesh
+        push ebx                    // device
+        call SkinBones
+        add esp, 16
+        popad
+        jmp dword ptr [g_skinResume]
+    }
+}
+
+// Toshi::TSkinShaderHAL::SetTerrainScatteringConstantsSkin(device, eye, object) (TSkinShaderD3D
+// +0x48d0), once per skinned draw: aerial-perspective constants c92..c94 from the render context's
+// sun and scattering terms and the eye-object distance. The original is x87 with a dozen calls
+// into TKernelInterface; this is the same arithmetic in float. Its constants: 0.5 (+0xf264),
+// 0 (+0xf268), 1 (+0xf270); 1/ln 2 is cached at +0xdfa8 by its first call (guard bit at +0xdfa4).
+typedef void(__fastcall* Scatter_t)(BYTE* self, void*, void** device, const float* eye, const float* object);
+static Scatter_t g_origScatter;
+static const DWORD* g_scatterGuard;
+static const float* g_scatterInvLn2;
+
+static void __fastcall Scatter_Hook(BYTE* self, void*, void** device, const float* eye, const float* object)
+{
+    if (!(*g_scatterGuard & 1)) { g_origScatter(self, nullptr, device, eye, object); return; }
+    typedef HRESULT(__stdcall* SetVSConst_t)(void*, DWORD, const void*, DWORD);
+    const SetVSConst_t setConst = (SetVSConst_t)(*(void***)device)[0x13c / 4];
+    const BYTE* ctx = wall::getContext(*(BYTE**)(self + 0x18), nullptr);
+    auto at = [ctx](int offset) { return *(const float*)(ctx + offset); };
+    float vx = object[0] - eye[0], vy = object[1] - eye[1], vz = object[2] - eye[2];
+    const float distance = sqrtf(vx * vx + vy * vy + vz * vz);
+    const float inv = 1.0f / distance;
+    vx *= inv; vy *= inv; vz *= inv;
+    const float cosine = vx * at(0x300) + vy * at(0x304) + vz * at(0x308);
+    const float c = cosine > 0.0f ? cosine : 0.0f;
+    const float rayleigh = c * c + 1.0f;
+    const float k = distance * *g_scatterInvLn2;
+    const float b0 = at(0x3d4) * k, b1 = at(0x3d8) * k, b2 = at(0x3dc) * k, b3 = at(0x3e0) * k;
+    const float e0 = 1.0f / (b0 * b0 * 0.5f + 1.0f + b0);
+    const float e1 = 1.0f / (b1 * b1 * 0.5f + 1.0f + b1);
+    const float e2 = 1.0f / (b2 * b2 * 0.5f + 1.0f + b2);
+    const float f = 1.0f / sqrtf(c * at(0x3bc) + at(0x3b8));
+    const float mie = f * f * f * at(0x3b4);
+    const float g = at(0x390), sun = at(0x2fc);
+    // TVector4::Multiply(float) scales x, y and z only.
+    const float inscatter[4] = {
+        at(0x3c4) * (1.0f - e0) * (at(0x3f4) * mie + at(0x3e4) * rayleigh) * g * at(0x33c) * sun,
+        at(0x3c8) * (1.0f - e1) * (at(0x3f8) * mie + at(0x3e8) * rayleigh) * g * at(0x340) * sun,
+        g * at(0x3cc) * (1.0f - e2) * (at(0x3fc) * mie + at(0x3ec) * rayleigh) * at(0x344) * sun,
+        at(0x3d0) * (mie * at(0x400) + rayleigh * at(0x3f0)) * (1.0f - b3) * at(0x390) * sun,
+    };
+    setConst(device, 0x5d, inscatter, 1);
+    const float nearFar = at(0x380) * at(0x1d0);
+    const float depth[4] = { nearFar, 1.0f / (at(0x384) * at(0x1d0) - nearFar), 1.0f, 0.0f };
+    setConst(device, 0x5c, depth, 1);
+    const float phase[4] = { rayleigh, distance, mie, at(0x300) };
+    setConst(device, 0x5e, phase, 1);
+}
+
+// TSkinShaderD3D.dll is loaded with the renderer, after this plugin; the patch is applied from the
+// game thread (park camera update), where the skin shader's code cannot be running.
+static void InstallSkinFastPath()
+{
+    if (g_skinPatchState) return;
+    g_skinPatchState = 1;
+    if (!g_gameFastPaths) return;
+    HMODULE skin = GetModuleHandleA("TSkinShaderD3D.dll");
+    if (!skin) { g_skinPatchState = 0; return; }
+    BYTE* loop = (BYTE*)skin + kSkinLoopRva;
+    static const unsigned char sig[] = { 0x8D, 0x3C, 0x40, 0x83, 0xC7, 0x05, 0x89, 0x95, 0xF8, 0xFE, 0xFF, 0xFF,
+        0x89, 0x8D, 0x00, 0xFF, 0xFF, 0xFF, 0x89, 0xB5, 0x04, 0xFF, 0xFF, 0xFF, 0x8B, 0xF0 };
+    static const unsigned char resumeSig[] = { 0x8B, 0x7C, 0x0E, 0x08 };
+    if (!BytesMatch(loop, sig, sizeof(sig)) || !BytesMatch((BYTE*)skin + kSkinResumeRva, resumeSig, sizeof(resumeSig))) {
+        OutputDebugStringA("JPOG: skin bone upload: unknown TSkinShaderD3D.dll, left alone\n");
+        return;
+    }
+    g_skinResume = (BYTE*)skin + kSkinResumeRva;
+    WriteRel(loop, (void*)&SkinBones_Stub, 0xE9, 5);
+    BYTE* scatter = (BYTE*)skin + 0x48d0;
+    static const unsigned char scatterSig[] = { 0x57, 0x56, 0x55, 0x53, 0x81, 0xEC, 0x94, 0x00, 0x00, 0x00, 0x8B, 0xB4, 0x24, 0xA8, 0x00, 0x00, 0x00 };
+    if (wall::getContext && BytesMatch(scatter, scatterSig, sizeof(scatterSig))) {
+        g_scatterGuard = (const DWORD*)((BYTE*)skin + 0xdfa4);
+        g_scatterInvLn2 = (const float*)((BYTE*)skin + 0xdfa8);
+        g_origScatter = (Scatter_t)MakeTrampoline(scatter, 10, (void*)&Scatter_Hook);
+    }
+    OutputDebugStringA(g_origScatter ? "JPOG: game fast paths: skin bone upload and scattering constants on\n"
+                                     : "JPOG: game fast paths: skin bone upload on\n");
+}
+
 static void InstallGameFastPaths()
 {
     if (!g_gameFastPaths) return;
@@ -2012,9 +2249,19 @@ static void InstallGameFastPaths()
     static const unsigned char mulSig[] = { 0x53, 0x8B, 0xD9, 0x8B, 0x4C, 0x24, 0x08, 0x8B, 0x54, 0x24, 0x0C, 0x33, 0xC0, 0xEB, 0x05, 0x90, 0xD9, 0x5C, 0x03 };
     if (mul && BytesMatch(mul, mulSig, sizeof(mulSig)))
         g_origMatMul = (MatMul_t)MakeTrampoline(mul, 7, (void*)&MatMul_Hook);
-    char line[96];
-    sprintf_s(line, "JPOG: game fast paths: terrain sort %s, matrix multiply %s\n",
-        g_origInsertGap ? "on" : "off", g_origMatMul ? "on" : "off");
+    BYTE* compare = kernel ? (BYTE*)kernel + 0x8210 : nullptr;
+    static const unsigned char compareSig[] = { 0x57, 0x53, 0x83, 0xEC, 0x1C, 0x8B, 0xF9, 0x8B, 0x5C, 0x24, 0x28, 0x8D, 0x0C, 0x24, 0x53, 0xE8 };
+    const bool comparePlane = compare && BytesMatch(compare, compareSig, sizeof(compareSig));
+    if (comparePlane) WriteRel(compare, (void*)&ComparePlane_Hook, 0xE9, 5);
+    BYTE* cull = (BYTE*)0x5ef870;
+    static const unsigned char cullSig[] = { 0x57, 0x56, 0x55, 0x53, 0x81, 0xEC, 0xB4, 0x00, 0x00, 0x00, 0x8B, 0xE9, 0xD9, 0x84, 0x24, 0xC8, 0x00, 0x00, 0x00 };
+    wall::getHeight = *(wall::GetHeight_t*)0x73a02c;
+    wall::getContext = *(wall::GetContext_t*)0x739f58;
+    const bool wallCull = wall::getHeight && wall::getContext && BytesMatch(cull, cullSig, sizeof(cullSig));
+    if (wallCull) WriteRel(cull, (void*)&CullQuadTree_Hook, 0xE9, 5);
+    char line[160];
+    sprintf_s(line, "JPOG: game fast paths: terrain sort %s, matrix multiply %s, plane test %s, wall culling %s\n",
+        g_origInsertGap ? "on" : "off", g_origMatMul ? "on" : "off", comparePlane ? "on" : "off", wallCull ? "on" : "off");
     OutputDebugStringA(line);
 }
 
