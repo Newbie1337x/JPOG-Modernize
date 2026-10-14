@@ -83,15 +83,19 @@ private:
     static DWORD WINAPI ThreadMain(void* self);
     void Run();
 
+    // Fields written by one thread and read by the other sit on their own cache lines: the
+    // worker's per-command m_consumed store must not evict the producer's private counters.
     BYTE* m_ring = nullptr;
-    volatile uint32_t m_written = 0, m_consumed = 0; // byte counters, wrap around (only differences matter)
     uint32_t m_reserved = 0;                         // producer-only: written + reserved bytes
     uint32_t m_limit = 0;                            // producer-only: last seen m_consumed + kBytes
-    volatile LONG m_workerSleeping = 0, m_producerWaiting = 0, m_stop = 0;
-    volatile LONG m_framesInFlight = 0;
     HANDLE m_workEvent = nullptr, m_spaceEvent = nullptr, m_syncEvent = nullptr, m_frameEvent = nullptr;
     HANDLE m_thread = nullptr;
     DWORD m_workerId = 0;
+    alignas(64) volatile uint32_t m_written = 0;     // byte counters, wrap around (only differences matter)
+    alignas(64) volatile uint32_t m_consumed = 0;
+    alignas(64) volatile LONG m_workerSleeping = 0;
+    alignas(64) volatile LONG m_producerWaiting = 0;
+    alignas(64) volatile LONG m_stop = 0, m_framesInFlight = 0;
     bool m_running = false;
 };
 

@@ -8,6 +8,7 @@
 // alive (AddRef) until it runs.
 #include "csmt.h"
 #include "device.h"
+#include <xmmintrin.h>
 
 namespace {
 
@@ -402,8 +403,19 @@ public:
     HRESULT STDMETHODCALLTYPE SetVertexShaderConstant(DWORD reg, const void* data, DWORD count) override
     {
         if (!data || reg + count > kMaxVSConst) return D8ERR_INVALIDCALL;
-        Device* d = m_dev;
-        Queue().PostData(data, count * 16, [d, reg, count](const void* p) { d->SetVertexShaderConstant(reg, p, count); });
+        if (!count) return S_OK;
+        // The skin shader uploads its bones three registers per call: adjacent writes are merged
+        // into one command, sent before the next command of any other kind (Queue()).
+        if (m_vscHi > m_vscLo && (reg > m_vscHi || reg + count < m_vscLo)) FlushConstants();
+        const float* src = (const float*)data;
+        for (DWORD i = 0; i < count; i++) _mm_storeu_ps(m_vsc[reg + i], _mm_loadu_ps(src + i * 4)); // memmove call costs more for 3 registers
+        if (m_vscHi > m_vscLo) {
+            m_vscLo = min(m_vscLo, reg);
+            m_vscHi = max(m_vscHi, reg + count);
+        } else {
+            m_vscLo = reg;
+            m_vscHi = reg + count;
+        }
         return S_OK;
     }
 
@@ -471,7 +483,14 @@ public:
     }
 
 private:
-    CommandQueue& Queue() { return m_dev->m_csmt; }
+    CommandQueue& Queue() { if (m_vscHi > m_vscLo) FlushConstants(); return m_dev->m_csmt; }
+    void FlushConstants()
+    {
+        const UINT reg = m_vscLo, count = m_vscHi - m_vscLo;
+        m_vscLo = m_vscHi = 0;
+        Device* d = m_dev;
+        m_dev->m_csmt.PostData(m_vsc[reg], count * 16, [d, reg, count](const void* p) { d->SetVertexShaderConstant(reg, p, count); });
+    }
     template<class F> void Sync(F&& f) { Queue().Sync(std::forward<F>(f)); }
     template<class F> HRESULT SyncCall(F&& f) { HRESULT hr = S_OK; Queue().Sync([&] { hr = f(); }); return hr; }
 
@@ -488,6 +507,8 @@ private:
     struct Stream { ID8VertexBuffer* vb = nullptr; UINT stride = 0; } m_streams[kMaxStreams];
     ID8IndexBuffer* m_indices = nullptr;
     UINT m_baseVertex = 0;
+    float m_vsc[kMaxVSConst][4];       // pending vertex constants; only [m_vscLo, m_vscHi) is valid
+    UINT m_vscLo = 0, m_vscHi = 0;
 };
 
 ID8Device* CreateThreadedDevice(Device* dev)

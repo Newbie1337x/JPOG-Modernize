@@ -18,6 +18,7 @@
 #include <dbghelp.h>
 #include <algorithm>
 #include <map>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -154,7 +155,9 @@ void Run(DWORD target, int seconds, std::string out)
     if (end) end(1);
     CloseHandle(thread);
 
-    // Attribution.
+    // Attribution. dbghelp is single-threaded: two reports (render and game thread) take turns.
+    static std::mutex symbolLock;
+    std::lock_guard<std::mutex> hold(symbolLock);
     const std::vector<Module> mods = ListModules();
     std::map<std::string, size_t> perModule;
     std::map<uintptr_t, size_t> perAddress;
@@ -292,6 +295,18 @@ void Run(DWORD target, int seconds, std::string out)
     std::sort(threads.rbegin(), threads.rend());
     for (const auto& t : threads) if (t.first >= 0.5) fprintf(fp, "  %7.1f  %s\n", t.first, t.second.c_str());
     fclose(fp);
+    // Raw sample offsets, 16-byte buckets per module, for mapping onto a disassembler's function
+    // boundaries (exports alone hide the many unnamed functions of the game's DLLs).
+    if (!fopen_s(&fp, (out + ".raw.csv").c_str(), "w") && fp) {
+        std::map<std::pair<std::string, unsigned>, size_t> raw;
+        for (const auto& e : perAddress) {
+            const Module* m = Find(mods, e.first);
+            if (m) raw[{ m->name, (unsigned)(e.first - m->base) & ~15u }] += e.second;
+        }
+        fprintf(fp, "module,offset,samples\n");
+        for (const auto& e : raw) fprintf(fp, "%s,0x%x,%zu\n", e.first.first.c_str(), e.first.second, e.second);
+        fclose(fp);
+    }
     Log("Profiler: %zu samples written to %s", samples.size(), out.c_str());
 }
 }
