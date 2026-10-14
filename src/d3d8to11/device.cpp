@@ -1113,6 +1113,7 @@ ID3D11PixelShader* Device::GetPixelShader()
         v.material = ActiveMaterial() ? BYTE(MaterialTextureStage()+1):0;
         v.relief = m_reliefActive ? 1 : 0;
         v.water = m_waterDraw ? 1 : 0;
+        v.emissive = ActiveEmissive() ? 1 : 0;
         v.waterSamples = m_waterDraw && m_waterSamples>1 ? (BYTE)m_waterSamples : 0;
         if (v.normalMap) LogOnce(std::string("nm-draw-") + std::to_string(m_vsHandle) + "-" + std::to_string(m_psHandle),
                                  "normal map draw: VS 0x%lx PS 0x%lx kind %d", m_vsHandle, m_psHandle, m_worldKind);
@@ -1301,6 +1302,8 @@ bool Device::PrepareDraw()
     m_ctx->PSSetShaderResources(0, kMaxStages, srvs);
     ID3D11ShaderResourceView* normalMap = ActiveNormalMap();
     m_ctx->PSSetShaderResources(9, 1, &normalMap);
+    ID3D11ShaderResourceView* emissive = ActiveEmissive();
+    m_ctx->PSSetShaderResources(8, 1, &emissive);
     if(!PrepareMaterial())return false;
     PrepareRelief();
     BindTerrainHeights();

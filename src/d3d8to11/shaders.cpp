@@ -317,6 +317,8 @@ std::string WaterPixelCode(int samples) {
         "  float clarity=lerp(1,waterOptical.y,saturate(amount*2));\n"
         "  float3 through=lerp(tint,behind,transmission*clarity);\n"
         "  float3 surface=lerp(through,reflected,saturate(fresnel*waterOptical.x));\n"
+        // Night: still water mirrors the moonlit sky even from above, never a black hole.
+        "  surface+=specParams.z*fogTint.rgb*.35*(1-saturate(fresnel*waterOptical.x));\n"
         // Surface slope must remain readable from above, where Fresnel is small.
         // Bounded art-directed body-light contrast and a sun glint; no camera-space
         // phase/noise and no claim of a complete physically based water model.
@@ -357,7 +359,7 @@ std::string WaterPixelCode(int samples) {
 }
 std::string SunBlock(int slot) {
     return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera;"
-               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; float4 specParams; float4 gameSunDir; };\n", slot);
+               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; float4 specParams; float4 gameSunDir; float4 emissiveGlow; };\n", slot);
 }
 // Normal maps (stage 0, t9): relief relative to the sun on top of the game's own lighting. No
 // tangents in JPOG's meshes, so the frame comes from screen-space derivatives of the world position
@@ -1034,6 +1036,7 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
     s += kVSOutputStruct;
     s += SunPixelCode();
     if (v.water) s += WaterPixelCode(v.waterSamples);
+    if (v.emissive) s += "Texture2D emissiveTex : register(t8);\n";
     if (v.normalMap && v.texDim[v.material?v.material-1:0] == 2) s += NormalMapCode();
     if(v.material)s+=MaterialCode(v.normalMap && v.texDim[v.material-1]==2,v.material-1);
     const bool relief = v.relief && !v.shadowOnly && v.texDim[0] == 2;
@@ -1174,6 +1177,7 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
             if (v.normalMap && v.texDim[0] == 2) s += "  color = ApplyNormalMap(color,i);\n";
             s += "  color = ApplySun(color,i);\n";
         }
+        if (v.emissive) s += "  color.rgb += emissiveTex.Sample(smp0, i.t0.xy).rgb * emissiveGlow.rgb;\n";
         if (relief) s += "  color.rgb *= reliefShadow;\n"
                          "  if (sunControl.y == 12) color.rgb = reliefShadow;\n";
         if (deferredFog)

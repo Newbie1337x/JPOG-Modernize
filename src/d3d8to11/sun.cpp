@@ -713,6 +713,12 @@ void Device::UpdateSun(bool shadowPass)
     m_sun.specParams[0] = g_config.specRoughness; m_sun.specParams[1] = 0.04f;
     m_sun.specParams[2] = m_tod.active ? m_tod.moon : 0.0f; m_sun.specParams[3] = g_config.moonRimWidth;
     for (int k = 0; k < 3; k++) m_sun.gameSunDir[k] = m_gameSunValid ? m_gameSun[k] : m_sun.direction[k];
+    {
+        // Night emission: fades in as the day fades out.
+        const Texture* et = ActiveEmissive() ? static_cast<Texture*>(static_cast<ID8Texture*>(m_textures[0])) : nullptr;
+        const float night = m_tod.active ? 1 - m_tod.dayW : 0.0f;
+        for (int k = 0; k < 3; k++) m_sun.emissiveGlow[k] = et ? et->m_emissive[k] * et->m_emissive[3] * g_config.emissiveIntensity * night : 0.0f;
+    }
     m_sun.rimColor[3] = m_tod.active ? g_config.grassMoon * m_tod.moon : 0.0f;
     m_sun.grassGrade[0] = g_config.grassSaturation; m_sun.grassGrade[1] = g_config.grassBrightness;
     m_sun.grassGrade[2] = 0.08f + (m_tod.active ? g_config.moonRimGlow * m_tod.moon : 0.0f);

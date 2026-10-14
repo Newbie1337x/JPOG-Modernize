@@ -107,8 +107,10 @@ public:
     ComPtr<ID3D11ShaderResourceView> m_normalSrv; // optional normal map (D3D8to11_SetNormalMap)
     BYTE m_materialProfile=0; // scoped pilot: 1 Triceratops, 2 hamburger-shop ornament
     std::string m_name;        // <library>__<texture> reported by the plugin, for diagnostics
-    unsigned long long m_contentHash = 0; // FNV-1a of the first level-0 upload (identity of unnamed textures)
+    unsigned long long m_contentHash = 0; // FNV-1a (seeded with the size, as the plugin) of the first level-0 upload
     bool m_hashValid = false;
+    ComPtr<ID3D11ShaderResourceView> m_emissiveSrv; // optional night emission mask (mods\emissive)
+    float m_emissive[4] = {};  // emission tint rgb, intensity
     std::string m_normalName;  // basename of the attached normal map, for diagnostics
     std::vector<std::vector<BYTE>> m_shadow; // D3D8-format copy of each level (lazy)
     std::vector<Surface*> m_surfaces;        // one per level, owned

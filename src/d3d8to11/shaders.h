@@ -42,6 +42,7 @@ struct PSVariant {
     BYTE waterSamples = 0; // copied scene depth: 0 single sample, otherwise 2/4/8
     BYTE material=0;
     BYTE relief = 0;    // stage-0 skin parallax + self-shadowing (cbuffer b4)
+    BYTE emissive = 0;  // stage-0 night emission mask at t8 (emissiveGlow)
     bool operator==(const PSVariant& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
 };
 std::string TranslatePS(const DWORD* func, const PSVariant& variant, std::string& error);
@@ -117,6 +118,7 @@ struct SunConstants {
     float grassGrade[4];    // grass with replacement lighting: saturation, brightness, rim glow, w = on
     float specParams[4];    // replacement specular: roughness, F0; rim: moon thin-line weight, line width
     float gameSunDir[4];    // the game's own sun direction (grass relighting reference)
+    float emissiveGlow[4];  // night emission of the bound stage-0 texture (rgb, already scaled)
 };
 
 struct WaterConstants {

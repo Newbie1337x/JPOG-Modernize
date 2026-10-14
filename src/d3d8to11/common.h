@@ -41,6 +41,8 @@ struct Config {
     bool heightfieldLighting = true; // [Lighting] HeightfieldLighting: terrain normals from the native height field
     float bakedTerrainDetail = 1.0f; // [Lighting] BakedTerrainDetail: keep the game's painted terrain darkening, 0..1
     float horizonShadows = 1.0f;    // [Lighting] HorizonShadows: hills shade the terrain behind them, 0..1
+    bool emissive = true;           // [Lighting] Emissive: night emission masks (mods\emissive)
+    float emissiveIntensity = 1.0f; // [Lighting] EmissiveIntensity
     bool relightGrass = true;       // [Lighting] RelightGrass: grass follows the replacement lighting
     float specular = 0.0f;          // [Lighting] Specular: GGX highlight by day (the moon uses MoonSheen)
     float specRoughness = 0.6f;     // [Lighting] SpecularRoughness
@@ -152,6 +154,10 @@ struct Config {
 };
 extern Config g_config;
 extern std::string g_gameDir;
+class Texture;
+// normalmap.cpp: names a texture from the game's .tml libraries (by content hash) when the
+// plugin did not, and attaches its night emission mask from mods\emissive\<texture>.dds.
+void DecorateTexture(Texture* t);
 void LoadConfig();
 void SaveConfig(); // writes every setting above back to d3d8to11.ini
 

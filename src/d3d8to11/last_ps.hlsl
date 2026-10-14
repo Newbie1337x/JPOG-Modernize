@@ -22,7 +22,7 @@ struct VSOut {
   float fog : FOG;
   float3 world : TEXCOORD8; float3 normal : TEXCOORD9;
 };
-cbuffer Sun : register(b1) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera; float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; float4 specParams; float4 gameSunDir; };
+cbuffer Sun : register(b1) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera; float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; float4 specParams; float4 gameSunDir; float4 emissiveGlow; };
 float3 ToLinear(float3 c) { return pow(max(c, 0), 2.2); }
 float3 Shoulder(float3 c) {
   const float start = 0.8; float peak = max(c.r, max(c.g, c.b));

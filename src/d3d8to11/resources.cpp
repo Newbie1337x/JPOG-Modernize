@@ -376,9 +376,12 @@ void Texture::Upload(UINT level)
 {
     if (m_shadow[level].empty()) return;
     if (level == 0 && !m_hashValid) {
-        unsigned long long h = 1469598103934665603ull;
+        // Same FNV-1a as the plugin's texture index (offset basis xor size): the game uploads the
+        // raw pixels of its .tml entries, so the hash names the texture whatever path created it.
+        unsigned long long h = 1469598103934665603ull ^ (unsigned long long)m_shadow[0].size();
         for (BYTE b : m_shadow[0]) { h ^= b; h *= 1099511628211ull; }
         m_contentHash = h; m_hashValid = true;
+        DecorateTexture(this);
     }
     const bool decompress = GetFormatInfo(m_format).blockBytes && m_info.dxgi == DXGI_FORMAT_B8G8R8A8_UNORM;
     UploadLevel(m_dev->Ctx(), m_tex.Get(), level, m_format, m_info, decompress, m_shadow[level].data(),
