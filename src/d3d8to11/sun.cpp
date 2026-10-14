@@ -32,7 +32,7 @@ struct ResolveConstants {
     float tod[4];    // time of day: sky multiplier, w = sun/moon light (shafts, sunlight lift)
     float tod2[4];   // true sun direction (renderer Y-down), w = procedural sky weight
     float tod3[4];   // moon visibility, shadow tint rgb
-    float tod4[4];   // night sky brightness, stars, -, -
+    float tod4[4];   // night sky brightness, stars, day weight, -
 };
 
 const char* kResolveVS =
@@ -166,7 +166,12 @@ const char* kResolveMain =
     "  float3 dusk = lerp(horizon, float3(0.22, 0.32, 0.58), saturate(el * 2.2));\n"
     "  dusk += float3(1.0, 0.6, 0.3) * pow(saturate(dot(dir, tod2.xyz)), 200) * 2;\n"
     "  float duskW = saturate(1 - abs(sunEl + 0.02) * 5);\n" // around sunrise and sunset
-    "  return lerp(night, dusk, duskW); }\n"
+    "  float3 haze = float3(0.74, 0.83, 0.93);\n"
+    "  float3 day = el >= 0 ? lerp(haze, float3(0.30, 0.52, 0.86), pow(saturate(el), 0.45))\n"
+    "                       : lerp(haze, float3(0.55, 0.60, 0.62), saturate(-el * 4));\n"
+    "  float sd = saturate(dot(dir, tod2.xyz));\n"
+    "  day += float3(1.0, 0.95, 0.85) * (pow(sd, 900) * 4 + pow(sd, 12) * 0.18);\n"
+    "  return lerp(lerp(night, dusk, duskW), day, tod4.z); }\n"
     "float4 main(float4 pos : SV_Position) : SV_Target {\n"
     "  int2 p = int2(pos.xy);\n"
     "  float3 color = sceneColor.Load(int3(p, 0)).rgb;\n"
@@ -379,6 +384,8 @@ void Device::EvaluateTimeOfDay()
     mix(coolDusk, coolDay, dayW, m_tod.shadowTint);
     for (int k = 0; k < 3; k++) m_tod.sunDir[k] = sun[k];
     m_tod.procSky = 1 - dayW; // the game's sky texture only by day
+    m_tod.dayW = dayW;
+    m_tod.sheen = g_config.moonSheen * moonUp;
     m_tod.moon = moonUp;
     m_tod.rim = g_config.moonRim * moonUp + g_config.rimLight * up * (1.0f + 0.8f * (1 - warm)); // moon, then the sun (stronger when low)
     m_tod.active = true;
@@ -684,6 +691,8 @@ void Device::UpdateSun(bool shadowPass)
     m_sun.todAmbient[3] = m_tod.active ? m_tod.rim : g_config.rimLight;
     static const float warmWhite[3] = { 1.0f, 0.93f, 0.80f };
     for (int k = 0; k < 3; k++) m_sun.rimColor[k] = m_tod.active ? m_tod.light[k] : warmWhite[k];
+    m_sun.todSun[3] = m_tod.active ? m_tod.sheen : 0.0f;
+    m_sun.rimColor[3] = m_tod.active ? g_config.grassMoon * m_tod.moon : 0.0f;
     m_sun.todNight[3] = m_tod.active && !shadowPass && (m_worldDraw || (m_waterShaderDraw && m_rt == m_backBuffer)) ? 1.0f : 0.0f;
     if (!m_sunUploadedValid || memcmp(&m_sunUploaded, &m_sun, sizeof(m_sun))) {
         D3D11_MAPPED_SUBRESOURCE map;
@@ -734,7 +743,7 @@ void Device::ResolveSun(const char* reason)
     const bool shadows = g_config.sunLighting && m_segmentCasters && m_sunSRV;
     const bool shafts = shadows && g_config.shafts;
     const bool fx = g_config.aoEnabled || shafts;
-    if (!shadows && !g_config.postEnabled && !fx && !m_tod.active) {ResolveTemporal();return;}
+    if (!shadows && !g_config.postEnabled && !fx && !m_tod.active && !ProceduralSkyActive()) {ResolveTemporal();return;}
     if (!m_resolvePS || !m_backBuffer || !m_autoDepth || !m_autoDepth->m_srv || !EnsureSceneCopy()) {ResolveTemporal();return;}
     if (shadows && g_config.lightingDebug == 8 && !m_dumped) {
         if (!m_dumpAt) m_dumpAt = m_frame + 600;
@@ -765,8 +774,9 @@ void Device::ResolveSun(const char* reason)
     rc.fx1[0] = g_config.aoEnabled ? 1.0f : 0.0f; rc.fx1[1] = shafts ? 1.0f : 0.0f; rc.fx1[2] = g_config.shaftScatter;
     for (int k = 0; k < 3; k++) rc.tod[k] = m_tod.active ? m_tod.sky[k] : 1.0f;
     rc.tod[3] = m_tod.active ? (m_tod.sunLight < 1 ? m_tod.sunLight : 1.0f) : 1.0f;
-    for (int k = 0; k < 3; k++) rc.tod2[k] = m_tod.active ? (k == 1 ? -m_tod.sunDir[k] : m_tod.sunDir[k]) : 0.0f;
-    rc.tod2[3] = m_tod.active ? m_tod.procSky : 0.0f;
+    for (int k = 0; k < 3; k++) rc.tod2[k] = m_tod.active ? (k == 1 ? -m_tod.sunDir[k] : m_tod.sunDir[k]) : m_sun.direction[k];
+    rc.tod2[3] = ProceduralSkyActive() ? 1.0f : m_tod.active ? m_tod.procSky : 0.0f;
+    rc.tod4[2] = m_tod.active ? m_tod.dayW : 1.0f;
     rc.tod3[0] = m_tod.active ? m_tod.moon : 0.0f;
     static const float defaultTint[3] = { 0.93f, 0.96f, 1.0f };
     for (int k = 0; k < 3; k++) rc.tod3[k + 1] = m_tod.active ? m_tod.shadowTint[k] : defaultTint[k];

@@ -284,6 +284,8 @@ void Device::DrawOverlay()
             ImGui::ColorEdit3("Moon colour", g_config.moonColor, ImGuiColorEditFlags_Float);
             ImGui::SliderFloat("Moon light", &g_config.moonIntensity, 0, 3, "%.2f");
             ImGui::SliderFloat("Moon rim", &g_config.moonRim, 0, 4, "%.2f");
+            ImGui::SliderFloat("Moon sheen", &g_config.moonSheen, 0, 4, "%.2f");
+            ImGui::SliderFloat("Moon on grass", &g_config.grassMoon, 0, 4, "%.2f");
             ImGui::ColorEdit3("Night ambient", g_config.nightAmbient, ImGuiColorEditFlags_Float);
             ImGui::SliderFloat("Night sky", &g_config.nightSky, 0, 4, "%.2f");
             ImGui::SliderFloat("Stars", &g_config.stars, 0, 4, "%.2f");
@@ -518,6 +520,8 @@ void Device::DrawOverlay()
             ImGui::SetItemTooltip("Blue sky light on faces looking up, warm ground bounce on faces looking down.");
             ImGui::SliderFloat("Exposure##relight", &g_config.relightExposure, 0.25f, 4, "%.2f");
             ImGui::Checkbox("Soft highlights (tonemap)", &g_config.relightTonemap);
+            ImGui::Checkbox("Procedural sky", &g_config.proceduralSky);
+            ImGui::SetItemTooltip("Replaces the game's sky dome by day and night.");
             ImGui::Checkbox("Terrain from height field", &g_config.heightfieldLighting);
             ImGui::SetItemTooltip("Smooth terrain normals from the game's height field instead of its baked light.");
             ImGui::SliderFloat("Hill shadows", &g_config.horizonShadows, 0, 1, "%.2f");

@@ -37,18 +37,21 @@ struct Config {
     float relightAmbient = 0.85f;   // [Lighting] RelightAmbient: scale of the game's own ambient colour
     float relightSkyTint = 0.65f;   // [Lighting] RelightSkyTint: blue sky above, warm bounce below
     float relightExposure = 0.95f;  // [Lighting] RelightExposure
+    bool proceduralSky = true;      // [Lighting] ProceduralSky: replace the game's sky dome (with ReplaceOriginal)
     bool heightfieldLighting = true; // [Lighting] HeightfieldLighting: terrain normals from the native height field
     float bakedTerrainDetail = 1.0f; // [Lighting] BakedTerrainDetail: keep the game's painted terrain darkening, 0..1
     float horizonShadows = 1.0f;    // [Lighting] HorizonShadows: hills shade the terrain behind them, 0..1
     float rimLight = 0.5f;          // [Lighting] RimLight: sunlit silhouettes (replacement lighting), 0..2
     // [TimeOfDay] look of the time-of-day preview (Insert panel, "Time of day tuning")
     float moonColor[3] = { 0.70f, 0.80f, 1.0f };
-    float moonIntensity = 0.5f;
-    float moonRim = 1.6f;
-    float nightAmbient[3] = { 0.14f, 0.20f, 0.42f };
+    float moonIntensity = 1.0f;
+    float moonRim = 2.5f;
+    float moonSheen = 1.0f;         // silver highlight of the moon on leaves and skin
+    float grassMoon = 1.0f;         // moonlight on grass blade tips
+    float nightAmbient[3] = { 0.08f, 0.12f, 0.24f };
     float duskAmbient[3] = { 0.62f, 0.68f, 0.88f };
     float lowSunColor[3] = { 1.0f, 0.55f, 0.24f };
-    float maxExposure = 2.2f;
+    float maxExposure = 1.5f;
     float nightSky = 1.0f;          // brightness of the procedural night sky
     float stars = 1.0f;
     bool timeOfDay = false;         // Insert panel preview: drive the sun from an hour of the day

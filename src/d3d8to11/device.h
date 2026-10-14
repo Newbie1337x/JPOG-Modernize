@@ -260,9 +260,15 @@ private:
     void PrepareRelief();           // relief.cpp: decides v.relief and binds cbuffer b4
     bool m_reliefActive = false;
     // terrain_light.cpp: native height field for terrain normals and horizon shadows
+    // automation.cpp: ini hot reload and file-requested frame captures
+    void PollAutomation();
+    bool CaptureSwapChain(const std::string& path);
+    FILETIME m_iniTime = {};
+    bool m_iniTimeValid = false;
     void UpdateTerrainHeights();
     void EvaluateTimeOfDay();
-    struct TimeOfDay { bool active = false; float dir[3] = {}, light[3] = {}, ambient[3] = {}, sky[3] = {}, surface[3] = {}, sunDir[3] = {}; float sunLight = 1, procSky = 0, moon = 0, rim = 0, exposure = 1, shadowStrength = 0, shadowTint[3] = {}; } m_tod;
+    bool ProceduralSkyActive() const { return g_config.replaceLighting && g_config.proceduralSky; }
+    struct TimeOfDay { bool active = false; float dir[3] = {}, light[3] = {}, ambient[3] = {}, sky[3] = {}, surface[3] = {}, sunDir[3] = {}; float sunLight = 1, procSky = 0, moon = 0, rim = 0, exposure = 1, dayW = 1, sheen = 0, shadowStrength = 0, shadowTint[3] = {}; } m_tod;
     void BindTerrainHeights();
     bool TerrainHeightsActive() const { return m_terrainReady && m_terrainHeightSRV && g_config.heightfieldLighting; }
     ComPtr<ID3D11Texture2D> m_terrainHeightTex;

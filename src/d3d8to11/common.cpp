@@ -116,6 +116,11 @@ void LoadConfig()
     g_config.maxExposure = readTod("MaxExposure", g_config.maxExposure, 1, 6);
     g_config.nightSky = readTod("NightSky", g_config.nightSky, 0, 4);
     g_config.stars = readTod("Stars", g_config.stars, 0, 4);
+    g_config.moonSheen = readTod("MoonSheen", g_config.moonSheen, 0, 4);
+    g_config.grassMoon = readTod("GrassMoon", g_config.grassMoon, 0, 4);
+    g_config.proceduralSky = GetPrivateProfileIntA("Lighting", "ProceduralSky", 1, ini.c_str()) != 0;
+    g_config.timeOfDay = GetPrivateProfileIntA("TimeOfDay", "Preview", g_config.timeOfDay ? 1 : 0, ini.c_str()) != 0;
+    g_config.timeOfDayHour = readTod("Hour", g_config.timeOfDayHour, 0, 24);
     g_config.bakedTerrainDetail = readFloat("BakedTerrainDetail", 1, 0, 1);
     g_config.shadowStrength = readFloat("ShadowStrength", 0.25f, 0, 1);
     g_config.sunMinElevation = readFloat("SunMinHeight", 0.35f, 0.05f, 1);
@@ -298,6 +303,11 @@ void SaveConfig()
     putFloat("TimeOfDay", "MaxExposure", g_config.maxExposure);
     putFloat("TimeOfDay", "NightSky", g_config.nightSky);
     putFloat("TimeOfDay", "Stars", g_config.stars);
+    putFloat("TimeOfDay", "MoonSheen", g_config.moonSheen);
+    putFloat("TimeOfDay", "GrassMoon", g_config.grassMoon);
+    putInt("Lighting", "ProceduralSky", g_config.proceduralSky);
+    putInt("TimeOfDay", "Preview", g_config.timeOfDay);
+    putFloat("TimeOfDay", "Hour", g_config.timeOfDayHour);
     putFloat("Lighting", "BakedTerrainDetail", g_config.bakedTerrainDetail);
     putFloat("Lighting", "Ambient", g_config.sunAmbient);
     putFloat("Lighting", "SunIntensity", g_config.sunDirect);

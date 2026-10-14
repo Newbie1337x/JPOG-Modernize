@@ -592,9 +592,15 @@ std::string SunPixelCode() {
         "  float3 light = GameAmbient(N) + GameSun() * ndl;\n"
         "  float3 rim = sunFlags.w == 1 ? RimLight(N, i.world) : 0;\n"
         "  light += rim;\n"
+        // Moon sheen (todSun.w): leaves and skin catch a broad silver highlight.
+        "  float3 sheen = 0;\n"
+        "  if (sunFlags.w == 1 && todSun.w > 0) {\n"
+        "    float3 V = normalize(sunCamera.xyz - i.world), Ns = dot(N, V) < 0 ? -N : N;\n"
+        "    sheen = rimColor.rgb * pow(saturate(dot(Ns, normalize(V + normalize(sunDirection.xyz)))), 24) * todSun.w;\n"
+        "  }\n"
         // The terrain shader fades its lighting out under distant haze; keep that.
         "  if (sunFlags.w == 2) light = lerp(light, 1, saturate(i.d1.w));\n"
-        "  return float4(LinearToOutput(ToLinear(color.rgb) * light + rim * 0.08), color.a);\n"
+        "  return float4(LinearToOutput(ToLinear(color.rgb) * light + rim * 0.08 + sheen * 0.5), color.a);\n"
         "}\n"
         "float4 ApplySun(float4 color, VSOut i) {\n"
         "  if (sunControl.y == 13 && sunFlags.y < 0.5) {\n"
@@ -606,7 +612,11 @@ std::string SunPixelCode() {
         // Called unconditionally (it returns the colour unchanged when not relit): fxc overflows
         // its stack on this function inlined inside a branch.
         "  float4 lit = RelightSurface(color, i);\n"
-        "  if (!relit && todNight.w > 0.5) lit.rgb *= todNight.rgb;\n" // grass, water, other world surfaces
+        "  if (!relit && todNight.w > 0.5) {\n" // grass, water, other world surfaces
+        "    lit.rgb *= todNight.rgb;\n"
+        // Grass (t7.x = blade height from the VS): moonlight catches the blade tips.
+        "    if (sunFlags.w == 4) lit.rgb += color.rgb * rimColor.rgb * saturate(i.t7.x * 1.5) * rimColor.w;\n"
+        "  }\n"
         "  return lit; }\n";
 }
 }
@@ -865,6 +875,8 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
     s += "  o.t0 = ot0; o.t1 = ot1; o.t2 = ot2; o.t3 = ot3; o.t4 = ot4; o.t5 = ot5; o.t6 = ot6; o.t7 = ot7;\n";
     // Terrain: r9 = v0.w * c7 + c6 is the game's light; v0.w is its baked sun factor (relighting).
     if (WorldShaderKind(decl) == 2) s += "  o.t7 = float4(v0.w, 0, 0, 1);\n";
+    // Grass: blade-local height (v0.y, also the game's wind sway factor) for moonlit tips.
+    if (WorldShaderKind(decl) == 4) s += "  o.t7 = float4(abs(v0.y), 0, 0, 1);\n";
     s += "  o.fog = oFog.x;\n";
     s += "  return o;\n}\n";
     return s;

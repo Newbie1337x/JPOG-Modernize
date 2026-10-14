@@ -1209,6 +1209,14 @@ bool Device::PrepareDraw()
     bool waterShader=m_psHandle>0 && m_psHandle<=m_pixelShaders.size() && m_pixelShaders[m_psHandle-1] &&
         IsWaterPixelShader(m_pixelShaders[m_psHandle-1]->func.data());
     m_waterShaderDraw = waterShader;
+    // The sky dome: the first depth-writing kind-0 draw to the back buffer before the terrain.
+    // With the procedural sky it is not drawn; the shadow resolve paints sky pixels (depth 1).
+    if (SceneFx() && ProceduralSkyActive() && m_worldKind == 0 && !waterShader && !m_sunStarted && !m_sunResolved &&
+        m_rt == m_backBuffer && m_ds && m_rs[RS_ZENABLE] &&
+        m_viewport.Width == m_backBuffer->m_width && m_viewport.Height == m_backBuffer->m_height) {
+        LogOnce("sky-skip", "procedural sky: the game's sky draw is skipped (VS 0x%lx PS 0x%lx)", m_vsHandle, m_psHandle);
+        return false;
+    }
     m_worldDraw = SceneFx() && m_worldKind != 0 && !waterShader &&
         (m_psHandle != 0 || m_rs[RS_ZWRITEENABLE]) &&
         m_rt == m_backBuffer && m_ds && m_rs[RS_ZENABLE] &&
@@ -1638,6 +1646,7 @@ HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
     m_ctx->Draw(3, 0);
     ID3D11ShaderResourceView* nulls[2] = {};
     m_ctx->PSSetShaderResources(0, 2, nulls);
+    PollAutomation(); // ini hot reload and file-requested captures, before the panel is drawn
     DrawOverlay();
     m_perf.Finish(m_ctx.Get());
 
