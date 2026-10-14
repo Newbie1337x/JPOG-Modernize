@@ -50,22 +50,23 @@ struct Config {
     float grassBrightness = 0.92f;  // [Lighting] GrassBrightness (replacement lighting)
     float rimLight = 0.5f;          // [Lighting] RimLight: sunlit silhouettes (replacement lighting), 0..2
     // [TimeOfDay] look of the time-of-day preview (Insert panel, "Time of day tuning")
-    float moonColor[3] = { 0.70f, 0.80f, 1.0f };
-    float moonIntensity = 1.0f;
-    float moonRim = 2.5f;
-    float moonSheen = 1.0f;         // silver highlight of the moon on leaves and skin
-    float grassMoon = 1.0f;         // moonlight on grass blade tips
-    float nightSurface = 0.2f;      // share of the moon on surfaces without normals (grass, water)
-    float nightAmbient[3] = { 0.08f, 0.12f, 0.24f };
+    // Defaults: the night preset chosen in game (2026-10-14).
+    float moonColor[3] = { 0.659f, 0.804f, 0.987f };
+    float moonIntensity = 0.95f;
+    float moonRim = 2.37f;
+    float moonRimGlow = 0.08f;      // moon outline added regardless of the surface colour
+    float moonRimWidth = 0.24f;     // width of the moon outline (fraction of the silhouette band)
+    float moonSheen = 1.59f;        // GGX highlight of the moon on leaves and skin
+    float grassMoon = 0.21f;        // moonlight on grass blade tips
+    float nightSurface = 0.06f;     // share of the moon on surfaces without normals (water)
+    float nightAmbient[3] = { 0.346f, 0.397f, 0.46f };
     float duskAmbient[3] = { 0.62f, 0.68f, 0.88f };
     float lowSunColor[3] = { 1.0f, 0.55f, 0.24f };
-    float maxExposure = 1.5f;
-    float nightSky = 1.0f;          // brightness of the procedural night sky
-    float nightDesaturate = 0.4f;
-    float nightTint[3] = { 0.75f, 1.07f, 1.09f }; // colour the faded night takes (teal grey)
-    float moonRimGlow = 0.3f;
-    float moonRimWidth = 0.45f;     // width of the moon outline (fraction of the silhouette band)       // moon outline added regardless of the surface colour
-    float nightExposure = 1.0f;     // exposure under the moon (after eye adaptation)   // colours fade under the moon
+    float maxExposure = 1.0f;
+    float nightSky = 1.35f;         // brightness of the procedural night sky
+    float nightExposure = 0.6f;     // exposure under the moon (after eye adaptation)
+    float nightDesaturate = 0.7f;   // colours fade under the moon
+    float nightTint[3] = { 0.70f, 1.0f, 1.15f }; // colour the faded night takes (teal blue)
     float stars = 1.0f;
     bool timeOfDay = false;         // Insert panel preview: drive the sun from an hour of the day
     float timeOfDayHour = 12.0f;
