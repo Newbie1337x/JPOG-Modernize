@@ -13,7 +13,7 @@ bool FileTime(const std::string& path, FILETIME& t)
 }
 }
 
-void StartSamplingProfiler(int seconds); // profiler.cpp
+void StartSamplingProfiler(int seconds, DWORD target, const char* file); // profiler.cpp
 
 void Device::PollAutomation()
 {
@@ -39,7 +39,9 @@ void Device::PollAutomation()
         int seconds = 15;
         if (FILE* f = _fsopen(profReq.c_str(), "r", _SH_DENYNO)) { if (fscanf_s(f, "%d", &seconds) != 1) seconds = 15; fclose(f); }
         DeleteFileA(profReq.c_str());
-        StartSamplingProfiler(seconds < 1 ? 1 : seconds > 120 ? 120 : seconds);
+        seconds = seconds < 1 ? 1 : seconds > 120 ? 120 : seconds;
+        StartSamplingProfiler(seconds, GetCurrentThreadId(), "d3d8to11_profile.txt");
+        if (m_facade && m_gameThread) StartSamplingProfiler(seconds, m_gameThread, "d3d8to11_profile_game.txt");
     }
     const std::string req = g_gameDir + "d3d8to11_capture.req";
     if (GetFileAttributesA(req.c_str()) == INVALID_FILE_ATTRIBUTES) return;

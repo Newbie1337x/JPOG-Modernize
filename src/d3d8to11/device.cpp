@@ -835,6 +835,7 @@ bool Device::BuildVertexShader(VertexShader8& vs, DWORD handle)
 {
     if (vs.func.empty()) { Log("vertex shader 0x%lx has no function (fixed-function T&L) - unsupported", handle); return false; }
     std::string error;
+    vs.constRegs = VSConstantRegisters(vs.func.data());
     std::string hlsl = TranslateVS(vs.func.data(), vs.parsed, error);
     if (hlsl.empty()) { Log("vertex shader 0x%lx translation failed: %s", handle, error.c_str()); return false; }
     char name[64];
@@ -1363,6 +1364,9 @@ bool Device::PrepareDraw()
     const size_t vsBytes = (size_t)(m_vsConstUsed ? m_vsConstUsed : kMaxVSConst) * 16;
     const bool ring = m_vsRing && g_config.constantRing;
     if (ring != m_vsRingWasOn) { m_vsRingWasOn = ring; m_vsConstDirty = true; m_vsRingBound = false; } // switched: upload to the other buffer
+    // Registers this draw's shader reads; the ring window holds m_vsRingValid of them.
+    const size_t ringBytes = (std::min)(vsBytes, (size_t)vs->constRegs * 16);
+    if (ring && ringBytes > m_vsRingValid) m_vsConstDirty = true;
     if (ring && m_vsConstDirty) {
         // The bound window is always the full 256 registers; registers past vsBytes hold other
         // draws' data, never read (as with the single buffer, where they are unwritten).
@@ -1370,11 +1374,12 @@ bool Device::PrepareDraw()
         if (m_vsRingPos + sizeof(m_vsConst) > kVsRingBytes) { mode = D3D11_MAP_WRITE_DISCARD; m_vsRingPos = 0; }
         D3D11_MAPPED_SUBRESOURCE map;
         if (SUCCEEDED(m_ctx->Map(m_vsRing.Get(), 0, mode, 0, &map))) {
-            memcpy((BYTE*)map.pData + m_vsRingPos, m_vsConst, vsBytes);
+            memcpy((BYTE*)map.pData + m_vsRingPos, m_vsConst, ringBytes);
             m_ctx->Unmap(m_vsRing.Get(), 0);
             m_vsRingFirst = m_vsRingPos / 16;
-            m_vsRingPos += (UINT)((vsBytes + 255) & ~(size_t)255);
-            m_perf.constantBytes += vsBytes;
+            m_vsRingPos += (UINT)((ringBytes + 255) & ~(size_t)255);
+            m_vsRingValid = ringBytes;
+            m_perf.constantBytes += ringBytes;
             ++m_perf.vsUploads;
             m_vsRingBound = false;
         }

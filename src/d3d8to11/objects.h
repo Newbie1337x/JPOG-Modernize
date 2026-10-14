@@ -185,6 +185,8 @@ public:
     bool Create(Device* dev, UINT size, DWORD usage, DWORD pool, UINT bind);
     HRESULT Lock(UINT offset, UINT size, BYTE** data, DWORD flags);
     HRESULT Unlock();
+    // Copies bytes [lockOffset, lockOffset + lockSize) into the D3D11 buffer (render thread).
+    HRESULT UploadOnWorker(UINT lockOffset, UINT lockSize, DWORD lockFlags, const BYTE* data);
 
     Device* m_dev = nullptr;
     UINT m_size = 0;
@@ -195,6 +197,7 @@ public:
     UINT m_lockOffset = 0, m_lockSize = 0, m_lockCount = 0;
     DWORD m_lockFlags = 0;
     bool m_everDiscarded = false;
+    bool m_queuedDiscard = false; // game thread: a whole-buffer upload has been queued
 };
 
 class VertexBuffer : public ID8VertexBuffer {

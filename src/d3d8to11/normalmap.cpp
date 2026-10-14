@@ -112,7 +112,7 @@ Texture* GameTexture(void* texture)
 
 } // namespace
 
-extern "C" BOOL WINAPI D3D8to11_SetNormalMap(void* texture, const char* path)
+static BOOL D3D8to11_SetNormalMapNow(void* texture, const char* path)
 {
     Texture* tex = GameTexture(texture);
     if (!tex || !path) return FALSE;
@@ -134,7 +134,7 @@ extern "C" BOOL WINAPI D3D8to11_SetNormalMap(void* texture, const char* path)
     return TRUE;
 }
 
-extern "C" BOOL WINAPI D3D8to11_SetRoughnessMap(void* texture, const char* path)
+static BOOL D3D8to11_SetRoughnessMapNow(void* texture, const char* path)
 {
     Texture* tex = GameTexture(texture);
     if (!tex || !path) return FALSE;
@@ -148,7 +148,7 @@ extern "C" BOOL WINAPI D3D8to11_SetRoughnessMap(void* texture, const char* path)
 
 // Diagnostics: the plugin reports which game texture (<library>__<texture>, "+" when replaced
 // by a mod file) each created texture holds, shown by the panel's skin finder and frame dump.
-extern "C" BOOL WINAPI D3D8to11_SetTextureName(void* texture, const char* name)
+static BOOL D3D8to11_SetTextureNameNow(void* texture, const char* name)
 {
     if (!texture || !name || g_config.useDgVoodoo) return FALSE;
     ID8BaseTexture* base = (ID8BaseTexture*)texture;
@@ -157,6 +157,36 @@ extern "C" BOOL WINAPI D3D8to11_SetTextureName(void* texture, const char* name)
     tex->m_name = name;
     DecorateTexture(tex);
     return TRUE;
+}
+
+extern "C" BOOL WINAPI D3D8to11_SetNormalMap(void* texture, const char* path)
+{
+    // Texture fields the render thread reads: changed there (csmt.h).
+    Texture* tex = GameTexture(texture);
+    if (!tex) return FALSE;
+    BOOL ok = FALSE;
+    tex->m_dev->m_csmt.Sync([&] { ok = D3D8to11_SetNormalMapNow(texture, path); });
+    return ok;
+}
+
+extern "C" BOOL WINAPI D3D8to11_SetRoughnessMap(void* texture, const char* path)
+{
+    // Texture fields the render thread reads: changed there (csmt.h).
+    Texture* tex = GameTexture(texture);
+    if (!tex) return FALSE;
+    BOOL ok = FALSE;
+    tex->m_dev->m_csmt.Sync([&] { ok = D3D8to11_SetRoughnessMapNow(texture, path); });
+    return ok;
+}
+
+extern "C" BOOL WINAPI D3D8to11_SetTextureName(void* texture, const char* name)
+{
+    // Texture fields the render thread reads: changed there (csmt.h).
+    Texture* tex = GameTexture(texture);
+    if (!tex) return FALSE;
+    BOOL ok = FALSE;
+    tex->m_dev->m_csmt.Sync([&] { ok = D3D8to11_SetTextureNameNow(texture, name); });
+    return ok;
 }
 
 // ---- texture names from the .tml libraries, night emission masks ----------------------------

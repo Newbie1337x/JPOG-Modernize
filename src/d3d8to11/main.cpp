@@ -146,6 +146,9 @@ HRESULT Direct3D8::CreateDevice(UINT adapter, DWORD, HWND focus, DWORD flags, D3
         *out = nullptr;
         return D8ERR_NOTAVAILABLE;
     }
+    if (g_config.threaded) {
+        if (ID8Device* front = CreateThreadedDevice(dev)) { *out = front; return S_OK; }
+    }
     *out = dev;
     return S_OK;
 }

@@ -26,6 +26,10 @@ size_t ShaderTokenCount(const DWORD* func);
 extern const char* kVSOutputStruct;
 
 std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& error);
+// Constant registers c0..n-1 the translated shader can read: every directly addressed source
+// plus three more rows (matrix instructions read up to four consecutive registers), at least
+// c0..c3 (our clip-axis code reads them). 256 when the shader uses relative addressing.
+UINT VSConstantRegisters(const DWORD* func);
 // Recognized main-world geometry; screen-space/UI shaders remain unlit.
 int WorldShaderKind(const VSDecl& decl);
 bool IsWaterPixelShader(const DWORD* func); // captured bump-reflection path, not handles

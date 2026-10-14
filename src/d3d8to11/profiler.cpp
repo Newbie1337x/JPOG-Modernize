@@ -296,12 +296,11 @@ void Run(DWORD target, int seconds, std::string out)
 }
 }
 
-void StartSamplingProfiler(int seconds)
+// Samples one thread into g_gameDir + file (the render thread; with [Performance] Threaded the
+// game thread gets a second report).
+void StartSamplingProfiler(int seconds, DWORD target, const char* file)
 {
-    static volatile LONG running = 0;
-    if (InterlockedCompareExchange(&running, 1, 0) != 0) return;
-    const DWORD target = GetCurrentThreadId();
-    const std::string out = g_gameDir + "d3d8to11_profile.txt";
-    Log("Profiler: sampling the render thread %lu for %d s", target, seconds);
-    std::thread([target, seconds, out]() { Run(target, seconds, out); InterlockedExchange(&running, 0); }).detach();
+    const std::string out = g_gameDir + file;
+    Log("Profiler: sampling thread %lu for %d s into %s", target, seconds, file);
+    std::thread([target, seconds, out]() { Run(target, seconds, out); }).detach();
 }

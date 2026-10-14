@@ -113,8 +113,9 @@ ULONG Surface::Release()
     if (m_container) return m_container->Release();
     ULONG r = InterlockedDecrement(&m_ref);
     if (r == 0) {
-        m_dev->OnSurfaceReleased(this);
-        delete this;
+        Surface* self = this;
+        auto destroy = [self] { self->m_dev->OnSurfaceReleased(self); delete self; };
+        if (m_dev->m_csmt.OffWorker()) m_dev->m_csmt.Post(destroy); else destroy();
     }
     return r;
 }
@@ -122,8 +123,8 @@ ULONG Surface::Release()
 HRESULT Surface::GetDevice(ID8Device** dev)
 {
     if (!dev) return D8ERR_INVALIDCALL;
-    *dev = m_dev;
-    m_dev->AddRef();
+    *dev = m_dev->Facade();
+    (*dev)->AddRef();
     return S_OK;
 }
 
@@ -231,7 +232,8 @@ HRESULT Surface::LockRect(D3D8LockedRect* lr, const RECT* rect, DWORD flags)
     if (!lr) return D8ERR_INVALIDCALL;
     if (m_usage & D8USAGE_DEPTHSTENCIL) return D8ERR_INVALIDCALL;
     const UINT pitch = D8RowPitch(m_format, m_width);
-    if (m_tex) {
+    HRESULT readHr = S_OK;
+    if (m_tex) m_dev->m_csmt.Sync([&] {
         // Render target read-back (screenshots): copy through a staging texture.
         ID3D11Texture2D* source = ResolvedTexture();
         D3D11_TEXTURE2D_DESC td;
@@ -240,10 +242,10 @@ HRESULT Surface::LockRect(D3D8LockedRect* lr, const RECT* rect, DWORD flags)
         td.BindFlags = 0;
         td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         ComPtr<ID3D11Texture2D> staging;
-        if (FAILED(m_dev->D3D()->CreateTexture2D(&td, nullptr, &staging))) return D8ERR_INVALIDCALL;
+        if (FAILED(m_dev->D3D()->CreateTexture2D(&td, nullptr, &staging))) { readHr = D8ERR_INVALIDCALL; return; }
         m_dev->Ctx()->CopyResource(staging.Get(), source);
         D3D11_MAPPED_SUBRESOURCE map;
-        if (FAILED(m_dev->Ctx()->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map))) return D8ERR_INVALIDCALL;
+        if (FAILED(m_dev->Ctx()->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map))) { readHr = D8ERR_INVALIDCALL; return; }
         m_lockData.resize((size_t)pitch * m_height);
         const UINT bpp = GetFormatInfo(m_format).bytesPerPixel;
         for (UINT y = 0; y < m_height; y++) {
@@ -256,8 +258,8 @@ HRESULT Surface::LockRect(D3D8LockedRect* lr, const RECT* rect, DWORD flags)
             }
         }
         m_dev->Ctx()->Unmap(staging.Get(), 0);
-    }
-    if (m_lockData.empty()) return D8ERR_INVALIDCALL;
+    });
+    if (FAILED(readHr) || m_lockData.empty()) return D8ERR_INVALIDCALL;
     lr->Pitch = (INT)pitch;
     lr->pBits = m_lockData.data() + (rect ? (size_t)rect->top * pitch + rect->left * GetFormatInfo(m_format).bytesPerPixel : 0);
     return S_OK;
@@ -318,8 +320,9 @@ ULONG Texture::Release()
 {
     ULONG r = InterlockedDecrement(&m_ref);
     if (r == 0) {
-        m_dev->OnTextureReleased(this);
-        delete this;
+        Texture* self = this;
+        auto destroy = [self] { self->m_dev->OnTextureReleased(self); delete self; };
+        if (m_dev->m_csmt.OffWorker()) m_dev->m_csmt.Post(destroy); else destroy();
     }
     return r;
 }
@@ -327,8 +330,8 @@ ULONG Texture::Release()
 HRESULT Texture::GetDevice(ID8Device** dev)
 {
     if (!dev) return D8ERR_INVALIDCALL;
-    *dev = m_dev;
-    m_dev->AddRef();
+    *dev = m_dev->Facade();
+    (*dev)->AddRef();
     return S_OK;
 }
 
@@ -368,7 +371,7 @@ HRESULT Texture::LockRect(UINT level, D3D8LockedRect* lr, const RECT* rect, DWOR
 HRESULT Texture::UnlockRect(UINT level)
 {
     if (level >= m_levels) return D8ERR_INVALIDCALL;
-    Upload(level);
+    m_dev->m_csmt.Sync([&] { Upload(level); });
     return S_OK;
 }
 
@@ -437,8 +440,9 @@ ULONG VolumeTexture::Release()
 {
     ULONG r = InterlockedDecrement(&m_ref);
     if (r == 0) {
-        m_dev->OnTextureReleased(this);
-        delete this;
+        VolumeTexture* self = this;
+        auto destroy = [self] { self->m_dev->OnTextureReleased(self); delete self; };
+        if (m_dev->m_csmt.OffWorker()) m_dev->m_csmt.Post(destroy); else destroy();
     }
     return r;
 }
@@ -446,8 +450,8 @@ ULONG VolumeTexture::Release()
 HRESULT VolumeTexture::GetDevice(ID8Device** dev)
 {
     if (!dev) return D8ERR_INVALIDCALL;
-    *dev = m_dev;
-    m_dev->AddRef();
+    *dev = m_dev->Facade();
+    (*dev)->AddRef();
     return S_OK;
 }
 
@@ -491,7 +495,7 @@ HRESULT VolumeTexture::LockBox(UINT level, D3D8LockedBox* lb, const D3D8Box* box
 HRESULT VolumeTexture::UnlockBox(UINT level)
 {
     if (level >= m_levels) return D8ERR_INVALIDCALL;
-    Upload(level);
+    m_dev->m_csmt.Sync([&] { Upload(level); });
     return S_OK;
 }
 
@@ -564,29 +568,49 @@ HRESULT BufferImpl::Unlock()
     if (m_lockCount == 0) return D8ERR_INVALIDCALL;
     if (--m_lockCount) return S_OK;
     if (m_lockFlags & D8LOCK_READONLY) return S_OK;
+    if (m_dev->m_csmt.OffWorker()) {
+        // The render thread uploads a copy: the game may write the shadow again right away.
+        // A discard rewrites the whole buffer, so it carries all of it.
+        const bool whole = m_dynamic && !((m_lockFlags & D8LOCK_NOOVERWRITE) && m_queuedDiscard);
+        if (whole) m_queuedDiscard = true;
+        const UINT offset = whole ? 0 : m_lockOffset, size = whole ? m_size : m_lockSize;
+        const DWORD flags = m_lockFlags;
+        BufferImpl* self = this;
+        m_dev->m_csmt.PostData(m_shadow.data() + offset, size, [self, offset, size, flags](const void* data) {
+            self->UploadOnWorker(offset, size, flags, (const BYTE*)data);
+        });
+        return S_OK;
+    }
+    return UploadOnWorker(m_lockOffset, m_lockSize, m_lockFlags, m_shadow.data() + m_lockOffset);
+}
+
+HRESULT BufferImpl::UploadOnWorker(UINT lockOffset, UINT lockSize, DWORD lockFlags, const BYTE* data)
+{
+    // data holds bytes [lockOffset, lockOffset + lockSize) of the buffer.
     CpuPerformanceScope cpu(m_dev->m_perf,Performance::CpuGeometryUpload);
     ++m_revision;
     m_dev->InvalidateTessellation(m_identity);
     ID3D11DeviceContext* ctx = m_dev->Ctx();
     if (m_dynamic) {
         D3D11_MAPPED_SUBRESOURCE map;
-        if ((m_lockFlags & D8LOCK_NOOVERWRITE) && m_everDiscarded) {
+        if ((lockFlags & D8LOCK_NOOVERWRITE) && m_everDiscarded) {
             if (SUCCEEDED(ctx->Map(m_buf.Get(), 0, D3D11_MAP_WRITE_NO_OVERWRITE, 0, &map))) {
-                memcpy((BYTE*)map.pData + m_lockOffset, m_shadow.data() + m_lockOffset, m_lockSize);
+                memcpy((BYTE*)map.pData + lockOffset, data, lockSize);
                 ctx->Unmap(m_buf.Get(), 0);
-                ++m_dev->m_perf.geometryUploads; m_dev->m_perf.geometryUploadBytes+=m_lockSize;
+                ++m_dev->m_perf.geometryUploads; m_dev->m_perf.geometryUploadBytes+=lockSize;
             }
         } else if (SUCCEEDED(ctx->Map(m_buf.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
-            // The shadow always holds the full contents, so a discard never loses data.
-            memcpy(map.pData, m_shadow.data(), m_size);
+            // A discard needs the full contents: from the shadow, or the whole copy queued with it.
+            const BYTE* full = lockOffset == 0 && lockSize == m_size ? data : m_shadow.data();
+            memcpy(map.pData, full, m_size);
             ctx->Unmap(m_buf.Get(), 0);
             ++m_dev->m_perf.geometryUploads; m_dev->m_perf.geometryUploadBytes+=m_size;
             m_everDiscarded = true;
         }
     } else {
-        D3D11_BOX box = { m_lockOffset, 0, 0, m_lockOffset + m_lockSize, 1, 1 };
-        ctx->UpdateSubresource(m_buf.Get(), 0, &box, m_shadow.data() + m_lockOffset, 0, 0);
-        ++m_dev->m_perf.geometryUploads; m_dev->m_perf.geometryUploadBytes+=m_lockSize;
+        D3D11_BOX box = { lockOffset, 0, 0, lockOffset + lockSize, 1, 1 };
+        ctx->UpdateSubresource(m_buf.Get(), 0, &box, data, 0, 0);
+        ++m_dev->m_perf.geometryUploads; m_dev->m_perf.geometryUploadBytes+=lockSize;
     }
     return S_OK;
 }
@@ -607,15 +631,20 @@ HRESULT VertexBuffer::QueryInterface(REFIID, void** out)
 ULONG VertexBuffer::Release()
 {
     ULONG r = InterlockedDecrement(&m_ref);
-    if (r == 0) { Device* d = m_dev; delete this; d->Release(); }
+    if (r == 0) {
+        VertexBuffer* self = this;
+        Device* d = m_dev;
+        auto destroy = [self, d] { delete self; d->Release(); };
+        if (d->m_csmt.OffWorker()) d->m_csmt.Post(destroy); else destroy();
+    }
     return r;
 }
 
 HRESULT VertexBuffer::GetDevice(ID8Device** dev)
 {
     if (!dev) return D8ERR_INVALIDCALL;
-    *dev = m_dev;
-    m_dev->AddRef();
+    *dev = m_dev->Facade();
+    (*dev)->AddRef();
     return S_OK;
 }
 
@@ -642,15 +671,20 @@ HRESULT IndexBuffer::QueryInterface(REFIID, void** out)
 ULONG IndexBuffer::Release()
 {
     ULONG r = InterlockedDecrement(&m_ref);
-    if (r == 0) { Device* d = m_dev; delete this; d->Release(); }
+    if (r == 0) {
+        IndexBuffer* self = this;
+        Device* d = m_dev;
+        auto destroy = [self, d] { delete self; d->Release(); };
+        if (d->m_csmt.OffWorker()) d->m_csmt.Post(destroy); else destroy();
+    }
     return r;
 }
 
 HRESULT IndexBuffer::GetDevice(ID8Device** dev)
 {
     if (!dev) return D8ERR_INVALIDCALL;
-    *dev = m_dev;
-    m_dev->AddRef();
+    *dev = m_dev->Facade();
+    (*dev)->AddRef();
     return S_OK;
 }
 

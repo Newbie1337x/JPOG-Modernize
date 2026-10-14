@@ -825,6 +825,23 @@ std::string VSSource(DWORD t, int offset = 0)
 
 } // namespace
 
+UINT VSConstantRegisters(const DWORD* func)
+{
+    std::vector<Instr> code;
+    DWORD minor;
+    std::string error;
+    if (!func || !Decode(func, false, code, minor, error)) return 256;
+    UINT used = 4;
+    for (const Instr& in : code)
+        for (DWORD t : in.p) {
+            if (RegTypeOf(t) != RT_CONST) continue;
+            if (t & (1 << 13)) return 256;
+            const UINT end = (UINT)RegNumOf(t) + 4;
+            if (end > used) used = end;
+        }
+    return used < 256 ? used : 256;
+}
+
 std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& error)
 {
     if ((func[0] & 0xFFFF0000) != 0xFFFE0000) { error = "not a vertex shader"; return ""; }

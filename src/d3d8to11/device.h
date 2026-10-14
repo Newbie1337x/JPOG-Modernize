@@ -7,11 +7,13 @@
 #include "draw_diagnostics.h"
 #include "descriptor_reuse.h"
 #include "water_regions.h"
+#include "csmt.h"
 
 struct VertexShader8 {
     std::vector<DWORD> decl, func;
     VSDecl parsed;
     int worldKind=0; // immutable declaration classification, computed at creation
+    UINT constRegs=256; // c0..constRegs-1 can be read (VSConstantRegisters)
     ComPtr<ID3D11VertexShader> vs;
     ComPtr<ID3D11InputLayout> layout;
     bool failed = false;
@@ -25,8 +27,14 @@ struct PixelShader8 {
     PSVariant lastVariant; ID3D11PixelShader* lastShader = nullptr; // most recent lookup
 };
 
+class Device;
+// [Performance] Threaded: the device the game gets, recording calls for a render thread
+// (csmt_device.cpp). nullptr when the thread cannot start.
+ID8Device* CreateThreadedDevice(Device* dev);
+
 class Device : public ID8Device {
     friend struct TessCacheKeyTest;
+    friend class CsmtDevice;
     friend class BufferImpl; // geometry upload profiling, no ownership change
 public:
     Device(Direct3D8* d3d, HWND focus, DWORD flags, D3D8PresentParameters* pp);
@@ -135,6 +143,13 @@ public:
     HRESULT STDMETHODCALLTYPE DrawRectPatch(UINT, const float*, const void*) override { return D8ERR_INVALIDCALL; }
     HRESULT STDMETHODCALLTYPE DrawTriPatch(UINT, const float*, const void*) override { return D8ERR_INVALIDCALL; }
     HRESULT STDMETHODCALLTYPE DeletePatch(UINT) override { return S_OK; }
+
+    // Render thread (csmt.h): with [Performance] Threaded the game holds m_facade, which records
+    // its calls; everything that touches the D3D11 context runs on the queue's worker.
+    CommandQueue m_csmt;
+    ID8Device* m_facade = nullptr;
+    DWORD m_gameThread = 0; // the thread the game records on (threaded device)
+    ID8Device* Facade() { return m_facade ? m_facade : this; }
 
     // Internals used by resources
     ID3D11Device* D3D() { return m_device.Get(); }
@@ -480,6 +495,7 @@ private:
     bool m_grassUploaded = false;
     bool m_grassApplied = false;
     UINT m_vsWriteLo = 0, m_vsWriteHi = 0;
+    size_t m_vsRingValid = 0; // bytes of the current ring window copied from m_vsConst
     UINT m_vsConstUsed = 0; // registers 0..used-1 have been written at least once: the upload copies only those
     // Per-draw bindings last sent to the driver: unchanged ones are not sent again. Passes that
     // bind outside the draw path (clears, resolve, bloom, AA, FSR, Present, ImGui) end with
