@@ -250,6 +250,7 @@ void Device::DrawOverlay()
         if (tab == 4) ImGui::TextWrapped("Funciones en pruebas. Pueden producir artefactos o aumentar la latencia. Los diagnosticos solo cambian la vista, no se eliminan funciones.");
         if(tab == 3 && ImGui::CollapsingHeader("Rendimiento y recursos", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Medir CPU/GPU (1 cuadro de cada 30)",&g_config.performanceGPU);
+            ImGui::Checkbox("Constantes en anillo (prueba A/B)",&g_config.constantRing);
             ImGui::Checkbox("Guardar CSV de rendimiento (1/seg)",&g_config.performanceLog);
             if(m_perf.csvFailed)ImGui::TextColored(ImVec4(1,.4f,.3f,1),"No se pudo escribir el CSV.");
             else if(!m_perf.csvPath.empty()){ImGui::TextWrapped("CSV: %s",m_perf.csvPath.c_str());}

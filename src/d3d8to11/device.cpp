@@ -189,6 +189,13 @@ bool Device::CreatePresentResources()
                                  D3D11_CPU_ACCESS_WRITE, 0, 0 };
         return SUCCEEDED(m_device->CreateBuffer(&bd, nullptr, &out));
     };
+    {
+        D3D11_FEATURE_DATA_D3D11_OPTIONS opt = {};
+        if (m_ctx1 && SUCCEEDED(m_device->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &opt, sizeof(opt))) &&
+            opt.ConstantBufferOffsetting && opt.MapNoOverwriteOnDynamicConstantBuffer && !makeCB(kVsRingBytes, m_vsRing))
+            m_vsRing.Reset();
+        Log("Vertex constants: %s", m_vsRing ? "ring buffer (no-overwrite, offset binding)" : "one buffer per draw (discard)");
+    }
     if (!makeCB(sizeof(m_vsConst), m_vsCB) || !makeCB(sizeof(VSExtraConstants), m_vsExtraCB) ||
         !makeCB(sizeof(PSConstants), m_psCB) || !makeCB(sizeof(HelperConstants), m_clearCB))
         return false;
@@ -1011,8 +1018,9 @@ ID3D11BlendState* Device::GetBlendState()
     const uint64_t key = (enable ? 1ull : 0ull) | ((uint64_t)src << 1) | ((uint64_t)dst << 9) |
                          ((uint64_t)(m_rs[RS_BLENDOP] & 7) << 17) | ((uint64_t)(m_rs[RS_COLORWRITEENABLE] & 0xF) << 20) |
                          ((uint64_t)(AlphaToCoverageActive() ? 1 : 0) << 24);
+    if (key == m_blendKey) return m_blendKeyState;
     auto it = m_blendStates.find(key);
-    if (it != m_blendStates.end()) return it->second.Get();
+    if (it != m_blendStates.end()) { m_blendKey = key; return m_blendKeyState = it->second.Get(); }
     D3D11_BLEND_DESC bd = {};
     D3D11_RENDER_TARGET_BLEND_DESC& r = bd.RenderTarget[0];
     r.BlendEnable = enable;
@@ -1027,7 +1035,8 @@ ID3D11BlendState* Device::GetBlendState()
     ComPtr<ID3D11BlendState> st;
     m_device->CreateBlendState(&bd, &st);
     m_blendStates[key] = st;
-    return st.Get();
+    m_blendKey = key;
+    return m_blendKeyState = st.Get();
 }
 
 ID3D11DepthStencilState* Device::GetDepthState()
@@ -1039,8 +1048,9 @@ ID3D11DepthStencilState* Device::GetDepthState()
         key |= (1ull << 6) | ((uint64_t)(m_rs[RS_STENCILFUNC] & 15) << 7) | ((uint64_t)(m_rs[RS_STENCILFAIL] & 15) << 11) |
                ((uint64_t)(m_rs[RS_STENCILZFAIL] & 15) << 15) | ((uint64_t)(m_rs[RS_STENCILPASS] & 15) << 19) |
                ((uint64_t)(m_rs[RS_STENCILMASK] & 0xFF) << 23) | ((uint64_t)(m_rs[RS_STENCILWRITEMASK] & 0xFF) << 31);
+    if (key == m_depthKey) return m_depthKeyState;
     auto it = m_depthStates.find(key);
-    if (it != m_depthStates.end()) return it->second.Get();
+    if (it != m_depthStates.end()) { m_depthKey = key; return m_depthKeyState = it->second.Get(); }
     D3D11_DEPTH_STENCIL_DESC dd = {};
     dd.DepthEnable = z;
     dd.DepthWriteMask = m_rs[RS_ZWRITEENABLE] ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
@@ -1056,14 +1066,16 @@ ID3D11DepthStencilState* Device::GetDepthState()
     ComPtr<ID3D11DepthStencilState> st;
     m_device->CreateDepthStencilState(&dd, &st);
     m_depthStates[key] = st;
-    return st.Get();
+    m_depthKey = key;
+    return m_depthKeyState = st.Get();
 }
 
 ID3D11RasterizerState* Device::GetRasterState()
 {
     const uint64_t key = (m_rs[RS_CULLMODE] & 3) | ((uint64_t)(m_rs[RS_FILLMODE] & 3) << 2) | ((uint64_t)(m_rs[RS_ZBIAS] & 0xFF) << 4);
+    if (key == m_rasterKey) return m_rasterKeyState;
     auto it = m_rasterStates.find(key);
-    if (it != m_rasterStates.end()) return it->second.Get();
+    if (it != m_rasterStates.end()) { m_rasterKey = key; return m_rasterKeyState = it->second.Get(); }
     D3D11_RASTERIZER_DESC rd = {};
     rd.FillMode = m_rs[RS_FILLMODE] == 2 ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
     rd.CullMode = m_rs[RS_CULLMODE] == 2 ? D3D11_CULL_FRONT : (m_rs[RS_CULLMODE] == 3 ? D3D11_CULL_BACK : D3D11_CULL_NONE);
@@ -1073,7 +1085,8 @@ ID3D11RasterizerState* Device::GetRasterState()
     ComPtr<ID3D11RasterizerState> st;
     m_device->CreateRasterizerState(&rd, &st);
     m_rasterStates[key] = st;
-    return st.Get();
+    m_rasterKey = key;
+    return m_rasterKeyState = st.Get();
 }
 
 ID3D11SamplerState* Device::GetSampler(int stage)
@@ -1144,7 +1157,8 @@ ID3D11PixelShader* Device::GetPixelShader()
         v.waterSamples = m_waterDraw && m_waterSamples>1 ? (BYTE)m_waterSamples : 0;
         if (v.normalMap && m_drawDiagnostics.First(m_vsHandle,m_psHandle,DrawDiagnostics::NormalMap)) Log(
                                  "normal map draw: VS 0x%lx PS 0x%lx kind %d", m_vsHandle, m_psHandle, m_worldKind);
-        for (auto& e : ps->variants) if (e.first == v) return e.second.Get();
+        if (ps->lastShader && ps->lastVariant == v) return ps->lastShader;
+        for (auto& e : ps->variants) if (e.first == v) { ps->lastVariant = v; return ps->lastShader = e.second.Get(); }
         std::string error;
         std::string hlsl = TranslatePS(ps->func.data(), v, error);
         ComPtr<ID3D11PixelShader> shader;
@@ -1204,7 +1218,7 @@ template<class T> bool SameBinding(T** cache, UINT capacity, UINT slot, UINT n, 
     return false;
 }
 }
-void Device::InvalidateBindings() { memset(&m_bind, 0xFF, sizeof(m_bind)); }
+void Device::InvalidateBindings() { memset(&m_bind, 0xFF, sizeof(m_bind)); m_vsRingBound = false; }
 void Device::BindPSSrv(UINT s, UINT n, ID3D11ShaderResourceView* const* v)
 { if (SameBinding(m_bind.psSrv, BindingCache::Srv, s, n, v)) ++m_perf.redundantBinds; else m_ctx->PSSetShaderResources(s, n, v); }
 void Device::BindVSSrv(UINT s, UINT n, ID3D11ShaderResourceView* const* v)
@@ -1331,13 +1345,39 @@ bool Device::PrepareDraw()
 
     detail.Next(Performance::CpuConstants);
     // Constants
-    if (m_vsConstDirty) {
+    const size_t vsBytes = (size_t)(m_vsConstUsed ? m_vsConstUsed : kMaxVSConst) * 16;
+    const bool ring = m_vsRing && g_config.constantRing;
+    if (ring != m_vsRingWasOn) { m_vsRingWasOn = ring; m_vsConstDirty = true; m_vsRingBound = false; } // switched: upload to the other buffer
+    if (ring && m_vsConstDirty) {
+        // The bound window is always the full 256 registers; registers past vsBytes hold other
+        // draws' data, never read (as with the single buffer, where they are unwritten).
+        D3D11_MAP mode = D3D11_MAP_WRITE_NO_OVERWRITE;
+        if (m_vsRingPos + sizeof(m_vsConst) > kVsRingBytes) { mode = D3D11_MAP_WRITE_DISCARD; m_vsRingPos = 0; }
+        D3D11_MAPPED_SUBRESOURCE map;
+        if (SUCCEEDED(m_ctx->Map(m_vsRing.Get(), 0, mode, 0, &map))) {
+            memcpy((BYTE*)map.pData + m_vsRingPos, m_vsConst, vsBytes);
+            m_ctx->Unmap(m_vsRing.Get(), 0);
+            m_vsRingFirst = m_vsRingPos / 16;
+            m_vsRingPos += (UINT)((vsBytes + 255) & ~(size_t)255);
+            m_perf.constantBytes += vsBytes;
+            ++m_perf.vsUploads;
+            m_vsRingBound = false;
+        }
+        m_vsConstDirty = false;
+    }
+    if (ring) {
+        if (!m_vsRingBound) {
+            const UINT num = kMaxVSConst;
+            m_ctx1->VSSetConstantBuffers1(0, 1, m_vsRing.GetAddressOf(), &m_vsRingFirst, &num);
+            m_vsRingBound = true;
+            m_bind.vsCb[0] = m_vsRing.Get();
+        }
+    } else if (m_vsConstDirty) {
         D3D11_MAPPED_SUBRESOURCE map;
         if (SUCCEEDED(m_ctx->Map(m_vsCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
             // Registers never written are not read by the game's shaders (zero in m_vsConst).
-            const size_t bytes = (size_t)(m_vsConstUsed ? m_vsConstUsed : kMaxVSConst) * 16;
-            memcpy(map.pData, m_vsConst, bytes);
-            m_perf.constantBytes += bytes;
+            memcpy(map.pData, m_vsConst, vsBytes);
+            m_perf.constantBytes += vsBytes;
             m_ctx->Unmap(m_vsCB.Get(), 0);
             ++m_perf.vsUploads;
         }
@@ -1352,8 +1392,11 @@ bool Device::PrepareDraw()
         }
         m_psConstDirty = false;
     }
-    ID3D11Buffer* vcbs[2] = { m_vsCB.Get(), m_vsExtraCB.Get() };
-    BindVSCB(0, 2, vcbs);
+    if (ring) BindVSCB(1, 1, m_vsExtraCB.GetAddressOf());
+    else {
+        ID3D11Buffer* vcbs[2] = { m_vsCB.Get(), m_vsExtraCB.Get() };
+        BindVSCB(0, 2, vcbs);
+    }
     BindPSCB(0, 1, m_psCB.GetAddressOf());
 
     detail.Next(Performance::CpuResources);

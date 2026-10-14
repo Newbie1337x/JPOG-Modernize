@@ -22,6 +22,7 @@ struct PixelShader8 {
     bool samplesStage1=false;
     bool water=false; // immutable bytecode classification, computed at creation
     std::vector<std::pair<PSVariant, ComPtr<ID3D11PixelShader>>> variants;
+    PSVariant lastVariant; ID3D11PixelShader* lastShader = nullptr; // most recent lookup
 };
 
 class Device : public ID8Device {
@@ -221,6 +222,17 @@ private:
     std::unordered_map<std::string, ComPtr<ID3D11PixelShader>> m_ffShaders;
     ComPtr<ID3D11Buffer> m_vsCB, m_vsExtraCB, m_psCB;
     UINT m_swapFlags = 0; // DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING when supported
+    // Vertex constants in a ring (D3D11.1 no-overwrite maps, bound by offset): each draw writes
+    // a fresh 256-byte-aligned window instead of renaming one buffer per draw.
+    ComPtr<ID3D11Buffer> m_vsRing;
+    static const UINT kVsRingBytes = 4u << 20;
+    UINT m_vsRingPos = kVsRingBytes, m_vsRingFirst = 0;
+    bool m_vsRingBound = false, m_vsRingWasOn = false;
+    // Last pipeline-state keys: an unchanged key skips the cache lookup.
+    uint64_t m_blendKey = ~0ull, m_depthKey = ~0ull, m_rasterKey = ~0ull;
+    ID3D11BlendState* m_blendKeyState = nullptr;
+    ID3D11DepthStencilState* m_depthKeyState = nullptr;
+    ID3D11RasterizerState* m_rasterKeyState = nullptr;
     ComPtr<ID3D11Buffer> m_dynVB, m_dynIB;
     UINT m_dynVBSize = 0, m_dynIBSize = 0;
     ComPtr<ID3D11Buffer> m_fanIB;   // index pattern for triangle fans (0, i, i+1)
@@ -394,6 +406,7 @@ private:
     SunConstants m_sun = {};
     SunConstants m_sunUploaded = {};
     bool m_sunUploadedValid = false;
+    bool m_sunNeutral = false; // effects off: m_sun is zero and uploaded; nothing to compare per draw
     int m_worldKind = 0;
     bool m_sunStarted = false, m_sunResolved = false, m_worldDraw = false;
     bool m_worldCaster = false;

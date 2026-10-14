@@ -235,6 +235,7 @@ void LoadConfig()
     if(g_config.waterSSRSteps>48)g_config.waterSSRSteps=48;
     g_config.performanceLog=GetPrivateProfileIntA("Performance","LogCSV",1,ini.c_str())!=0;
     g_config.performanceGPU=GetPrivateProfileIntA("Performance","MeasureGPU",1,ini.c_str())!=0;
+    g_config.constantRing=GetPrivateProfileIntA("Performance","ConstantRing",1,ini.c_str())!=0;
     g_config.taa=GetPrivateProfileIntA("Antialiasing","TAA",1,ini.c_str())!=0;
     g_config.fsr31=GetPrivateProfileIntA("Antialiasing","FSR31",1,ini.c_str())!=0;
     g_config.frameGeneration=GetPrivateProfileIntA("Antialiasing","FrameGeneration",0,ini.c_str())!=0;
@@ -414,6 +415,7 @@ void SaveConfig()
     putInt("Water","SceneReflectionSteps",g_config.waterSSRSteps);
     putInt("Performance","LogCSV",g_config.performanceLog);
     putInt("Performance","MeasureGPU",g_config.performanceGPU);
+    putInt("Performance","ConstantRing",g_config.constantRing);
     putInt("Antialiasing","TAA",g_config.taa);
     putInt("Antialiasing","FSR31",g_config.fsr31);
     putInt("Antialiasing","FrameGeneration",g_config.frameGeneration);

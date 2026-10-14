@@ -128,6 +128,7 @@ struct Config {
     float waterLagoonFoam=.03f,waterLagoonRipples=.25f,waterOceanRipples=1.4f;
     float waterSwellAmplitude=.65f,waterSwellLength=1.f,waterSwellCoastDepth=3.f,waterCrestFoam=.35f;
     bool performanceLog=true, performanceGPU=true;
+    bool constantRing=true; // [Performance] ConstantRing: vertex constants through a no-overwrite ring (0 = one buffer, discard)
     bool taa=true, fsr1=true;
     bool fsr31=true; // experimental native-resolution temporal AA, not frame generation
     bool frameGeneration=false; // synchronous x2 prototype; requires native AA + VSync

@@ -653,19 +653,23 @@ void Device::UpdateSun(bool shadowPass)
         // Translated shaders still reference b1/b2: upload a neutral state, not stale
         // relighting/night/grass parameters from the last enabled frame.
         m_worldDraw = m_worldCaster = false;
-        m_sun = {};
-        if (!m_sunUploadedValid || memcmp(&m_sunUploaded, &m_sun, sizeof(m_sun))) {
-            D3D11_MAPPED_SUBRESOURCE map;
-            if (SUCCEEDED(m_ctx->Map(m_sunCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
-                memcpy(map.pData, &m_sun, sizeof(m_sun)); m_ctx->Unmap(m_sunCB.Get(), 0);
-                m_sunUploaded = m_sun; m_sunUploadedValid = true;
+        if (!m_sunNeutral) {
+            m_sun = {};
+            if (!m_sunUploadedValid || memcmp(&m_sunUploaded, &m_sun, sizeof(m_sun))) {
+                D3D11_MAPPED_SUBRESOURCE map;
+                if (SUCCEEDED(m_ctx->Map(m_sunCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+                    memcpy(map.pData, &m_sun, sizeof(m_sun)); m_ctx->Unmap(m_sunCB.Get(), 0);
+                    m_sunUploaded = m_sun; m_sunUploadedValid = true;
+                }
             }
+            m_sunNeutral = m_sunUploadedValid && !memcmp(&m_sunUploaded, &m_sun, sizeof(m_sun));
         }
         BindVSCB(2, 1, m_sunCB.GetAddressOf());
         BindPSCB(1, 1, m_sunCB.GetAddressOf());
         if (m_worldKind == 4) UploadGrass(); // explicitly disable old pusher data
         return;
     }
+    m_sunNeutral = false;
     if (!SceneFx()) {
         m_worldDraw = false;
     } else {
