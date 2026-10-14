@@ -43,6 +43,7 @@ struct PSVariant {
     BYTE material=0;
     BYTE relief = 0;    // stage-0 skin parallax + self-shadowing (cbuffer b4)
     BYTE emissive = 0;  // stage-0 night emission mask at t8 (emissiveGlow)
+    BYTE roughMap = 0;  // stage-0 roughness map at t16 (relit dinosaurs)
     bool operator==(const PSVariant& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
 };
 std::string TranslatePS(const DWORD* func, const PSVariant& variant, std::string& error);

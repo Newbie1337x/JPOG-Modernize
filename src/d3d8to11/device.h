@@ -409,6 +409,12 @@ private:
             m_textures[stage]->GetType() != D8RTYPE_TEXTURE) return nullptr;
         return static_cast<Texture*>(static_cast<ID8Texture*>(m_textures[stage]))->m_normalSrv.Get();
     }
+    // Stage-0 roughness map: relit dinosaur draws (specular per pixel).
+    ID3D11ShaderResourceView* ActiveRoughness() const {
+        if (!g_config.normalMaps || !m_worldDraw || m_worldKind != 1 || m_sun.flags[1] > 0.5f || ActiveMaterial() ||
+            !m_textures[0] || m_textures[0]->GetType() != D8RTYPE_TEXTURE) return nullptr;
+        return static_cast<Texture*>(static_cast<ID8Texture*>(m_textures[0]))->m_roughSrv.Get();
+    }
     bool GrassCaptureActive() const {
         return (g_config.grassPhysics || (g_config.waterEnabled && g_config.waterInteraction) || (g_config.fsr31 && !m_fsr31Failed)) &&
             m_worldDraw && m_worldKind == 1 && m_sunStarted && !m_sunResolved;

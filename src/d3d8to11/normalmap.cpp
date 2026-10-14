@@ -5,6 +5,8 @@
 // D3D8to11_SetNormalMap(texture, path) right after the game creates the texture. The DDS is
 // loaded here (BC1/BC2/BC3/BC5, DX10 BC5, 32-bit uncompressed; all mip levels) and kept on the
 // Texture; world draws that sample it on stage 0 get the relief term (shaders.cpp NormalMapCode).
+// Roughness maps (<library>__<texture>_r.dds, D3D8to11_SetRoughnessMap; BC4 or 8-bit) drive the
+// specular of relit dinosaurs per pixel.
 #include "device.h"
 #include <stdio.h>
 #include <cctype>
@@ -32,6 +34,8 @@ bool ParseDds(const std::vector<BYTE>& f, DdsInfo& d)
         case MAKEFOURCC('D', 'X', 'T', '1'): d.format = DXGI_FORMAT_BC1_UNORM; d.blockBytes = 8; break;
         case MAKEFOURCC('D', 'X', 'T', '3'): d.format = DXGI_FORMAT_BC2_UNORM; d.blockBytes = 16; break;
         case MAKEFOURCC('D', 'X', 'T', '5'): d.format = DXGI_FORMAT_BC3_UNORM; d.blockBytes = 16; break;
+        case MAKEFOURCC('A', 'T', 'I', '1'): case MAKEFOURCC('B', 'C', '4', 'U'):
+            d.format = DXGI_FORMAT_BC4_UNORM; d.blockBytes = 8; break;
         case MAKEFOURCC('A', 'T', 'I', '2'): case MAKEFOURCC('B', 'C', '5', 'U'):
             d.format = DXGI_FORMAT_BC5_UNORM; d.blockBytes = 16; break;
         case MAKEFOURCC('D', 'X', '1', '0'): {
@@ -39,6 +43,8 @@ bool ParseDds(const std::vector<BYTE>& f, DdsInfo& d)
             const UINT dx = u32(128);
             d.dataOffset = 148;
             if (dx == DXGI_FORMAT_BC5_UNORM || dx == DXGI_FORMAT_BC5_TYPELESS) { d.format = DXGI_FORMAT_BC5_UNORM; d.blockBytes = 16; }
+            else if (dx == DXGI_FORMAT_BC4_UNORM || dx == DXGI_FORMAT_BC4_TYPELESS) { d.format = DXGI_FORMAT_BC4_UNORM; d.blockBytes = 8; }
+            else if (dx == DXGI_FORMAT_R8_UNORM) { d.format = DXGI_FORMAT_R8_UNORM; d.pixelBytes = 1; }
             else if (dx == DXGI_FORMAT_BC3_UNORM) { d.format = DXGI_FORMAT_BC3_UNORM; d.blockBytes = 16; }
             else if (dx == DXGI_FORMAT_BC1_UNORM) { d.format = DXGI_FORMAT_BC1_UNORM; d.blockBytes = 8; }
             else if (dx == DXGI_FORMAT_R8G8B8A8_UNORM) { d.format = DXGI_FORMAT_R8G8B8A8_UNORM; d.pixelBytes = 4; }
@@ -51,20 +57,18 @@ bool ParseDds(const std::vector<BYTE>& f, DdsInfo& d)
     } else if (bits == 32) {
         d.format = rMask == 0x00FF0000 ? DXGI_FORMAT_B8G8R8A8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
         d.pixelBytes = 4;
+    } else if (bits == 8) { // luminance / single channel
+        d.format = DXGI_FORMAT_R8_UNORM;
+        d.pixelBytes = 1;
     } else {
         return false;
     }
     return d.width && d.height;
 }
 
-} // namespace
-
-extern "C" BOOL WINAPI D3D8to11_SetNormalMap(void* texture, const char* path)
+// Whole DDS file (all mip levels) into an immutable texture.
+bool LoadDdsFile(ID3D11Device* dev, const char* path, ComPtr<ID3D11ShaderResourceView>& srv, DdsInfo& d)
 {
-    if (!texture || !path || g_config.useDgVoodoo) return FALSE;
-    ID8BaseTexture* base = (ID8BaseTexture*)texture;
-    if (base->GetType() != D8RTYPE_TEXTURE) return FALSE;
-    Texture* tex = static_cast<Texture*>(static_cast<ID8Texture*>(base));
     std::vector<BYTE> file;
     if (FILE* f = _fsopen(path, "rb", _SH_DENYNO)) {
         fseek(f, 0, SEEK_END);
@@ -73,8 +77,7 @@ extern "C" BOOL WINAPI D3D8to11_SetNormalMap(void* texture, const char* path)
         if (size > 0) { file.resize((size_t)size); if (fread(file.data(), 1, file.size(), f) != file.size()) file.clear(); }
         fclose(f);
     }
-    DdsInfo d;
-    if (!ParseDds(file, d)) { LogOnce(std::string("nm-") + path, "normal map: unsupported or unreadable DDS %s", path); return FALSE; }
+    if (!ParseDds(file, d)) { LogOnce(std::string("dds-") + path, "unsupported or unreadable DDS %s", path); return false; }
     std::vector<D3D11_SUBRESOURCE_DATA> init;
     size_t offset = d.dataOffset;
     UINT mips = 0;
@@ -87,16 +90,36 @@ extern "C" BOOL WINAPI D3D8to11_SetNormalMap(void* texture, const char* path)
         offset += (size_t)pitch * rows;
         mips++;
     }
-    if (!mips) return FALSE;
+    if (!mips) return false;
+    d.mips = mips;
     D3D11_TEXTURE2D_DESC td = { d.width, d.height, mips, 1, d.format, { 1, 0 }, D3D11_USAGE_IMMUTABLE,
                                 D3D11_BIND_SHADER_RESOURCE, 0, 0 };
     ComPtr<ID3D11Texture2D> t;
-    ComPtr<ID3D11ShaderResourceView> srv;
-    if (FAILED(tex->m_dev->D3D()->CreateTexture2D(&td, init.data(), &t)) ||
-        FAILED(tex->m_dev->D3D()->CreateShaderResourceView(t.Get(), nullptr, &srv))) {
-        Log("normal map: texture creation failed for %s", path);
-        return FALSE;
+    if (FAILED(dev->CreateTexture2D(&td, init.data(), &t)) || FAILED(dev->CreateShaderResourceView(t.Get(), nullptr, &srv))) {
+        Log("texture creation failed for %s", path);
+        return false;
     }
+    return true;
+}
+
+Texture* GameTexture(void* texture)
+{
+    if (!texture || g_config.useDgVoodoo) return nullptr;
+    ID8BaseTexture* base = (ID8BaseTexture*)texture;
+    if (base->GetType() != D8RTYPE_TEXTURE) return nullptr;
+    return static_cast<Texture*>(static_cast<ID8Texture*>(base));
+}
+
+} // namespace
+
+extern "C" BOOL WINAPI D3D8to11_SetNormalMap(void* texture, const char* path)
+{
+    Texture* tex = GameTexture(texture);
+    if (!tex || !path) return FALSE;
+    ComPtr<ID3D11ShaderResourceView> srv;
+    DdsInfo d;
+    if (!LoadDdsFile(tex->m_dev->D3D(), path, srv, d)) return FALSE;
+    const UINT mips = d.mips;
     tex->m_normalSrv = srv;
     std::string identity=path;size_t slash=identity.find_last_of("/\\");
     if(slash!=std::string::npos)identity=identity.substr(slash+1);
@@ -108,6 +131,18 @@ extern "C" BOOL WINAPI D3D8to11_SetNormalMap(void* texture, const char* path)
         identity=="structures_hi__hamburger_n.dds"?2:0;
     if(tex->m_materialProfile)Log("Material pilot tagged: %s, profile %u (texture-scoped, not object ID)",identity.c_str(),unsigned(tex->m_materialProfile));
     LogOnce("nm-first", "normal maps active (first: %s, %ux%u, %u mips)", path, d.width, d.height, mips);
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI D3D8to11_SetRoughnessMap(void* texture, const char* path)
+{
+    Texture* tex = GameTexture(texture);
+    if (!tex || !path) return FALSE;
+    ComPtr<ID3D11ShaderResourceView> srv;
+    DdsInfo d;
+    if (!LoadDdsFile(tex->m_dev->D3D(), path, srv, d)) return FALSE;
+    tex->m_roughSrv = srv;
+    LogOnce(std::string("rough-") + path, "roughness map: %s (%ux%u, %u mips)", path, d.width, d.height, d.mips);
     return TRUE;
 }
 

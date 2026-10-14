@@ -782,8 +782,9 @@ struct TexReplacement {
 };
 static std::unordered_map<unsigned long long, TexReplacement> g_texMods;
 // Normal maps: <library>__<texture>_n.dds, handed to the D3D11 renderer (d3d8.dll export
-// D3D8to11_SetNormalMap) right after the game creates the texture, replaced or not.
-static std::unordered_map<unsigned long long, std::string> g_normalMods;
+// D3D8to11_SetNormalMap) right after the game creates the texture, replaced or not. Roughness
+// maps (<library>__<texture>_r.dds, D3D8to11_SetRoughnessMap) the same way.
+static std::unordered_map<unsigned long long, std::string> g_normalMods, g_roughMods;
 static bool g_texModsEnabled = true;
 static int g_texModsUsed = 0;
 
@@ -894,18 +895,23 @@ static void ScanTextureModsDir(const std::string& gameDir, const std::string& fo
                 it = tmls.emplace(name, std::move(data)).first;
             }
             const BYTE* blob; UINT size, hw = 0, hh = 0;
-            bool normal = false;
+            bool normal = false, rough = false;
             if (!FindTmlTexture(it->second, tex.c_str(), &blob, &size, &hw, &hh) || size < 16) {
-                const bool suffix = tex.size() > 2 && _stricmp(tex.c_str() + tex.size() - 2, "_n") == 0;
-                if (!suffix || !FindTmlTexture(it->second, tex.substr(0, tex.size() - 2).c_str(), &blob, &size, &hw, &hh) || size < 16)
+                const bool nSuffix = tex.size() > 2 && _stricmp(tex.c_str() + tex.size() - 2, "_n") == 0;
+                const bool rSuffix = tex.size() > 2 && _stricmp(tex.c_str() + tex.size() - 2, "_r") == 0;
+                if ((!nSuffix && !rSuffix) || !FindTmlTexture(it->second, tex.substr(0, tex.size() - 2).c_str(), &blob, &size, &hw, &hh) || size < 16)
                     continue;
-                normal = true;
+                normal = nSuffix; rough = rSuffix;
             }
             found = true;
             const char* tag = twin ? " (16-bit twin)" : "";
             const unsigned long long key = Fnv64(blob, size);
             if (normal) {
                 if (!g_normalMods.count(key)) { g_normalMods[key] = folder + file; LogTexMods("normal map: %s%s", shown.c_str(), tag); }
+                continue;
+            }
+            if (rough) {
+                if (!g_roughMods.count(key)) { g_roughMods[key] = folder + file; LogTexMods("roughness map: %s%s", shown.c_str(), tag); }
                 continue;
             }
             if (g_texMods.count(key)) {
@@ -1005,16 +1011,21 @@ static void NameTexture(unsigned long long key, void* texture, bool replaced)
 
 static void AttachNormalMap(unsigned long long key, void* texture)
 {
-    if (g_normalMods.empty() || !texture) return;
-    auto it = g_normalMods.find(key);
-    if (it == g_normalMods.end()) return;
-    static SetNormalMap_t setNormal = nullptr;
-    if (!setNormal) {
-        HMODULE d3d8 = GetModuleHandleA("d3d8.dll");
+    if ((g_normalMods.empty() && g_roughMods.empty()) || !texture) return;
+    static SetNormalMap_t setNormal = nullptr, setRough = nullptr; // same signature
+    static bool looked = false;
+    if (!looked) {
+        looked = true;
+        HMODULE d3d8 = GetModuleHandleA("d3d8.dll"); // dgVoodoo or another d3d8.dll: no maps
         setNormal = d3d8 ? (SetNormalMap_t)GetProcAddress(d3d8, "D3D8to11_SetNormalMap") : nullptr;
-        if (!setNormal) return; // dgVoodoo or another d3d8.dll: no normal maps
+        setRough = d3d8 ? (SetNormalMap_t)GetProcAddress(d3d8, "D3D8to11_SetRoughnessMap") : nullptr;
     }
-    if (!setNormal(texture, it->second.c_str())) LogTexMods("NORMAL MAP ERROR: %s%s", it->second.c_str(), "");
+    auto it = g_normalMods.find(key);
+    if (it != g_normalMods.end() && setNormal && !setNormal(texture, it->second.c_str()))
+        LogTexMods("NORMAL MAP ERROR: %s%s", it->second.c_str(), "");
+    it = g_roughMods.find(key);
+    if (it != g_roughMods.end() && setRough && !setRough(texture, it->second.c_str()))
+        LogTexMods("ROUGHNESS MAP ERROR: %s%s", it->second.c_str(), "");
 }
 
 static HRESULT WINAPI CreateTexMem_Hook(void* dev, const void* data, UINT size, UINT w, UINT h, UINT mips,
@@ -1081,7 +1092,7 @@ static bool RawCreate(int i, BYTE* r, UINT w, UINT h, UINT m, const void* d, UIN
     const bool ok = replaced || g_origRaw[i](r, w, h, m, d);
     if (ok && d) {
         const unsigned long long key = Fnv64((const BYTE*)d, (size_t)w * h * bpp);
-        if (!g_normalMods.empty()) AttachNormalMap(key, *(void**)(r + 0x60));
+        AttachNormalMap(key, *(void**)(r + 0x60));
         NameTexture(key, *(void**)(r + 0x60), replaced);
     }
     return ok;
@@ -1106,7 +1117,7 @@ static void InstallTextureMods()
 {
     if (!g_texModsEnabled) return;
     ScanTextureMods();
-    if (g_texMods.empty() && g_normalMods.empty()) return;
+    if (g_texMods.empty() && g_normalMods.empty() && g_roughMods.empty()) return;
     HMODULE rd3d = GetModuleHandleA("TRenderD3DInterface.dll");
     if (!rd3d) return;
     BYTE* fn = (BYTE*)rd3d + 0xf51a;

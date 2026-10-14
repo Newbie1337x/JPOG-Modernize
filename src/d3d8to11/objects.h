@@ -105,6 +105,7 @@ public:
     ComPtr<ID3D11Texture2D> m_tex;
     ComPtr<ID3D11ShaderResourceView> m_srv;
     ComPtr<ID3D11ShaderResourceView> m_normalSrv; // optional normal map (D3D8to11_SetNormalMap)
+    ComPtr<ID3D11ShaderResourceView> m_roughSrv;  // optional roughness map (D3D8to11_SetRoughnessMap)
     BYTE m_materialProfile=0; // scoped pilot: 1 Triceratops, 2 hamburger-shop ornament
     std::string m_name;        // <library>__<texture> reported by the plugin, for diagnostics
     unsigned long long m_contentHash = 0; // FNV-1a (seeded with the size, as the plugin) of the first level-0 upload

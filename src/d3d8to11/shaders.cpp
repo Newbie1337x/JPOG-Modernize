@@ -365,11 +365,12 @@ std::string SunBlock(int slot) {
 // Normal maps (stage 0, t9): relief relative to the sun on top of the game's own lighting. No
 // tangents in JPOG's meshes, so the frame comes from screen-space derivatives of the world position
 // and texture coordinate (Schueler). sunCamera.w = strength, negative = flip green.
-std::string NormalMapCode() {
-    return
-        "Texture2D normalTex : register(t9);\n"
+std::string NormalMapCode(bool detail) {
+    return std::string(detail ? "" : "Texture2D normalTex : register(t9);\n") +
         "float4 ApplyNormalMap(float4 color, VSOut i) {\n"
-        "  if (sunFlags.x < 0.5 || sunFlags.y > 0.5) return color;\n"
+        "  if (sunFlags.x < 0.5 || sunFlags.y > 0.5) return color;\n" +
+        (detail ? "  if (sunFlags.w == 1 && sunControl.x > 0.5 && sunControl.y != 1) return color;\n" : "") + // lit with DetailNormal
+
         "  float3 n = normalTex.Sample(smp0, i.t0.xy).xyz * 2 - 1;\n"
         "  if (sunCamera.w < 0) n.y = -n.y;\n"
         "  n.z = sqrt(saturate(1 - dot(n.xy, n.xy)));\n"
@@ -499,7 +500,40 @@ std::string MaterialCode(bool normalMap, int stage){
     if(stage==1){size_t p=0;while((p=s.find("i.t0.xy",p))!=std::string::npos){s.replace(p,7,"i.t1.xy");p+=7;}}
     return s;
 }
-std::string SunPixelCode() {
+// Detail normal for the relit dinosaur lighting (sun, moon rim, specular): the normal map turned
+// into world space with the same derivative frame as ApplyNormalMap; sunCamera.w = strength.
+std::string DetailNormalCode(bool rough) {
+    return std::string(
+        "Texture2D normalTex : register(t9);\n"
+        "float3 DetailNormal(float3 N, VSOut i) {\n"
+        "  float3 n = normalTex.Sample(smp0, i.t0.xy).xyz * 2 - 1;\n"
+        "  if (sunCamera.w < 0) n.y = -n.y;\n"
+        "  n.xy *= abs(sunCamera.w);\n"
+        "  n.z = sqrt(saturate(1 - dot(n.xy, n.xy)));\n"
+        "  float3 dp1 = ddx(i.world), dp2 = ddy(i.world);\n"
+        "  float2 uv1 = ddx(i.t0.xy), uv2 = ddy(i.t0.xy);\n"
+        "  float3 a = cross(dp2, N), b = cross(N, dp1);\n"
+        "  float3 T = a * uv1.x + b * uv2.x, B = a * uv1.y + b * uv2.y;\n"
+        "  float s = max(dot(T, T), dot(B, B));\n"
+        "  if (s < 1e-20) return N;\n"
+        "  return normalize((T * n.x + B * n.y) * rsqrt(s) + N * n.z); }\n") +
+        (rough ? "Texture2D<float> roughTex : register(t16);\n" : "");
+}
+std::string SunPixelCodeBase();
+std::string SunPixelCode(bool detail, bool rough) {
+    std::string s = SunPixelCodeBase();
+    if (!detail && !rough) return s;
+    auto put = [&](const char* marker, const char* code) {
+        size_t p = s.find(marker);
+        if (p != std::string::npos) s.replace(p, strlen(marker), code);
+    };
+    if (detail) put("  //DETAIL_NORMAL\n", "  if (sunFlags.w == 1) N = DetailNormal(N, i);\n");
+    if (rough) put("    float rough = specParams.x;\n", "    float rough = clamp(roughTex.Sample(smp0, i.t0.xy), 0.15, 1);\n");
+    const size_t at = s.find("float3 ToLinear(");
+    s.insert(at, detail ? DetailNormalCode(rough) : std::string("Texture2D<float> roughTex : register(t16);\n"));
+    return s;
+}
+std::string SunPixelCodeBase() {
     return SunBlock(1) +
         // Shadows are applied after the world pass (sun.cpp resolve). In-pass work is only the
         // optional replacement lighting ([Lighting] ReplaceOriginal=1); otherwise colour is untouched.
@@ -576,6 +610,7 @@ std::string SunPixelCode() {
         "  bool field = sunFlags.w != 1 && terrainMap.x > 0.5 && TerrainInside(i.world.xz);\n"
         "  if (field) N = TerrainNormal(i.world.xz);\n"
         "  else if (grass) N = float3(0, -1, 0);\n" // blades have no useful normal
+        "  //DETAIL_NORMAL\n"
         "  if (sunControl.y == 2) return float4(N*0.5+0.5,color.a);\n"
         // The game's baked factor also holds painted darkening (under trees, hollows): its ratio
         // to what the field normal gives under the same sun is kept as occlusion (sunControl.w),
@@ -627,9 +662,10 @@ std::string SunPixelCode() {
         "    float3 V = normalize(sunCamera.xyz - i.world), Ns = dot(N, V) < 0 ? -N : N;\n"
         "    float3 L = normalize(sunDirection.xyz), H = normalize(V + L);\n"
         "    float nl = saturate(dot(Ns, L)), nv = max(saturate(dot(Ns, V)), 1e-3), nh = saturate(dot(Ns, H)), vh = saturate(dot(V, H));\n"
-        "    float a = specParams.x * specParams.x, a2 = a * a, dd = nh * nh * (a2 - 1) + 1;\n"
+        "    float rough = specParams.x;\n"
+        "    float a = rough * rough, a2 = a * a, dd = nh * nh * (a2 - 1) + 1;\n"
         "    float D = a2 / (3.14159265 * max(dd * dd, 1e-6));\n"
-        "    float k = (specParams.x + 1) * (specParams.x + 1) / 8;\n"
+        "    float k = (rough + 1) * (rough + 1) / 8;\n"
         "    float G = nv / (nv * (1 - k) + k) * nl / max(nl * (1 - k) + k, 1e-3);\n"
         "    float F = specParams.y + (1 - specParams.y) * pow(1 - vh, 5);\n"
         "    sheen = GameSun() * (D * G * F / max(4 * nv, 1e-3)) * 3.14159265 * todSun.w;\n"
@@ -1040,10 +1076,11 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
     s += kPSCommon;
     s += TextureDecls(v.texDim);
     s += kVSOutputStruct;
-    s += SunPixelCode();
+    const bool detail = v.normalMap && !v.material && v.texDim[0] == 2;
+    s += SunPixelCode(detail, v.roughMap && !v.material && v.texDim[0] == 2);
     if (v.water) s += WaterPixelCode(v.waterSamples);
     if (v.emissive) s += "Texture2D emissiveTex : register(t8);\n";
-    if (v.normalMap && v.texDim[v.material?v.material-1:0] == 2) s += NormalMapCode();
+    if (v.normalMap && v.texDim[v.material?v.material-1:0] == 2) s += NormalMapCode(detail);
     if(v.material)s+=MaterialCode(v.normalMap && v.texDim[v.material-1]==2,v.material-1);
     const bool relief = v.relief && !v.shadowOnly && v.texDim[0] == 2;
     if (relief) s += ReliefCode();
@@ -1254,8 +1291,9 @@ std::string GenerateFFPS(const FFKey& k)
     s += kPSCommon;
     s += TextureDecls(dims);
     s += kVSOutputStruct;
-    s += SunPixelCode();
-    if (k.normalMap && dims[k.material?k.material-1:0] == 2) s += NormalMapCode();
+    const bool detail = k.normalMap && !k.material && dims[0] == 2;
+    s += SunPixelCode(detail, false);
+    if (k.normalMap && dims[k.material?k.material-1:0] == 2) s += NormalMapCode(detail);
     if(k.material)s+=MaterialCode(k.normalMap && dims[k.material-1]==2,k.material-1);
     s += k.shadowOnly ? "void main(VSOut i) {\n" : "float4 main(VSOut i) : SV_Target {\n";
     s += "  float4 diffuse = i.d0, specular = i.d1, cur = i.d0, temp = 0, tex = 1;\n";
