@@ -117,6 +117,7 @@ void LoadConfig()
     g_config.moonRim = readTod("MoonRim", g_config.moonRim, 0, 4);
     g_config.maxExposure = readTod("MaxExposure", g_config.maxExposure, 1, 6);
     g_config.nightSky = readTod("NightSky", g_config.nightSky, 0, 4);
+    g_config.nightDesaturate = readTod("NightDesaturate", g_config.nightDesaturate, 0, 1);
     g_config.stars = readTod("Stars", g_config.stars, 0, 4);
     g_config.moonSheen = readTod("MoonSheen", g_config.moonSheen, 0, 4);
     g_config.grassMoon = readTod("GrassMoon", g_config.grassMoon, 0, 4);
@@ -307,6 +308,7 @@ void SaveConfig()
     putFloat("TimeOfDay", "MoonRim", g_config.moonRim);
     putFloat("TimeOfDay", "MaxExposure", g_config.maxExposure);
     putFloat("TimeOfDay", "NightSky", g_config.nightSky);
+    putFloat("TimeOfDay", "NightDesaturate", g_config.nightDesaturate);
     putFloat("TimeOfDay", "Stars", g_config.stars);
     putFloat("TimeOfDay", "MoonSheen", g_config.moonSheen);
     putFloat("TimeOfDay", "GrassMoon", g_config.grassMoon);

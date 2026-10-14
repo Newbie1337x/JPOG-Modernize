@@ -290,6 +290,7 @@ void Device::DrawOverlay()
             ImGui::SetItemTooltip("How much the moon lights grass and water as a whole (their tips and edges catch it separately).");
             ImGui::ColorEdit3("Night ambient", g_config.nightAmbient, ImGuiColorEditFlags_Float);
             ImGui::SliderFloat("Night sky", &g_config.nightSky, 0, 4, "%.2f");
+            ImGui::SliderFloat("Night desaturation", &g_config.nightDesaturate, 0, 1, "%.2f");
             ImGui::SliderFloat("Stars", &g_config.stars, 0, 4, "%.2f");
             ImGui::TextDisabled("Dawn and dusk");
             ImGui::ColorEdit3("Low sun colour", g_config.lowSunColor, ImGuiColorEditFlags_Float);

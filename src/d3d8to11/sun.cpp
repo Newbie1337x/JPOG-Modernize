@@ -32,7 +32,7 @@ struct ResolveConstants {
     float tod[4];    // time of day: sky multiplier, w = sun/moon light (shafts, sunlight lift)
     float tod2[4];   // true sun direction (renderer Y-down), w = procedural sky weight
     float tod3[4];   // moon visibility, shadow tint rgb
-    float tod4[4];   // night sky brightness, stars, day weight, -
+    float tod4[4];   // night sky brightness, stars, day weight, night desaturation
 };
 
 const char* kResolveVS =
@@ -153,12 +153,12 @@ const char* kResolveMain =
     "float Hash(float2 p) { return frac(sin(dot(p, float2(127.1, 311.7))) * 43758.5453); }\n"
     "float3 ProceduralSky(float3 dir) {\n"
     "  float el = -dir.y, sunEl = -tod2.y;\n"
-    "  float3 night = lerp(float3(0.10, 0.16, 0.34), float3(0.03, 0.06, 0.17), saturate(el * 1.6)) * tod4.x;\n"
-    "  float2 sc = float2(atan2(dir.z, dir.x), asin(saturate(el))) * 900, cell = floor(sc);\n"
+    "  float3 night = lerp(float3(0.11, 0.145, 0.215), float3(0.065, 0.095, 0.18), saturate(el * 1.4)) * tod4.x;\n"
+    "  float2 sc = float2(atan2(dir.z, dir.x), asin(saturate(el))) * 600, cell = floor(sc);\n"
     "  float h = Hash(cell);\n"
     "  float2 at = float2(Hash(cell + 3.1), Hash(cell + 5.7)) * 0.6 + 0.2;\n"
-    "  float star = step(0.993, h) * saturate(1 - length(frac(sc) - at) * 3.2);\n"
-    "  night += star * star * saturate(el * 5) * (0.3 + 0.9 * Hash(cell + 7.3)) * float3(0.9, 0.95, 1) * tod4.y;\n"
+    "  float star = step(0.994, h) * saturate(1.3 - length(frac(sc) - at) * 2.6);\n"
+    "  night += saturate(star) * saturate(el * 5) * (0.4 + 1.2 * Hash(cell + 7.3)) * float3(0.9, 0.95, 1) * tod4.y;\n"
     "  float3 moonDir = -tod2.xyz; float m = saturate(dot(dir, moonDir));\n"
     "  night += tod3.x * (smoothstep(0.99955, 0.9998, m) * float3(1.0, 1.0, 0.95) * 1.4\n"
     "    + pow(m, 600) * float3(0.55, 0.62, 0.8) * 0.6 + pow(m, 24) * float3(0.10, 0.13, 0.20));\n"
@@ -220,6 +220,10 @@ const char* kResolveMain =
     "  if (!sky) c *= lerp(1, fx.x, fx0.z * lerp(0.6, 1, saturate(shadow * 2)));\n"
     // Light shafts: warm sun light scattered by the air between camera and surface.
     "  c += float3(1.0, 0.9, 0.72) * fx.y * fx0.w * tod.w;\n"
+    "  if (!sky && tod4.w > 0) {\n" // moonlight: colours fade, toward a cool grey
+    "    float l = dot(c, float3(0.2126, 0.7152, 0.0722));\n"
+    "    c = lerp(c, l * float3(0.86, 0.96, 1.18), tod4.w);\n"
+    "  }\n"
     "  if (sky) {\n"
     "    c *= tod.rgb;\n"
     "    if (tod2.w > 0.001) c = lerp(c, ProceduralSky(normalize(Unproject(pos.xy, 0.99999) - Unproject(pos.xy, 0))), tod2.w);\n"
@@ -787,6 +791,7 @@ void Device::ResolveSun(const char* reason)
     static const float defaultTint[3] = { 0.93f, 0.96f, 1.0f };
     for (int k = 0; k < 3; k++) rc.tod3[k + 1] = m_tod.active ? m_tod.shadowTint[k] : defaultTint[k];
     rc.tod4[0] = g_config.nightSky; rc.tod4[1] = g_config.stars;
+    rc.tod4[3] = m_tod.active ? g_config.nightDesaturate * m_tod.moon : 0.0f;
     D3D11_MAPPED_SUBRESOURCE map;
     if (FAILED(m_ctx->Map(m_resolveCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
     memcpy(map.pData, &rc, sizeof(rc));

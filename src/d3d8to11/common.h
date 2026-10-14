@@ -56,6 +56,7 @@ struct Config {
     float lowSunColor[3] = { 1.0f, 0.55f, 0.24f };
     float maxExposure = 1.5f;
     float nightSky = 1.0f;          // brightness of the procedural night sky
+    float nightDesaturate = 0.4f;   // colours fade under the moon
     float stars = 1.0f;
     bool timeOfDay = false;         // Insert panel preview: drive the sun from an hour of the day
     float timeOfDayHour = 12.0f;
