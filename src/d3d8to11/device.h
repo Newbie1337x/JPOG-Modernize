@@ -222,10 +222,13 @@ private:
     std::unordered_map<std::string, ComPtr<ID3D11PixelShader>> m_ffShaders;
     ComPtr<ID3D11Buffer> m_vsCB, m_vsExtraCB, m_psCB;
     UINT m_swapFlags = 0; // DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING when supported
+    UINT m_samplerDirty = ~0u;            // bit per stage: a sampler texture-stage state changed
+    int m_samplerAniso[kMaxStages] = {};  // effective anisotropy the stage's sampler was chosen with
+    BYTE m_drawTexDim[kMaxStages] = {};   // this draw's texture kinds (PrepareDraw), 0 none, 2 2D, 3 volume
     // Vertex constants in a ring (D3D11.1 no-overwrite maps, bound by offset): each draw writes
     // a fresh 256-byte-aligned window instead of renaming one buffer per draw.
     ComPtr<ID3D11Buffer> m_vsRing;
-    static const UINT kVsRingBytes = 4u << 20;
+    static const UINT kVsRingBytes = 32u << 20; // several frames: a wrap (discard) hands out fresh memory
     UINT m_vsRingPos = kVsRingBytes, m_vsRingFirst = 0;
     bool m_vsRingBound = false, m_vsRingWasOn = false;
     // Last pipeline-state keys: an unchanged key skips the cache lookup.

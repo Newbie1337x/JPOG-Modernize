@@ -75,6 +75,7 @@ DXGI_FORMAT DeclFormat(int type)
 
 template <class T> void SetRef(T*& slot, T* value)
 {
+    if (slot == value) return;
     if (value) value->AddRef();
     if (slot) slot->Release();
     slot = value;
@@ -797,6 +798,12 @@ HRESULT Device::SetTextureStageState(DWORD stage, DWORD type, DWORD value)
     if (m_tss[stage][type] == value) { ++m_perf.redundantTextureStates; return S_OK; }
     m_tss[stage][type] = value;
     switch (type) {
+    case TSS_ADDRESSU: case TSS_ADDRESSV: case TSS_ADDRESSW: case TSS_MAGFILTER: case TSS_MINFILTER: case TSS_MIPFILTER:
+    case TSS_MIPMAPLODBIAS: case TSS_MAXMIPLEVEL: case TSS_MAXANISOTROPY: case TSS_BORDERCOLOR:
+        m_samplerDirty |= 1u << stage; break;
+    default: break;
+    }
+    switch (type) {
     case TSS_BUMPENVMAT00: m_psConst.bumpMat[stage][0] = AsFloat(value); m_psConstDirty = true; break;
     case TSS_BUMPENVMAT01: m_psConst.bumpMat[stage][1] = AsFloat(value); m_psConstDirty = true; break;
     case TSS_BUMPENVMAT10: m_psConst.bumpMat[stage][2] = AsFloat(value); m_psConstDirty = true; break;
@@ -1091,13 +1098,20 @@ ID3D11RasterizerState* Device::GetRasterState()
 
 ID3D11SamplerState* Device::GetSampler(int stage)
 {
+    auto& selected = m_samplerSelections[stage];
+    const int effectiveAniso = g_config.EffectiveAnisotropy();
+    if (!(m_samplerDirty & (1u << stage)) && m_samplerAniso[stage] == effectiveAniso && selected.state) {
+        ++m_perf.samplerSelectionHits;
+        return selected.state;
+    }
+    m_samplerDirty &= ~(1u << stage);
+    m_samplerAniso[stage] = effectiveAniso;
     const DWORD* t = m_tss[stage];
     DWORD mag = t[TSS_MAGFILTER], min = t[TSS_MINFILTER], mip = t[TSS_MIPFILTER];
     DWORD aniso = t[TSS_MAXANISOTROPY];
-    if (g_config.EffectiveAnisotropy() > 1 && min >= 2 && mip >= 1) { min = 3; aniso = (DWORD)g_config.EffectiveAnisotropy(); }
+    if (effectiveAniso > 1 && min >= 2 && mip >= 1) { min = 3; aniso = (DWORD)effectiveAniso; }
     DWORD key[10] = { t[TSS_ADDRESSU], t[TSS_ADDRESSV], t[TSS_ADDRESSW], mag, min, mip, t[TSS_MIPMAPLODBIAS],
                       t[TSS_MAXMIPLEVEL], aniso, t[TSS_BORDERCOLOR] };
-    auto& selected = m_samplerSelections[stage];
     if (selected.Matches(key)) { ++m_perf.samplerSelectionHits; return selected.state; }
     ++m_perf.samplerSelectionLookups;
     std::string k((const char*)key, sizeof(key));
@@ -1144,7 +1158,7 @@ ID3D11PixelShader* Device::GetPixelShader()
         }
         PixelShader8* ps = m_pixelShaders[m_psHandle - 1];
         PSVariant v;
-        for (int s = 0; s < kMaxStages; s++) v.texDim[s] = TextureDim(m_textures[s]);
+        for (int s = 0; s < kMaxStages; s++) v.texDim[s] = m_drawTexDim[s]; // PrepareDraw, this draw
         v.alphaFunc = alphaFunc;
         v.shadowOnly = m_sun.flags[1] > 0.5f ? 1 : 0;
         v.a2c = AlphaToCoverageActive() ? 1 : 0;
@@ -1210,12 +1224,13 @@ ID3D11PixelShader* Device::GetPixelShader()
 
 namespace {
 // True when the slots already hold these objects; otherwise records them.
-template<class T> bool SameBinding(T** cache, UINT capacity, UINT slot, UINT n, T* const* v)
+template<class T> __forceinline bool SameBinding(T** cache, UINT capacity, UINT slot, UINT n, T* const* v)
 {
     if (slot + n > capacity) return false;
-    if (!memcmp(cache + slot, v, n * sizeof(T*))) return true;
-    memcpy(cache + slot, v, n * sizeof(T*));
-    return false;
+    bool same = true;
+    for (UINT i = 0; i < n; i++)
+        if (cache[slot + i] != v[i]) { cache[slot + i] = v[i]; same = false; }
+    return same;
 }
 }
 void Device::InvalidateBindings() { memset(&m_bind, 0xFF, sizeof(m_bind)); m_vsRingBound = false; }
@@ -1405,12 +1420,15 @@ bool Device::PrepareDraw()
     ID3D11SamplerState* samplers[kMaxStages] = {};
     for (int s = 0; s < kMaxStages; s++) {
         ID8BaseTexture* t = m_textures[s];
+        m_drawTexDim[s] = 0;
         if (!t) continue;
-        if (t->GetType() == D8RTYPE_TEXTURE) {
+        const DWORD type = t->GetType();
+        m_drawTexDim[s] = type == D8RTYPE_VOLUMETEXTURE ? 3 : (type == D8RTYPE_TEXTURE ? 2 : 0);
+        if (type == D8RTYPE_TEXTURE) {
             Texture* tex = static_cast<Texture*>(static_cast<ID8Texture*>(t));
             if (m_rt && m_rt->m_container == tex) continue; // sampling the current render target
             srvs[s] = tex->Srv();
-        } else if (t->GetType() == D8RTYPE_VOLUMETEXTURE) {
+        } else if (type == D8RTYPE_VOLUMETEXTURE) {
             srvs[s] = static_cast<VolumeTexture*>(static_cast<ID8VolumeTexture*>(t))->Srv();
         }
         samplers[s] = GetSampler(s);

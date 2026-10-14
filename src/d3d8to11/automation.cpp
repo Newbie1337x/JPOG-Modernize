@@ -13,6 +13,8 @@ bool FileTime(const std::string& path, FILETIME& t)
 }
 }
 
+void StartSamplingProfiler(int seconds); // profiler.cpp
+
 void Device::PollAutomation()
 {
     if (m_texDumpActive && m_frame > m_texDumpFrame + 30) WriteTextureDump(); // 30 frames: draws can be spread out
@@ -31,6 +33,13 @@ void Device::PollAutomation()
         DeleteFileA(dumpReq.c_str());
         m_texDumpActive = true;
         m_texDumpFrame = m_frame + 1;
+    }
+    const std::string profReq = g_gameDir + "d3d8to11_profile.req";
+    if (GetFileAttributesA(profReq.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        int seconds = 15;
+        if (FILE* f = _fsopen(profReq.c_str(), "r", _SH_DENYNO)) { if (fscanf_s(f, "%d", &seconds) != 1) seconds = 15; fclose(f); }
+        DeleteFileA(profReq.c_str());
+        StartSamplingProfiler(seconds < 1 ? 1 : seconds > 120 ? 120 : seconds);
     }
     const std::string req = g_gameDir + "d3d8to11_capture.req";
     if (GetFileAttributesA(req.c_str()) == INVALID_FILE_ATTRIBUTES) return;

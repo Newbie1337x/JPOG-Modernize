@@ -45,13 +45,15 @@ struct Performance {
 };
 struct CpuPerformanceScope {
     Performance& p; int stage; LARGE_INTEGER start={}; bool enabled;
-    CpuPerformanceScope(Performance& perf,int s):p(perf),stage(s),enabled(perf.enabled && perf.serial%30==0) {
+    __forceinline CpuPerformanceScope(Performance& perf,int s):p(perf),stage(s),enabled(perf.enabled && perf.serial%30==0) {
         if(enabled){p.cpuMeasured=true;QueryPerformanceCounter(&start);}
     }
-    void Next(int nextStage){if(enabled){LARGE_INTEGER end;QueryPerformanceCounter(&end);
+    // Unsampled frames (29 of 30) only store the stage: no call, no clock read.
+    __forceinline void Next(int nextStage){if(enabled)Measure();stage=nextStage;}
+    __declspec(noinline) void Measure(){LARGE_INTEGER end;QueryPerformanceCounter(&end);
         static const double frequency=[](){LARGE_INTEGER q;QueryPerformanceFrequency(&q);return double(q.QuadPart);}();
-        p.cpu[stage]+=(end.QuadPart-start.QuadPart)*1000.0/frequency;start=end;}stage=nextStage;}
-    ~CpuPerformanceScope(){Next(stage);}
+        p.cpu[stage]+=(end.QuadPart-start.QuadPart)*1000.0/frequency;start=end;}
+    __forceinline ~CpuPerformanceScope(){if(enabled)Measure();}
 };
 struct PerformanceScope {
     Performance& p; ID3D11DeviceContext* ctx; int event;

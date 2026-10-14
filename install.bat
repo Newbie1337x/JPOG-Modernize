@@ -15,6 +15,7 @@ if exist "%~dp0out\d3d8.dll" (
         "%SystemRoot%\System32\findstr.exe" /m /c:"dgVoodoo" "%GAME%\d3d8.dll" >nul && move "%GAME%\d3d8.dll" "%GAME%\D3D8_dgVoodoo.dll" >nul
     )
     copy /y "%~dp0out\d3d8.dll" "%GAME%\" >nul || exit /b 1
+    if exist "%~dp0out\d3d8.pdb" copy /y "%~dp0out\d3d8.pdb" "%GAME%\" >nul
     if not exist "%GAME%\d3d8to11.ini" copy "%~dp0out\d3d8to11.ini" "%GAME%\" >nul
 )
 echo Installed to "%GAME%"
