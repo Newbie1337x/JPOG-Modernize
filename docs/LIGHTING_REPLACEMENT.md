@@ -133,7 +133,8 @@ opposite the sun, becomes the light. `EvaluateTimeOfDay` (sun.cpp) derives per h
   dusk and night), as multipliers on the game's own light colours;
 - eye adaptation: exposure raised up to 2.2x when the light is low or grazing;
 - shadow depth from the direct light's share of the total away from noon, and a cooler shadow tint;
-- rim light on skinned models (silhouettes outlined by the moon or a low sun);
+- rim light on skinned models (silhouettes outlined by the moon, or by the sun: `RimLight`, subtle
+  at noon and stronger and golden when low; outside the preview it uses a warm white);
 - a tint for surfaces that are not relit (grass, water, other world draws);
 - the sky: the game's sky texture by day, a procedural sky at dusk and night (horizon glow toward
   the sun, stars, moon disc and halo), composited in the shadow resolve on sky pixels.

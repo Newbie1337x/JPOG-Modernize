@@ -279,6 +279,22 @@ void Device::DrawOverlay()
             ImGui::SliderFloat("Hour", &g_config.timeOfDayHour, 0, 23.99f, label);
             ImGui::EndDisabled();
         }
+        if (ImGui::CollapsingHeader("Time of day tuning")) {
+            ImGui::TextDisabled("Night");
+            ImGui::ColorEdit3("Moon colour", g_config.moonColor, ImGuiColorEditFlags_Float);
+            ImGui::SliderFloat("Moon light", &g_config.moonIntensity, 0, 3, "%.2f");
+            ImGui::SliderFloat("Moon rim", &g_config.moonRim, 0, 4, "%.2f");
+            ImGui::ColorEdit3("Night ambient", g_config.nightAmbient, ImGuiColorEditFlags_Float);
+            ImGui::SliderFloat("Night sky", &g_config.nightSky, 0, 4, "%.2f");
+            ImGui::SliderFloat("Stars", &g_config.stars, 0, 4, "%.2f");
+            ImGui::TextDisabled("Dawn and dusk");
+            ImGui::ColorEdit3("Low sun colour", g_config.lowSunColor, ImGuiColorEditFlags_Float);
+            ImGui::ColorEdit3("Dusk ambient", g_config.duskAmbient, ImGuiColorEditFlags_Float);
+            ImGui::TextDisabled("Eye adaptation");
+            ImGui::SliderFloat("Max exposure", &g_config.maxExposure, 1, 6, "%.2f");
+            ImGui::SetItemTooltip("How much dawn, dusk and night are brightened at most.");
+            ImGui::TextDisabled("Save writes these to [TimeOfDay] in d3d8to11.ini.");
+        }
 
         if (ImGui::CollapsingHeader("Sunlight & colour", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Enabled##post", &g_config.postEnabled);
@@ -505,6 +521,8 @@ void Device::DrawOverlay()
             ImGui::Checkbox("Terrain from height field", &g_config.heightfieldLighting);
             ImGui::SetItemTooltip("Smooth terrain normals from the game's height field instead of its baked light.");
             ImGui::SliderFloat("Hill shadows", &g_config.horizonShadows, 0, 1, "%.2f");
+            ImGui::SliderFloat("Rim light", &g_config.rimLight, 0, 2, "%.2f");
+            ImGui::SetItemTooltip("The sun outlines silhouettes, mostly against the light. The moon's rim is separate.");
             ImGui::SliderFloat("Baked detail", &g_config.bakedTerrainDetail, 0, 1, "%.2f");
             ImGui::SetItemTooltip("Keeps the shading the game painted into the terrain (under trees, hollows).");
             ImGui::Text(m_terrainReady ? "Height field: %ux%u" : "Height field: loading (%ux%u)", m_terrainW, m_terrainH);

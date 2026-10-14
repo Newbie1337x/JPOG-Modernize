@@ -352,7 +352,7 @@ std::string WaterPixelCode(int samples) {
 }
 std::string SunBlock(int slot) {
     return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera;"
-               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; };\n", slot);
+               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; };\n", slot);
 }
 // Normal maps (stage 0, t9): relief relative to the sun on top of the game's own lighting. No
 // tangents in JPOG's meshes, so the frame comes from screen-space derivatives of the world position
@@ -539,7 +539,7 @@ std::string SunPixelCode() {
         "    t *= 1.27;\n"
         "  }\n"
         "  return vis; }\n"
-        // Rim light (time of day, todAmbient.w): the moon or a low sun outlines silhouettes, most
+        // Rim light (todAmbient.w, colour rimColor): the sun or the moon outlines silhouettes, most
         // strongly when it is behind the model.
         "float3 RimLight(float3 N, float3 world) {\n"
         "  if (todAmbient.w <= 0) return 0;\n"
@@ -548,7 +548,7 @@ std::string SunPixelCode() {
         "  float3 L = normalize(sunDirection.xyz);\n"
         "  float edge = pow(1 - saturate(dot(N, V)), 3);\n"
         "  float facing = saturate(dot(N, L) * 0.7 + 0.3), back = saturate(dot(-V, L) * 0.5 + 0.5);\n"
-        "  return todSun.rgb * edge * facing * lerp(0.5, 1.5, back) * todAmbient.w; }\n"
+        "  return rimColor.rgb * edge * facing * lerp(0.5, 1.5, back) * todAmbient.w; }\n"
         "float4 RelightSurface(float4 color, VSOut i) {\n"
         "  if (sunFlags.x < 0.5 || sunFlags.y > 0.5 || sunControl.x < 0.5) return color;\n"
         "  bool rigid = sunFlags.w == 3 && sunFlags.z > 0.5;\n" // paths, relit with the terrain's light

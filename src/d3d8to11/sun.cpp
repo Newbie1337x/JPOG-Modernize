@@ -32,6 +32,7 @@ struct ResolveConstants {
     float tod[4];    // time of day: sky multiplier, w = sun/moon light (shafts, sunlight lift)
     float tod2[4];   // true sun direction (renderer Y-down), w = procedural sky weight
     float tod3[4];   // moon visibility, shadow tint rgb
+    float tod4[4];   // night sky brightness, stars, -, -
 };
 
 const char* kResolveVS =
@@ -44,7 +45,7 @@ const char* kResolveVS =
 const char* kSceneCommon =
     "cbuffer Resolve : register(b0) { float4 clipToWorld[4]; float4 lightRows[4]; float4 sunDir;\n"
     "  float4 params; float4 screen; float4 misc; float4 grade0; float4 grade1; float4 fx0; float4 fx1; float4 tod;\n"
-    "  float4 tod2; float4 tod3; };\n"
+    "  float4 tod2; float4 tod3; float4 tod4; };\n"
     "#if MSAA\n"
     "Texture2DMS<float> sceneDepth : register(t0);\n"
     "float LoadDepth(int2 p) { return sceneDepth.Load(p, 0); }\n"
@@ -152,10 +153,10 @@ const char* kResolveMain =
     "float Hash(float2 p) { return frac(sin(dot(p, float2(127.1, 311.7))) * 43758.5453); }\n"
     "float3 ProceduralSky(float3 dir) {\n"
     "  float el = -dir.y, sunEl = -tod2.y;\n"
-    "  float3 night = lerp(float3(0.10, 0.16, 0.34), float3(0.03, 0.06, 0.17), saturate(el * 1.6));\n"
+    "  float3 night = lerp(float3(0.10, 0.16, 0.34), float3(0.03, 0.06, 0.17), saturate(el * 1.6)) * tod4.x;\n"
     "  float2 cell = floor(float2(atan2(dir.z, dir.x) * 420, asin(saturate(el)) * 420));\n"
     "  float h = Hash(cell);\n"
-    "  night += step(0.9965, h) * saturate(el * 5) * (0.35 + 0.65 * Hash(cell + 7.3)) * float3(0.9, 0.95, 1);\n"
+    "  night += step(0.9965, h) * saturate(el * 5) * (0.35 + 0.65 * Hash(cell + 7.3)) * float3(0.9, 0.95, 1) * tod4.y;\n"
     "  float3 moonDir = -tod2.xyz; float m = saturate(dot(dir, moonDir));\n"
     "  night += tod3.x * (smoothstep(0.99955, 0.9998, m) * float3(1.0, 1.0, 0.95) * 1.4\n"
     "    + pow(m, 600) * float3(0.55, 0.62, 0.8) * 0.6 + pow(m, 24) * float3(0.10, 0.13, 0.20));\n"
@@ -341,16 +342,18 @@ void Device::EvaluateTimeOfDay()
     const float sun[3] = { std::cos(phi), std::sin(phi) * std::sin(tilt), std::sin(phi) * std::cos(tilt) };
     const float sunY = sun[1];
     const float up = smooth(-0.03f, 0.12f, sunY), warm = smooth(0.0f, 0.45f, sunY);
-    const float low[3] = { 1.0f, 0.55f, 0.24f }, white[3] = { 1, 1, 1 }; // golden low sun
-    float sunColor[3]; mix(low, white, warm, sunColor);
+    const float white[3] = { 1, 1, 1 };
+    float sunColor[3]; mix(g_config.lowSunColor, white, warm, sunColor); // golden low sun
     const float moonUp = smooth(0.0f, 0.15f, -sunY) * (1 - up);
     for (int k = 0; k < 3; k++) {
-        static const float moon[3] = { 0.70f, 0.80f, 1.0f }; // full moon: cold, silvery, clearly directional
-        m_tod.light[k] = sunColor[k] * up * (0.8f + 0.2f * warm) + moon[k] * 0.5f * moonUp;
+        // full moon: cold, silvery, clearly directional
+        m_tod.light[k] = sunColor[k] * up * (0.8f + 0.2f * warm) + g_config.moonColor[k] * g_config.moonIntensity * moonUp;
         m_tod.dir[k] = sunY > -0.03f ? sun[k] : -sun[k];
     }
     // Dusk ambient is the blue sky: warm sunlit faces against cool shade.
-    const float day[3] = { 1, 1, 1 }, dusk[3] = { 0.62f, 0.68f, 0.88f }, night[3] = { 0.14f, 0.20f, 0.42f };
+    const float day[3] = { 1, 1, 1 };
+    const float* dusk = g_config.duskAmbient;
+    const float* night = g_config.nightAmbient;
     const float skyDusk[3] = { 1.0f, 0.62f, 0.48f }, skyNight[3] = { 0.05f, 0.07f, 0.16f };
     const float dayW = smooth(-0.05f, 0.30f, sunY), nightW = 1 - smooth(-0.25f, -0.02f, sunY);
     float a[3], s[3];
@@ -361,8 +364,8 @@ void Device::EvaluateTimeOfDay()
     // exposure toward the noon level (at most 2.2x) so dawn and night are not just dark.
     const float lightY = std::fabs(m_tod.dir[1]) > 0.2f ? std::fabs(m_tod.dir[1]) : 0.2f;
     const float key = lum(m_tod.ambient) * 0.6f + lum(m_tod.light) * 0.4f * lightY;
-    m_tod.exposure = key > 1e-3f ? 0.75f / key : 2.2f;
-    m_tod.exposure = m_tod.exposure < 1 ? 1 : m_tod.exposure > 2.2f ? 2.2f : m_tod.exposure;
+    m_tod.exposure = key > 1e-3f ? 0.75f / key : g_config.maxExposure;
+    m_tod.exposure = m_tod.exposure < 1 ? 1 : m_tod.exposure > g_config.maxExposure ? g_config.maxExposure : m_tod.exposure;
     for (int k = 0; k < 3; k++) {
         float t = (m_tod.ambient[k] * 0.45f + m_tod.light[k] * 0.55f) * m_tod.exposure;
         m_tod.surface[k] = t > 1.1f ? 1.1f : t;
@@ -377,7 +380,7 @@ void Device::EvaluateTimeOfDay()
     for (int k = 0; k < 3; k++) m_tod.sunDir[k] = sun[k];
     m_tod.procSky = 1 - dayW; // the game's sky texture only by day
     m_tod.moon = moonUp;
-    m_tod.rim = 1.6f * moonUp + 0.6f * up * (1 - warm); // moonlit nights and golden low sun
+    m_tod.rim = g_config.moonRim * moonUp + g_config.rimLight * up * (1.0f + 0.8f * (1 - warm)); // moon, then the sun (stronger when low)
     m_tod.active = true;
 }
 
@@ -677,7 +680,10 @@ void Device::UpdateSun(bool shadowPass)
         m_sun.todAmbient[k] = m_tod.active ? m_tod.ambient[k] : 1.0f;
         m_sun.todNight[k] = m_tod.active ? m_tod.surface[k] : 1.0f;
     }
-    m_sun.todAmbient[3] = m_tod.active ? m_tod.rim : 0.0f;
+    // Rim light: from the time-of-day light, otherwise from the game's sun with a warm white.
+    m_sun.todAmbient[3] = m_tod.active ? m_tod.rim : g_config.rimLight;
+    static const float warmWhite[3] = { 1.0f, 0.93f, 0.80f };
+    for (int k = 0; k < 3; k++) m_sun.rimColor[k] = m_tod.active ? m_tod.light[k] : warmWhite[k];
     m_sun.todNight[3] = m_tod.active && !shadowPass && (m_worldDraw || (m_waterShaderDraw && m_rt == m_backBuffer)) ? 1.0f : 0.0f;
     if (!m_sunUploadedValid || memcmp(&m_sunUploaded, &m_sun, sizeof(m_sun))) {
         D3D11_MAPPED_SUBRESOURCE map;
@@ -764,6 +770,7 @@ void Device::ResolveSun(const char* reason)
     rc.tod3[0] = m_tod.active ? m_tod.moon : 0.0f;
     static const float defaultTint[3] = { 0.93f, 0.96f, 1.0f };
     for (int k = 0; k < 3; k++) rc.tod3[k + 1] = m_tod.active ? m_tod.shadowTint[k] : defaultTint[k];
+    rc.tod4[0] = g_config.nightSky; rc.tod4[1] = g_config.stars;
     D3D11_MAPPED_SUBRESOURCE map;
     if (FAILED(m_ctx->Map(m_resolveCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
     memcpy(map.pData, &rc, sizeof(rc));

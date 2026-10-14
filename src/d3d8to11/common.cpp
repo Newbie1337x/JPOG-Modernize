@@ -94,6 +94,28 @@ void LoadConfig()
     g_config.relightTonemap = GetPrivateProfileIntA("Lighting", "RelightTonemap", 1, ini.c_str()) != 0;
     g_config.heightfieldLighting = GetPrivateProfileIntA("Lighting", "HeightfieldLighting", 1, ini.c_str()) != 0;
     g_config.horizonShadows = readFloat("HorizonShadows", 1, 0, 1);
+    g_config.rimLight = readFloat("RimLight", 0.5f, 0, 2);
+    auto readColor = [&](const char* key, float* c) {
+        char value[96];
+        GetPrivateProfileStringA("TimeOfDay", key, "", value, sizeof(value), ini.c_str());
+        float r, g, b;
+        if (sscanf_s(value, "%f , %f , %f", &r, &g, &b) == 3 && r >= 0 && g >= 0 && b >= 0 && r <= 4 && g <= 4 && b <= 4) { c[0] = r; c[1] = g; c[2] = b; }
+    };
+    auto readTod = [&](const char* key, float fallback, float lo, float hi) {
+        char value[64];
+        GetPrivateProfileStringA("TimeOfDay", key, "", value, sizeof(value), ini.c_str());
+        float f = value[0] ? (float)atof(value) : fallback;
+        return f >= lo && f <= hi ? f : fallback;
+    };
+    readColor("MoonColor", g_config.moonColor);
+    readColor("NightAmbient", g_config.nightAmbient);
+    readColor("DuskAmbient", g_config.duskAmbient);
+    readColor("LowSunColor", g_config.lowSunColor);
+    g_config.moonIntensity = readTod("MoonIntensity", g_config.moonIntensity, 0, 3);
+    g_config.moonRim = readTod("MoonRim", g_config.moonRim, 0, 4);
+    g_config.maxExposure = readTod("MaxExposure", g_config.maxExposure, 1, 6);
+    g_config.nightSky = readTod("NightSky", g_config.nightSky, 0, 4);
+    g_config.stars = readTod("Stars", g_config.stars, 0, 4);
     g_config.bakedTerrainDetail = readFloat("BakedTerrainDetail", 1, 0, 1);
     g_config.shadowStrength = readFloat("ShadowStrength", 0.25f, 0, 1);
     g_config.sunMinElevation = readFloat("SunMinHeight", 0.35f, 0.05f, 1);
@@ -263,6 +285,19 @@ void SaveConfig()
     putInt("Lighting", "RelightTonemap", g_config.relightTonemap);
     putInt("Lighting", "HeightfieldLighting", g_config.heightfieldLighting);
     putFloat("Lighting", "HorizonShadows", g_config.horizonShadows);
+    putFloat("Lighting", "RimLight", g_config.rimLight);
+    auto putColor = [&](const char* key, const float* c) {
+        char b[96]; sprintf_s(b, "%.3f,%.3f,%.3f", c[0], c[1], c[2]); put("TimeOfDay", key, b);
+    };
+    putColor("MoonColor", g_config.moonColor);
+    putColor("NightAmbient", g_config.nightAmbient);
+    putColor("DuskAmbient", g_config.duskAmbient);
+    putColor("LowSunColor", g_config.lowSunColor);
+    putFloat("TimeOfDay", "MoonIntensity", g_config.moonIntensity);
+    putFloat("TimeOfDay", "MoonRim", g_config.moonRim);
+    putFloat("TimeOfDay", "MaxExposure", g_config.maxExposure);
+    putFloat("TimeOfDay", "NightSky", g_config.nightSky);
+    putFloat("TimeOfDay", "Stars", g_config.stars);
     putFloat("Lighting", "BakedTerrainDetail", g_config.bakedTerrainDetail);
     putFloat("Lighting", "Ambient", g_config.sunAmbient);
     putFloat("Lighting", "SunIntensity", g_config.sunDirect);

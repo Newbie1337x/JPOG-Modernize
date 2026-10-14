@@ -40,6 +40,17 @@ struct Config {
     bool heightfieldLighting = true; // [Lighting] HeightfieldLighting: terrain normals from the native height field
     float bakedTerrainDetail = 1.0f; // [Lighting] BakedTerrainDetail: keep the game's painted terrain darkening, 0..1
     float horizonShadows = 1.0f;    // [Lighting] HorizonShadows: hills shade the terrain behind them, 0..1
+    float rimLight = 0.5f;          // [Lighting] RimLight: sunlit silhouettes (replacement lighting), 0..2
+    // [TimeOfDay] look of the time-of-day preview (Insert panel, "Time of day tuning")
+    float moonColor[3] = { 0.70f, 0.80f, 1.0f };
+    float moonIntensity = 0.5f;
+    float moonRim = 1.6f;
+    float nightAmbient[3] = { 0.14f, 0.20f, 0.42f };
+    float duskAmbient[3] = { 0.62f, 0.68f, 0.88f };
+    float lowSunColor[3] = { 1.0f, 0.55f, 0.24f };
+    float maxExposure = 2.2f;
+    float nightSky = 1.0f;          // brightness of the procedural night sky
+    float stars = 1.0f;
     bool timeOfDay = false;         // Insert panel preview: drive the sun from an hour of the day
     float timeOfDayHour = 12.0f;
     bool relightTonemap = true;     // [Lighting] RelightTonemap: soft shoulder for values above 0.8
