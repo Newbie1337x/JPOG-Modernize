@@ -222,7 +222,7 @@ const char* kResolveMain =
     "  c += float3(1.0, 0.9, 0.72) * fx.y * fx0.w * tod.w;\n"
     "  if (!sky && tod4.w > 0) {\n" // moonlight: colours fade, toward a cool grey
     "    float l = dot(c, float3(0.2126, 0.7152, 0.0722));\n"
-    "    c = lerp(c, l * float3(0.86, 0.96, 1.18), tod4.w);\n"
+    "    c = lerp(c, l * float3(0.80, 1.0, 1.06), tod4.w);\n"
     "  }\n"
     "  if (sky) {\n"
     "    c *= tod.rgb;\n"
@@ -377,6 +377,7 @@ void Device::EvaluateTimeOfDay()
     const float key = lum(m_tod.ambient) * 0.6f + lum(m_tod.light) * 0.4f * lightY;
     m_tod.exposure = key > 1e-3f ? 0.75f / key : g_config.maxExposure;
     m_tod.exposure = m_tod.exposure < 1 ? 1 : m_tod.exposure > g_config.maxExposure ? g_config.maxExposure : m_tod.exposure;
+    m_tod.exposure *= 1 + (g_config.nightExposure - 1) * moonUp; // night is meant to look dark
     for (int k = 0; k < 3; k++) {
         // Surfaces without normals (grass, water): the moon mostly lights their tips and edges.
         const float lw = 0.55f * (1 - moonUp) + g_config.nightSurface * moonUp;
