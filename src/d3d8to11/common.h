@@ -43,6 +43,9 @@ struct Config {
     float horizonShadows = 1.0f;    // [Lighting] HorizonShadows: hills shade the terrain behind them, 0..1
     bool emissive = true;           // [Lighting] Emissive: night emission masks (mods\emissive)
     float emissiveIntensity = 1.0f; // [Lighting] EmissiveIntensity
+    bool pointLights = true;        // [Lighting] PointLights: lamps and signs light their surroundings at night
+    float pointLightIntensity = 1.5f; // [Lighting] PointLightIntensity
+    float pointLightRadius = 8.0f;  // [Lighting] PointLightRadius (world units)
     bool bloom = true;              // [Lighting] Bloom: glow around bright pixels
     float bloomStrength = 0.6f;     // [Lighting] BloomStrength (at night)
     float bloomThreshold = 0.75f;   // [Lighting] BloomThreshold (picture brightness 0-1)

@@ -99,6 +99,9 @@ void LoadConfig()
     g_config.relightGrass = GetPrivateProfileIntA("Lighting", "RelightGrass", 1, ini.c_str()) != 0;
     g_config.emissive = GetPrivateProfileIntA("Lighting", "Emissive", 1, ini.c_str()) != 0;
     g_config.emissiveIntensity = readFloat("EmissiveIntensity", 1.0f, 0, 8);
+    g_config.pointLights = GetPrivateProfileIntA("Lighting", "PointLights", 1, ini.c_str()) != 0;
+    g_config.pointLightIntensity = readFloat("PointLightIntensity", 1.5f, 0, 16);
+    g_config.pointLightRadius = readFloat("PointLightRadius", 8.0f, 0.5f, 64);
     g_config.bloom = GetPrivateProfileIntA("Lighting", "Bloom", 1, ini.c_str()) != 0;
     g_config.bloomStrength = readFloat("BloomStrength", 0.6f, 0, 4);
     g_config.bloomThreshold = readFloat("BloomThreshold", 0.75f, 0, 1);
@@ -314,6 +317,9 @@ void SaveConfig()
     putInt("Lighting", "RelightGrass", g_config.relightGrass);
     putInt("Lighting", "Emissive", g_config.emissive);
     putFloat("Lighting", "EmissiveIntensity", g_config.emissiveIntensity);
+    putInt("Lighting", "PointLights", g_config.pointLights);
+    putFloat("Lighting", "PointLightIntensity", g_config.pointLightIntensity);
+    putFloat("Lighting", "PointLightRadius", g_config.pointLightRadius);
     putInt("Lighting", "Bloom", g_config.bloom);
     putFloat("Lighting", "BloomStrength", g_config.bloomStrength);
     putFloat("Lighting", "BloomThreshold", g_config.bloomThreshold);

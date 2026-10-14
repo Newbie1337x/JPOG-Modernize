@@ -112,6 +112,8 @@ public:
     bool m_hashValid = false;
     ComPtr<ID3D11ShaderResourceView> m_emissiveSrv; // optional night emission mask (mods\emissive)
     float m_emissive[4] = {};  // emission tint rgb, intensity
+    const float* m_emissiveMask = nullptr; // CPU copy of the mask (size^2 rgb, tinted) for the point lights
+    int m_emissiveMaskSize = 0;
     std::string m_normalName;  // basename of the attached normal map, for diagnostics
     std::vector<std::vector<BYTE>> m_shadow; // D3D8-format copy of each level (lazy)
     std::vector<Surface*> m_surfaces;        // one per level, owned

@@ -212,7 +212,10 @@ void IndexTmlNames()
     Log("Texture names: %u .tml entries indexed", (UINT)g_tmlNames.size());
 }
 
-struct EmissiveEntry { ComPtr<ID3D11ShaderResourceView> srv; float tint[3] = { 1, 1, 1 }; float intensity = 1; bool tried = false; };
+struct EmissiveEntry {
+    ComPtr<ID3D11ShaderResourceView> srv; float tint[3] = { 1, 1, 1 }; float intensity = 1; bool tried = false;
+    std::vector<float> mask; int maskSize = 0; // 64x64 rgb (tinted) for the point lights (lights.cpp)
+};
 std::unordered_map<std::string, EmissiveEntry> g_emissive; // lowercase texture name without library
 bool g_emissiveScanned = false;
 
@@ -271,6 +274,21 @@ ID3D11ShaderResourceView* LoadEmissive(ID3D11Device* dev, const std::string& ste
         mips++;
     }
     if (!mips) return nullptr;
+    if (d.pixelBytes == 4) { // box-filtered 64x64 copy of level 0
+        const int n = 64;
+        e.maskSize = n;
+        e.mask.assign((size_t)n * n * 3, 0.0f);
+        const bool bgra = d.format == DXGI_FORMAT_B8G8R8A8_UNORM;
+        for (UINT y = 0; y < d.height; y++)
+            for (UINT x = 0; x < d.width; x++) {
+                const BYTE* p = file.data() + d.dataOffset + ((size_t)y * d.width + x) * 4;
+                float* o = &e.mask[(((size_t)y * n / d.height) * n + (size_t)x * n / d.width) * 3];
+                const float r = (bgra ? p[2] : p[0]) / 255.0f, g = p[1] / 255.0f, b = (bgra ? p[0] : p[2]) / 255.0f;
+                o[0] += r; o[1] += g; o[2] += b;
+            }
+        const float scale = (float)n * n / ((float)d.width * d.height) * e.intensity;
+        for (size_t i = 0; i < e.mask.size(); i++) e.mask[i] *= scale * e.tint[i % 3];
+    }
     D3D11_TEXTURE2D_DESC td = { d.width, d.height, mips, 1, d.format, { 1, 0 }, D3D11_USAGE_IMMUTABLE,
                                 D3D11_BIND_SHADER_RESOURCE, 0, 0 };
     ComPtr<ID3D11Texture2D> t;
@@ -305,6 +323,7 @@ void DecorateTexture(Texture* t)
         t->m_emissiveSrv = srv;
         for (int k = 0; k < 3; k++) t->m_emissive[k] = it->second.tint[k];
         t->m_emissive[3] = it->second.intensity;
+        if (!it->second.mask.empty()) { t->m_emissiveMask = it->second.mask.data(); t->m_emissiveMaskSize = it->second.maskSize; }
         Log("Emission mask attached to %s", t->m_name.c_str());
     }
 }

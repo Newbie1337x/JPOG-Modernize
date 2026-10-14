@@ -542,6 +542,18 @@ std::string SunPixelCodeBase() {
         // light: full sun and full shade reproduce the original colours exactly, the rest is
         // physically summed and gets a sky/ground tinted ambient. Output goes through exposure and
         // a highlight-only shoulder so values the game kept below 1 are not changed.
+        // Night point lights (lights.cpp): pos.w = radius; count.y = inverse-square knee.
+        "cbuffer PointLights : register(b5) { float4 lightCount; float4 lightPos[32]; float4 lightColor[32]; };\n"
+        "float3 PointLights(float3 N, float3 P, bool flat) {\n"
+        "  float3 sum = 0;\n"
+        "  [loop] for (int k = 0; k < (int)lightCount.x; k++) {\n"
+        "    float3 L = lightPos[k].xyz - P; float d2 = dot(L, L), r2 = lightPos[k].w * lightPos[k].w;\n"
+        "    if (d2 >= r2) continue;\n"
+        "    float f = saturate(1 - d2 / r2); f *= f;\n"
+        "    float ndl = flat ? 1 : saturate(dot(N, L * rsqrt(max(d2, 1e-6))) * 0.8 + 0.2);\n"
+        "    sum += lightColor[k].rgb * f * ndl / (1 + d2 * lightCount.y);\n"
+        "  }\n"
+        "  return sum; }\n"
         "float3 ToLinear(float3 c) { return pow(max(c, 0), 2.2); }\n"
         "float3 Shoulder(float3 c) {\n"
         "  const float start = 0.8; float peak = max(c.r, max(c.g, c.b));\n"
@@ -630,7 +642,7 @@ std::string SunPixelCodeBase() {
         "    float3 tint = clamp(baked / max(saturate(A + S * f), 1e-3), 0, 2);\n"
         "    float sunF = f;\n"
         "    if (field) sunF = fieldNdl * min(fieldShadow, lerp(1, fieldNdl > 0.05 ? saturate(f / fieldNdl) : 1, sunControl.w));\n"
-        "    float3 light = GameAmbient(N) + GameSun() * sunF;\n"
+        "    float3 light = GameAmbient(N) + GameSun() * sunF + PointLights(N, i.world, false);\n"
         "    return float4(LinearToOutput(ToLinear(color.rgb * tint) * light), color.a);\n"
         "  }\n"
         // Grass: the game draws it unlit (blade texture blended with the terrain colour map; v0 is
@@ -644,6 +656,7 @@ std::string SunPixelCodeBase() {
         "    float3 light = GameAmbient(N) + GameSun() * sunF;\n"
         // The tips (t7.x = blade height) catch the moon (rimColor.w).
         "    light += GameSun() * saturate(i.t7.x * 1.5) * rimColor.w;\n"
+        "    light += PointLights(N, i.world, true) * max(base, 0.05);\n"
         "    return float4(LinearToOutput(ToLinear(color.rgb) * light / max(base, 0.05)), color.a);\n"
         "  }\n"
         // Terrain: the game's per-vertex sun factor (v0.w, passed in t7.x) keeps its smooth slopes.
@@ -652,7 +665,7 @@ std::string SunPixelCodeBase() {
         "    float baked = saturate(i.t7.x);\n"
         "    ndl = field ? fieldNdl * min(fieldShadow, lerp(1, fieldNdl > 0.05 ? saturate(baked / fieldNdl) : 1, sunControl.w)) : baked;\n"
         "  }\n"
-        "  float3 light = GameAmbient(N) + GameSun() * ndl;\n"
+        "  float3 light = GameAmbient(N) + GameSun() * ndl + PointLights(N, i.world, false);\n"
         "  float3 rim = sunFlags.w == 1 ? RimLight(N, i.world) : 0;\n"
         "  light += rim;\n"
         // Specular (strength todSun.w, roughness and F0 specParams): GGX on a rough skin/leaf

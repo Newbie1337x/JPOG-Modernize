@@ -396,6 +396,20 @@ private:
     bool SceneFx() const { return g_config.effectsEnabled &&
         (g_config.sunLighting || g_config.postEnabled || g_config.grassPhysics || g_config.aoEnabled || g_config.waterEnabled || g_config.taa || g_config.fsr31 || g_config.materialsEnabled); }
     void CapturePusher(UINT firstVertex, UINT numVertices);
+    // lights.cpp: night point lights from the emission masks.
+    static const int kMaxPointLights = 32;
+    struct PointLightConstants { float count[4]; float pos[kMaxPointLights][4]; float color[kMaxPointLights][4]; };
+    struct LightEmitter { UINT v[3]; float w; float rgb[3]; };
+    struct FrameLight { float pos[3]; float rgb[3]; float w; };
+    std::unordered_map<unsigned long long, std::vector<LightEmitter>> m_emitterCache;
+    std::vector<FrameLight> m_lightsThisFrame;
+    PointLightConstants m_pointLights = {};
+    ComPtr<ID3D11Buffer> m_pointLightCB;
+    bool m_pointLightsDirty = true;
+    UINT m_pointLightsShown = 0, m_pointLightTris = 0;
+    void CaptureEmitters(DWORD type, UINT baseVertex, UINT startIndex, UINT primCount, bool indexed);
+    void BuildPointLights();
+    void BindPointLights();
     // Stage-0 night emission mask (world draws, time-of-day night only).
     ID3D11ShaderResourceView* ActiveEmissive() const {
         if (!g_config.emissive || !m_tod.active || m_tod.dayW > 0.98f || !m_worldDraw || m_sun.flags[1] > 0.5f ||

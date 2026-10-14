@@ -1307,6 +1307,7 @@ bool Device::PrepareDraw()
     m_ctx->PSSetShaderResources(8, 1, &emissive);
     ID3D11ShaderResourceView* rough = ActiveRoughness();
     m_ctx->PSSetShaderResources(16, 1, &rough);
+    BindPointLights();
     if(!PrepareMaterial())return false;
     PrepareRelief();
     BindTerrainHeights();
@@ -1420,6 +1421,7 @@ HRESULT Device::DrawPrimitive(DWORD type, UINT start, UINT primCount)
     D3D11_PRIMITIVE_TOPOLOGY topo;
     if (!DrawWithTopology(type, primCount, count, topo)) return D8ERR_INVALIDCALL;
     if (GrassCaptureActive()) CapturePusher(start, type == D8PT_TRIANGLEFAN ? primCount + 2 : count);
+    CaptureEmitters(type, 0, start, primCount, false);
     const bool tess = BeginTessellation(type, topo);
     m_ctx->IASetPrimitiveTopology(topo);
     if (type == D8PT_TRIANGLEFAN) {
@@ -1451,6 +1453,7 @@ HRESULT Device::DrawIndexedPrimitive(DWORD type, UINT minIndex, UINT numVertices
     m_drawFirstVertex=m_baseVertex+minIndex;
     if (!primCount || !m_indices || !PrepareDraw()) return S_OK;
     if (GrassCaptureActive()) CapturePusher(m_baseVertex + minIndex, numVertices);
+    CaptureEmitters(type, m_baseVertex, startIndex, primCount, true);
     UINT count;
     D3D11_PRIMITIVE_TOPOLOGY topo;
     if (!DrawWithTopology(type, primCount, count, topo)) return D8ERR_INVALIDCALL;
@@ -1684,6 +1687,8 @@ HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
     m_reliefDrawsShown=m_reliefDraws; m_reliefDraws=0;
     ApplyMsaa(); // after the frame is shown: the rebuilt back buffer starts empty
     m_frame++;
+    BuildPointLights();
+    m_pointLightsDirty = true;
 
     // Everything bound above has to be rebound by the next draw.
     m_rtDirty = m_viewportDirty = true;
