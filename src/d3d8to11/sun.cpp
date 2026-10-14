@@ -221,10 +221,7 @@ const char* kResolveMain =
     "  if (!sky) c *= lerp(1, fx.x, fx0.z * lerp(0.6, 1, saturate(shadow * 2)));\n"
     // Light shafts: warm sun light scattered by the air between camera and surface.
     "  c += float3(1.0, 0.9, 0.72) * fx.y * fx0.w * tod.w;\n"
-    "  if (!sky && tod4.w > 0) {\n" // moonlight: colours fade, toward a cool grey
-    "    float l = dot(c, float3(0.2126, 0.7152, 0.0722));\n"
-    "    c = lerp(c, l * tod5.rgb, tod4.w);\n"
-    "  }\n"
+    // Night colour fade: per world draw (shaders.cpp NightGrade), so emission keeps its colour.
     "  if (sky) {\n"
     "    c *= tod.rgb;\n"
     "    if (tod2.w > 0.001) c = lerp(c, ProceduralSky(normalize(Unproject(pos.xy, 0.99999) - Unproject(pos.xy, 0))), tod2.w);\n"
@@ -718,6 +715,8 @@ void Device::UpdateSun(bool shadowPass)
         const Texture* et = ActiveEmissive() ? static_cast<Texture*>(static_cast<ID8Texture*>(m_textures[0])) : nullptr;
         const float night = m_tod.active ? 1 - m_tod.dayW : 0.0f;
         for (int k = 0; k < 3; k++) m_sun.emissiveGlow[k] = et ? et->m_emissive[k] * et->m_emissive[3] * g_config.emissiveIntensity * night : 0.0f;
+        for (int k = 0; k < 3; k++) m_sun.nightGrade[k] = g_config.nightTint[k];
+        m_sun.nightGrade[3] = m_tod.active ? g_config.nightDesaturate * m_tod.moon : 0.0f;
     }
     m_sun.rimColor[3] = m_tod.active ? g_config.grassMoon * m_tod.moon : 0.0f;
     m_sun.grassGrade[0] = g_config.grassSaturation; m_sun.grassGrade[1] = g_config.grassBrightness;
@@ -812,7 +811,7 @@ void Device::ResolveSun(const char* reason)
     static const float defaultTint[3] = { 0.93f, 0.96f, 1.0f };
     for (int k = 0; k < 3; k++) rc.tod3[k + 1] = m_tod.active ? m_tod.shadowTint[k] : defaultTint[k];
     rc.tod4[0] = g_config.nightSky; rc.tod4[1] = g_config.stars;
-    rc.tod4[3] = m_tod.active ? g_config.nightDesaturate * m_tod.moon : 0.0f;
+    rc.tod4[3] = 0.0f;
     for (int k = 0; k < 3; k++) rc.tod5[k] = g_config.nightTint[k];
     rc.tod5[3] = g_config.filmic && g_config.replaceLighting ? g_config.filmicExposure : 0.0f;
     D3D11_MAPPED_SUBRESOURCE map;
@@ -863,6 +862,7 @@ void Device::ResolveSun(const char* reason)
     m_ctx->Draw(3, 0);
     ID3D11ShaderResourceView* nulls[4] = {};
     m_ctx->PSSetShaderResources(0, 4, nulls);
+    ApplyBloom();
 
     // Everything above has to be rebound by the next game draw.
     m_rtDirty = m_viewportDirty = true;

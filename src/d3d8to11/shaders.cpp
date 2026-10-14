@@ -354,12 +354,13 @@ std::string WaterPixelCode(int samples) {
         "  if(waterMisc.x==5) return float4(sceneReflection.a.xxx,1);\n"
         "  if(waterMisc.x==6) return float4(lerp(float3(.1,.8,.2),float3(.05,.3,1),ocean),1);\n"
         "  if(waterMisc.x==7) return float4(saturate(abs(WaterSwellAt(i.world).x)/max(.001,waterSwell.x)).xxx,1);\n"
+        "  if(nightGrade.w>0) surface=NightGrade(surface);\n"
         "  return float4(surface,1); }\n";
     return s;
 }
 std::string SunBlock(int slot) {
     return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera;"
-               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; float4 specParams; float4 gameSunDir; float4 emissiveGlow; };\n", slot);
+               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; float4 specParams; float4 gameSunDir; float4 emissiveGlow; float4 nightGrade; };\n", slot);
 }
 // Normal maps (stage 0, t9): relief relative to the sun on top of the game's own lighting. No
 // tangents in JPOG's meshes, so the frame comes from screen-space derivatives of the world position
@@ -637,6 +638,10 @@ std::string SunPixelCode() {
         "  if (sunFlags.w == 2) light = lerp(light, 1, saturate(i.d1.w));\n"
         "  return float4(LinearToOutput(ToLinear(color.rgb) * light + rim * grassGrade.z + sheen), color.a);\n"
         "}\n"
+        // Moonlight: colours fade toward a cool grey (world draws; emission is added afterwards).
+        "float3 NightGrade(float3 c) {\n"
+        "  float l = dot(c, float3(0.2126, 0.7152, 0.0722));\n"
+        "  return lerp(c, l * nightGrade.rgb, nightGrade.w); }\n"
         "float4 ApplySun(float4 color, VSOut i) {\n"
         "  if (sunControl.y == 13 && sunFlags.y < 0.5) {\n"
         "    float k = sunFlags.x > 0.5 ? sunFlags.w : -1;\n"
@@ -655,6 +660,7 @@ std::string SunPixelCode() {
         // Grass: the game's grass is a much more saturated green than its terrain.
         "  if (sunFlags.w == 4 && sunFlags.y < 0.5 && grassGrade.w > 0.5)\n"
         "    lit.rgb = lerp(dot(lit.rgb, float3(0.2126, 0.7152, 0.0722)).xxx, lit.rgb, grassGrade.x) * grassGrade.y;\n"
+        "  if (nightGrade.w > 0 && sunFlags.x > 0.5) lit.rgb = NightGrade(lit.rgb);\n"
         "  return lit; }\n";
 }
 }

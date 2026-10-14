@@ -119,6 +119,7 @@ struct SunConstants {
     float specParams[4];    // replacement specular: roughness, F0; rim: moon thin-line weight, line width
     float gameSunDir[4];    // the game's own sun direction (grass relighting reference)
     float emissiveGlow[4];  // night emission of the bound stage-0 texture (rgb, already scaled)
+    float nightGrade[4];    // night colour fade: tint rgb, strength (world draws, before emission)
 };
 
 struct WaterConstants {
