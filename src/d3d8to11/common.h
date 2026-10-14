@@ -37,6 +37,11 @@ struct Config {
     float relightAmbient = 0.85f;   // [Lighting] RelightAmbient: scale of the game's own ambient colour
     float relightSkyTint = 0.65f;   // [Lighting] RelightSkyTint: blue sky above, warm bounce below
     float relightExposure = 0.95f;  // [Lighting] RelightExposure
+    bool heightfieldLighting = true; // [Lighting] HeightfieldLighting: terrain normals from the native height field
+    float bakedTerrainDetail = 1.0f; // [Lighting] BakedTerrainDetail: keep the game's painted terrain darkening, 0..1
+    float horizonShadows = 1.0f;    // [Lighting] HorizonShadows: hills shade the terrain behind them, 0..1
+    bool timeOfDay = false;         // Insert panel preview: drive the sun from an hour of the day
+    float timeOfDayHour = 12.0f;
     bool relightTonemap = true;     // [Lighting] RelightTonemap: soft shoulder for values above 0.8
     bool sunFromGame = true;        // [Lighting] SunSource=game (else SunX/Y/Z)
     bool grassShadows = false;      // [Lighting] GrassShadows

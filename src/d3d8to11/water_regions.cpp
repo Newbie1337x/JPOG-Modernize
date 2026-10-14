@@ -1,46 +1,14 @@
 #include "device.h"
 #include "water_position.h"
+#include "native_terrain.h"
 #include <cmath>
 
 namespace {
-using TerrainFn=void*(__stdcall*)();
-using FieldFn=void*(__thiscall*)(void*);
-using SizeFn=unsigned(__thiscall*)(void*);
-using HeightFn=float(__thiscall*)(void*,unsigned,unsigned);
-struct NativeBridge {
-    TerrainFn terrain=nullptr;FieldFn field=nullptr;SizeFn width=nullptr,height=nullptr;HeightFn sample=nullptr;
-    bool Resolve(){
-        HMODULE exe=GetModuleHandleA("SimJP.exe"),base=GetModuleHandleA("TTerrainInterface.dll");
-        if(!exe || exe!=GetModuleHandleA(nullptr) || !base || !GetModuleHandleA("SimJPTerrain.dll"))return false;
-        terrain=reinterpret_cast<TerrainFn>(GetProcAddress(exe,"?GetTerrain@AParkManager@@SGPAVASimJPTerrain@@XZ"));
-        field=reinterpret_cast<FieldFn>(GetProcAddress(base,"?GetHeightField@TTerrainInterface@Toshi@@QBEPAVTHeightField@2@XZ"));
-        width=reinterpret_cast<SizeFn>(GetProcAddress(base,"?GetSizeX@TTerrainInterface@Toshi@@QBEIXZ"));
-        height=reinterpret_cast<SizeFn>(GetProcAddress(base,"?GetSizeZ@TTerrainInterface@Toshi@@QBEIXZ"));
-        sample=reinterpret_cast<HeightFn>(GetProcAddress(base,"?GetHeight@THeightField@Toshi@@QBEMII@Z"));
-        return terrain && field && width && height && sample;
-    }
-};
-struct NativeInfo {void* terrain;void* field;unsigned w,h;};
-// Only exported, read-only native accessors. No absolute addresses, hooks, engine
-// patching, writes to terrain, DLL loading or game launching. POD-only SEH helpers.
-bool NativeInfoSafe(const NativeBridge& b,NativeInfo& i){
-    __try{
-        i.terrain=b.terrain();if(!i.terrain)return false;
-        i.field=b.field(i.terrain);if(!i.field)return false;
-        i.w=b.width(i.terrain);i.h=b.height(i.terrain);
-        return i.w>=2 && i.h>=2 && i.w<=4096 && i.h<=4096 && UINT64(i.w)*i.h<=1048576;
-    }__except(EXCEPTION_EXECUTE_HANDLER){return false;}
-}
-bool NativeHeightsSafe(const NativeBridge& b,const NativeInfo& i,float* out,unsigned first,unsigned count){
-    __try{
-        for(unsigned n=first;n<first+count;n++){
-            float h=b.sample(i.field,n%i.w,n/i.w);
-            if(!std::isfinite(h) || std::fabs(h)>100000)return false;
-            out[n]=h;
-        }
-        return true;
-    }__except(EXCEPTION_EXECUTE_HANDLER){return false;}
-}
+using NativeBridge = native_terrain::Bridge;
+using NativeInfo = native_terrain::Info;
+bool NativeInfoSafe(const NativeBridge& b, NativeInfo& i) { return native_terrain::InfoSafe(b, i); }
+bool NativeHeightsSafe(const NativeBridge& b, const NativeInfo& i, float* out, unsigned first, unsigned count)
+{ return native_terrain::HeightsSafe(b, i, out, first, count); }
 }
 
 bool Device::WaterSurfaceHeight(float& height) const

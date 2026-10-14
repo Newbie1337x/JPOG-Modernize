@@ -259,6 +259,21 @@ private:
     bool PrepareMaterial();
     void PrepareRelief();           // relief.cpp: decides v.relief and binds cbuffer b4
     bool m_reliefActive = false;
+    // terrain_light.cpp: native height field for terrain normals and horizon shadows
+    void UpdateTerrainHeights();
+    void EvaluateTimeOfDay();
+    struct TimeOfDay { bool active = false; float dir[3] = {}, light[3] = {}, ambient[3] = {}, sky[3] = {}, surface[3] = {}, sunDir[3] = {}; float sunLight = 1, procSky = 0, moon = 0, rim = 0, exposure = 1, shadowStrength = 0, shadowTint[3] = {}; } m_tod;
+    void BindTerrainHeights();
+    bool TerrainHeightsActive() const { return m_terrainReady && m_terrainHeightSRV && g_config.heightfieldLighting; }
+    ComPtr<ID3D11Texture2D> m_terrainHeightTex;
+    ComPtr<ID3D11ShaderResourceView> m_terrainHeightSRV;
+    ComPtr<ID3D11SamplerState> m_terrainSampler;
+    std::vector<float> m_terrainHeights;
+    void* m_terrainField = nullptr;
+    unsigned m_terrainW = 0, m_terrainH = 0, m_terrainNext = 0;
+    bool m_terrainReady = false, m_terrainFault = false;
+    ULONGLONG m_terrainRefresh = 0;
+    UINT64 m_terrainFrame = ~0ull;
     float m_terrainLight[2][3] = {};   // last terrain draw's ambient (c6) and sun (c7): relights paths
     bool m_terrainLightValid = false;
     ComPtr<ID3D11Buffer> m_reliefCB;
@@ -396,6 +411,7 @@ private:
     ComPtr<ID3D11ShaderResourceView> m_waterDepthSRV, m_waterColorSRV;
     ComPtr<ID3D11SamplerState> m_waterSampler;
     bool m_waterDraw = false, m_waterSnapshotReady = false;
+    bool m_waterShaderDraw = false; // current draw uses the water pixel shader (set before UpdateSun)
     UINT m_waterW = 0, m_waterH = 0, m_waterSamples = 0;
     float m_waterFrameTime = 0; // frozen for every batch sharing an opaque snapshot
     float m_waterViewProjection[4][4]={};

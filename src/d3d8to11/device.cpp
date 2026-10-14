@@ -1208,6 +1208,7 @@ bool Device::PrepareDraw()
     m_worldKind = WorldShaderKind(vs->parsed);
     bool waterShader=m_psHandle>0 && m_psHandle<=m_pixelShaders.size() && m_pixelShaders[m_psHandle-1] &&
         IsWaterPixelShader(m_pixelShaders[m_psHandle-1]->func.data());
+    m_waterShaderDraw = waterShader;
     m_worldDraw = SceneFx() && m_worldKind != 0 && !waterShader &&
         (m_psHandle != 0 || m_rs[RS_ZWRITEENABLE]) &&
         m_rt == m_backBuffer && m_ds && m_rs[RS_ZENABLE] &&
@@ -1293,6 +1294,7 @@ bool Device::PrepareDraw()
     m_ctx->PSSetShaderResources(9, 1, &normalMap);
     if(!PrepareMaterial())return false;
     PrepareRelief();
+    BindTerrainHeights();
     m_ctx->PSSetSamplers(0, kMaxStages, samplers);
 
     ID3D11PixelShader* ps = GetPixelShader();

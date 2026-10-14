@@ -103,11 +103,15 @@ struct SunConstants {
     float direction[4];
     float settings[4]; // ambient, direct, shadow strength, inverse map size
     float flags[4];    // lighting enabled, shadow pass, previous map ready, normal kind
-    float control[4];  // replace original, debug view, reserved, reserved
+    float control[4];  // replace original, debug view, tessellation normals, baked terrain detail
     float camera[4];   // camera world position, w = normal map strength
     float gameAmbient[4]; // the draw's own ambient light colour (gamma), w = highlight shoulder on
     float gameSun[4];     // the draw's own sun light colour (gamma), w = replacement lighting on
     float relightParams[4]; // sun scale, ambient scale, sky tint, exposure
+    float terrainMap[4];    // height field ready, 1/width, 1/height, horizon shadow strength
+    float todSun[4];        // time of day: sun/moon colour multiplier
+    float todAmbient[4];    // time of day: ambient colour multiplier, w = rim light strength
+    float todNight[4];      // time of day: tint for surfaces that are not relit, w = apply to this draw
 };
 
 struct WaterConstants {

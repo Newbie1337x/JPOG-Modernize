@@ -29,6 +29,9 @@ struct ResolveConstants {
     float grade1[4]; // sun boost, shadow cool, post on, -
     float fx0[4];    // AO radius (world), AO intensity, AO strength, light shaft strength
     float fx1[4];    // AO on, shafts on, scattering g, -
+    float tod[4];    // time of day: sky multiplier, w = sun/moon light (shafts, sunlight lift)
+    float tod2[4];   // true sun direction (renderer Y-down), w = procedural sky weight
+    float tod3[4];   // moon visibility, shadow tint rgb
 };
 
 const char* kResolveVS =
@@ -40,7 +43,8 @@ const char* kResolveVS =
 // MSAA 1 (Texture2DMS depth, sample 0).
 const char* kSceneCommon =
     "cbuffer Resolve : register(b0) { float4 clipToWorld[4]; float4 lightRows[4]; float4 sunDir;\n"
-    "  float4 params; float4 screen; float4 misc; float4 grade0; float4 grade1; float4 fx0; float4 fx1; };\n"
+    "  float4 params; float4 screen; float4 misc; float4 grade0; float4 grade1; float4 fx0; float4 fx1; float4 tod;\n"
+    "  float4 tod2; float4 tod3; };\n"
     "#if MSAA\n"
     "Texture2DMS<float> sceneDepth : register(t0);\n"
     "float LoadDepth(int2 p) { return sceneDepth.Load(p, 0); }\n"
@@ -144,6 +148,24 @@ const char* kResolveMain =
     "    sum += fxTex.Load(int3(q, 0)) * w; wsum += w;\n"
     "  }\n"
     "  return sum / wsum; }\n"
+    // Time-of-day sky (night and dusk; the game's sky texture is kept by day). Y-down world.
+    "float Hash(float2 p) { return frac(sin(dot(p, float2(127.1, 311.7))) * 43758.5453); }\n"
+    "float3 ProceduralSky(float3 dir) {\n"
+    "  float el = -dir.y, sunEl = -tod2.y;\n"
+    "  float3 night = lerp(float3(0.10, 0.16, 0.34), float3(0.03, 0.06, 0.17), saturate(el * 1.6));\n"
+    "  float2 cell = floor(float2(atan2(dir.z, dir.x) * 420, asin(saturate(el)) * 420));\n"
+    "  float h = Hash(cell);\n"
+    "  night += step(0.9965, h) * saturate(el * 5) * (0.35 + 0.65 * Hash(cell + 7.3)) * float3(0.9, 0.95, 1);\n"
+    "  float3 moonDir = -tod2.xyz; float m = saturate(dot(dir, moonDir));\n"
+    "  night += tod3.x * (smoothstep(0.99955, 0.9998, m) * float3(1.0, 1.0, 0.95) * 1.4\n"
+    "    + pow(m, 600) * float3(0.55, 0.62, 0.8) * 0.6 + pow(m, 24) * float3(0.10, 0.13, 0.20));\n"
+    "  float2 flat = dir.xz / max(length(dir.xz), 1e-4), sunFlat = tod2.xz / max(length(tod2.xz), 1e-4);\n"
+    "  float toward = saturate(dot(flat, sunFlat) * 0.5 + 0.5);\n"
+    "  float3 horizon = lerp(float3(0.55, 0.35, 0.38), float3(1.0, 0.52, 0.22), toward);\n"
+    "  float3 dusk = lerp(horizon, float3(0.22, 0.32, 0.58), saturate(el * 2.2));\n"
+    "  dusk += float3(1.0, 0.6, 0.3) * pow(saturate(dot(dir, tod2.xyz)), 200) * 2;\n"
+    "  float duskW = saturate(1 - abs(sunEl + 0.02) * 5);\n" // around sunrise and sunset
+    "  return lerp(night, dusk, duskW); }\n"
     "float4 main(float4 pos : SV_Position) : SV_Target {\n"
     "  int2 p = int2(pos.xy);\n"
     "  float3 color = sceneColor.Load(int3(p, 0)).rgb;\n"
@@ -183,17 +205,21 @@ const char* kResolveMain =
     "    float fade = saturate((misc.y - dist) / (misc.y * 0.2));\n"
     "    shadow = (1 - vis) * edge * facing * fade;\n"
     "  }\n"
-    "  float3 shade = (1 - params.x * shadow) * lerp(float3(1, 1, 1), float3(0.93, 0.96, 1.0), shadow);\n"
+    "  float3 shade = (1 - params.x * shadow) * lerp(float3(1, 1, 1), tod3.yzw, shadow);\n"
     "  if (misc.x == 3) return float4(shade, 1);\n"
     "  float3 c = color * shade;\n"
     // Ambient occlusion: full in shadow, softer where the sun hits directly.
     "  if (!sky) c *= lerp(1, fx.x, fx0.z * lerp(0.6, 1, saturate(shadow * 2)));\n"
     // Light shafts: warm sun light scattered by the air between camera and surface.
-    "  c += float3(1.0, 0.9, 0.72) * fx.y * fx0.w;\n"
+    "  c += float3(1.0, 0.9, 0.72) * fx.y * fx0.w * tod.w;\n"
+    "  if (sky) {\n"
+    "    c *= tod.rgb;\n"
+    "    if (tod2.w > 0.001) c = lerp(c, ProceduralSky(normalize(Unproject(pos.xy, 0.99999) - Unproject(pos.xy, 0))), tod2.w);\n"
+    "  }\n"
     "  if (grade1.z > 0.5) {\n"
     // Sunlight: warm lift where the sun reaches (everything outside the shadow), cool shadows.
     "    float lit = sky ? 0 : 1 - shadow;\n"
-    "    c *= 1 + grade1.x * lit * float3(1.0, 0.93, 0.78);\n"
+    "    c *= 1 + grade1.x * lit * tod.w * float3(1.0, 0.93, 0.78);\n"
     "    c = lerp(c, c * float3(0.88, 0.94, 1.1), grade1.y * saturate(shadow * 2));\n"
     "    c *= grade0.x;\n"
     "    float luma = dot(c, float3(0.2126, 0.7152, 0.0722));\n"
@@ -302,6 +328,59 @@ bool Device::EnsureShadowMap()
     return true;
 }
 
+// Time-of-day preview (Insert panel): the sun crosses a tilted arc from east (6 h) through a 70
+// degree noon to west (18 h); below the horizon the moon (opposite direction) lights the scene.
+// Colours are multipliers on the game's own light, 1 at noon. Y-up here.
+void Device::EvaluateTimeOfDay()
+{
+    m_tod = TimeOfDay();
+    if (!g_config.timeOfDay) return;
+    auto smooth = [](float a, float b, float x) { float t = (x - a) / (b - a); t = t < 0 ? 0 : t > 1 ? 1 : t; return t * t * (3 - 2 * t); };
+    auto mix = [](const float* a, const float* b, float t, float* o) { for (int k = 0; k < 3; k++) o[k] = a[k] + (b[k] - a[k]) * t; };
+    const float tilt = 70.0f * 3.14159265f / 180, phi = (g_config.timeOfDayHour - 6.0f) / 12.0f * 3.14159265f;
+    const float sun[3] = { std::cos(phi), std::sin(phi) * std::sin(tilt), std::sin(phi) * std::cos(tilt) };
+    const float sunY = sun[1];
+    const float up = smooth(-0.03f, 0.12f, sunY), warm = smooth(0.0f, 0.45f, sunY);
+    const float low[3] = { 1.0f, 0.55f, 0.24f }, white[3] = { 1, 1, 1 }; // golden low sun
+    float sunColor[3]; mix(low, white, warm, sunColor);
+    const float moonUp = smooth(0.0f, 0.15f, -sunY) * (1 - up);
+    for (int k = 0; k < 3; k++) {
+        static const float moon[3] = { 0.70f, 0.80f, 1.0f }; // full moon: cold, silvery, clearly directional
+        m_tod.light[k] = sunColor[k] * up * (0.8f + 0.2f * warm) + moon[k] * 0.5f * moonUp;
+        m_tod.dir[k] = sunY > -0.03f ? sun[k] : -sun[k];
+    }
+    // Dusk ambient is the blue sky: warm sunlit faces against cool shade.
+    const float day[3] = { 1, 1, 1 }, dusk[3] = { 0.62f, 0.68f, 0.88f }, night[3] = { 0.14f, 0.20f, 0.42f };
+    const float skyDusk[3] = { 1.0f, 0.62f, 0.48f }, skyNight[3] = { 0.05f, 0.07f, 0.16f };
+    const float dayW = smooth(-0.05f, 0.30f, sunY), nightW = 1 - smooth(-0.25f, -0.02f, sunY);
+    float a[3], s[3];
+    mix(dusk, day, dayW, a); mix(a, night, nightW, m_tod.ambient);
+    mix(skyDusk, day, dayW, s); mix(s, skyNight, nightW, m_tod.sky);
+    auto lum = [](const float* c) { return 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2]; };
+    // Eye adaptation: flat ground under a low sun or the moon receives little light; raise the
+    // exposure toward the noon level (at most 2.2x) so dawn and night are not just dark.
+    const float lightY = std::fabs(m_tod.dir[1]) > 0.2f ? std::fabs(m_tod.dir[1]) : 0.2f;
+    const float key = lum(m_tod.ambient) * 0.6f + lum(m_tod.light) * 0.4f * lightY;
+    m_tod.exposure = key > 1e-3f ? 0.75f / key : 2.2f;
+    m_tod.exposure = m_tod.exposure < 1 ? 1 : m_tod.exposure > 2.2f ? 2.2f : m_tod.exposure;
+    for (int k = 0; k < 3; k++) {
+        float t = (m_tod.ambient[k] * 0.45f + m_tod.light[k] * 0.55f) * m_tod.exposure;
+        m_tod.surface[k] = t > 1.1f ? 1.1f : t;
+    }
+    m_tod.sunLight = lum(m_tod.light);
+    // Shadows: as deep as the direct light's share of the total away from noon, and cooler.
+    const float share = lum(m_tod.light) / (lum(m_tod.light) + lum(m_tod.ambient) + 1e-3f);
+    m_tod.shadowStrength = g_config.shadowStrength + (share * 0.9f - g_config.shadowStrength) * (1 - dayW);
+    if (m_tod.shadowStrength < g_config.shadowStrength) m_tod.shadowStrength = g_config.shadowStrength;
+    const float coolDay[3] = { 0.93f, 0.96f, 1.0f }, coolDusk[3] = { 0.70f, 0.80f, 1.08f };
+    mix(coolDusk, coolDay, dayW, m_tod.shadowTint);
+    for (int k = 0; k < 3; k++) m_tod.sunDir[k] = sun[k];
+    m_tod.procSky = 1 - dayW; // the game's sky texture only by day
+    m_tod.moon = moonUp;
+    m_tod.rim = 1.6f * moonUp + 0.6f * up * (1 - warm); // moonlit nights and golden low sun
+    m_tod.active = true;
+}
+
 void Device::StartSunFrame()
 {
     if (g_config.sunLighting && !EnsureShadowMap()) return;
@@ -328,7 +407,9 @@ void Device::StartSunFrame()
 
     // JPOG's world is Y-down: "up" is -Y (camera above the park at y = -55, palm crowns at
     // y = -6 over ground at -1). SunX/Y/Z in the ini use Y-up, so Y is negated here.
-    XMVECTOR sun = g_config.sunFromGame && m_gameSunValid
+    EvaluateTimeOfDay();
+    XMVECTOR sun = m_tod.active ? XMVectorSet(m_tod.dir[0], -m_tod.dir[1], m_tod.dir[2], 0)
+        : g_config.sunFromGame && m_gameSunValid
         ? XMVectorSet(m_gameSun[0], m_gameSun[1], m_gameSun[2], 0)
         : XMVectorSet(g_config.sunDirection[0], -g_config.sunDirection[1], g_config.sunDirection[2], 0);
     sun = XMVector3Normalize(sun);
@@ -584,7 +665,20 @@ void Device::UpdateSun(bool shadowPass)
     m_sun.relightParams[0] = g_config.relightSun;
     m_sun.relightParams[1] = g_config.relightAmbient;
     m_sun.relightParams[2] = g_config.relightSkyTint;
-    m_sun.relightParams[3] = g_config.relightExposure;
+    m_sun.relightParams[3] = g_config.relightExposure * (m_tod.active ? m_tod.exposure : 1.0f);
+    if (m_worldDraw && m_worldKind == 2 && !shadowPass) UpdateTerrainHeights();
+    m_sun.terrainMap[0] = TerrainHeightsActive() ? 1.0f : 0.0f;
+    m_sun.terrainMap[1] = m_terrainW ? 1.0f / m_terrainW : 0.0f;
+    m_sun.terrainMap[2] = m_terrainH ? 1.0f / m_terrainH : 0.0f;
+    m_sun.terrainMap[3] = g_config.horizonShadows;
+    m_sun.control[3] = g_config.bakedTerrainDetail;
+    for (int k = 0; k < 3; k++) {
+        m_sun.todSun[k] = m_tod.active ? m_tod.light[k] : 1.0f;
+        m_sun.todAmbient[k] = m_tod.active ? m_tod.ambient[k] : 1.0f;
+        m_sun.todNight[k] = m_tod.active ? m_tod.surface[k] : 1.0f;
+    }
+    m_sun.todAmbient[3] = m_tod.active ? m_tod.rim : 0.0f;
+    m_sun.todNight[3] = m_tod.active && !shadowPass && (m_worldDraw || (m_waterShaderDraw && m_rt == m_backBuffer)) ? 1.0f : 0.0f;
     if (!m_sunUploadedValid || memcmp(&m_sunUploaded, &m_sun, sizeof(m_sun))) {
         D3D11_MAPPED_SUBRESOURCE map;
         if (SUCCEEDED(m_ctx->Map(m_sunCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
@@ -634,7 +728,7 @@ void Device::ResolveSun(const char* reason)
     const bool shadows = g_config.sunLighting && m_segmentCasters && m_sunSRV;
     const bool shafts = shadows && g_config.shafts;
     const bool fx = g_config.aoEnabled || shafts;
-    if (!shadows && !g_config.postEnabled && !fx) {ResolveTemporal();return;}
+    if (!shadows && !g_config.postEnabled && !fx && !m_tod.active) {ResolveTemporal();return;}
     if (!m_resolvePS || !m_backBuffer || !m_autoDepth || !m_autoDepth->m_srv || !EnsureSceneCopy()) {ResolveTemporal();return;}
     if (shadows && g_config.lightingDebug == 8 && !m_dumped) {
         if (!m_dumpAt) m_dumpAt = m_frame + 600;
@@ -645,7 +739,7 @@ void Device::ResolveSun(const char* reason)
     memcpy(rc.clipToWorld, m_sun.clipToWorld, sizeof(rc.clipToWorld));
     memcpy(rc.lightRows, m_sun.writeRows, sizeof(rc.lightRows));
     memcpy(rc.sunDir, m_sun.direction, sizeof(rc.sunDir));
-    rc.params[0] = g_config.shadowStrength;
+    rc.params[0] = m_tod.active ? m_tod.shadowStrength : g_config.shadowStrength;
     rc.params[1] = m_sunMapSize ? 1.0f / m_sunMapSize : 0.0f;
     rc.params[2] = 1.5f * m_sunTexelWorld / m_sunDepthRange;
     rc.params[3] = 1.5f * m_sunTexelWorld;
@@ -663,6 +757,13 @@ void Device::ResolveSun(const char* reason)
     rc.grade1[2] = g_config.postEnabled ? 1.0f : 0.0f;
     rc.fx0[0] = g_config.aoRadius; rc.fx0[1] = 1.6f; rc.fx0[2] = g_config.aoStrength; rc.fx0[3] = g_config.shaftStrength;
     rc.fx1[0] = g_config.aoEnabled ? 1.0f : 0.0f; rc.fx1[1] = shafts ? 1.0f : 0.0f; rc.fx1[2] = g_config.shaftScatter;
+    for (int k = 0; k < 3; k++) rc.tod[k] = m_tod.active ? m_tod.sky[k] : 1.0f;
+    rc.tod[3] = m_tod.active ? (m_tod.sunLight < 1 ? m_tod.sunLight : 1.0f) : 1.0f;
+    for (int k = 0; k < 3; k++) rc.tod2[k] = m_tod.active ? (k == 1 ? -m_tod.sunDir[k] : m_tod.sunDir[k]) : 0.0f;
+    rc.tod2[3] = m_tod.active ? m_tod.procSky : 0.0f;
+    rc.tod3[0] = m_tod.active ? m_tod.moon : 0.0f;
+    static const float defaultTint[3] = { 0.93f, 0.96f, 1.0f };
+    for (int k = 0; k < 3; k++) rc.tod3[k + 1] = m_tod.active ? m_tod.shadowTint[k] : defaultTint[k];
     D3D11_MAPPED_SUBRESOURCE map;
     if (FAILED(m_ctx->Map(m_resolveCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
     memcpy(map.pData, &rc, sizeof(rc));

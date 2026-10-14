@@ -352,7 +352,7 @@ std::string WaterPixelCode(int samples) {
 }
 std::string SunBlock(int slot) {
     return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera;"
-               " float4 gameAmbient; float4 gameSun; float4 relightParams; };\n", slot);
+               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; };\n", slot);
 }
 // Normal maps (stage 0, t9): relief relative to the sun on top of the game's own lighting. No
 // tangents in JPOG's meshes, so the frame comes from screen-space derivatives of the world position
@@ -486,6 +486,7 @@ std::string MaterialCode(bool normalMap, int stage){
         " float3 envF=F0+(max((1-rough).xxx,F0)-F0)*pow(1-nv,5);\n"
         " float3 indirectSpec=environment*envF*materialSurface.z*(1-.5*rough);\n"
         " float3 lit=ambient+direct+indirectSpec;\n"
+        " if(game){float3 rim=RimLight(N,i.world);lit+=albedo*rim+rim*.08;}\n"
         " return float4(game?LinearToOutput(lit):pow(max(lit,0),1/2.2),color.a);}\n";
     if(stage==1){size_t p=0;while((p=s.find("i.t0.xy",p))!=std::string::npos){s.replace(p,7,"i.t1.xy");p+=7;}}
     return s;
@@ -514,14 +515,41 @@ std::string SunPixelCode() {
         "float3 GameAmbient(float3 N) {\n"
         "  float up = saturate(-N.y * 0.5 + 0.5);\n" // JPOG is Y-down
         "  float3 tint = lerp(float3(0.95, 0.85, 0.65), float3(0.92, 1.02, 1.25), up);\n"
-        "  return ToLinear(saturate(gameAmbient.rgb)) * relightParams.y * lerp(1, tint, relightParams.z); }\n"
+        "  return ToLinear(saturate(gameAmbient.rgb)) * relightParams.y * lerp(1, tint, relightParams.z) * todAmbient.rgb; }\n"
         // The game's vertex colour output is clamped to 1: its full-sun light is saturate(A + S).
-        "float3 GameSun() { return max(ToLinear(saturate(gameAmbient.rgb + gameSun.rgb)) - ToLinear(saturate(gameAmbient.rgb)), 0) * relightParams.x; }\n"
-        "float4 ApplySun(float4 color, VSOut i) {\n"
-        "  if (sunControl.y == 13 && sunFlags.y < 0.5) {\n"
-        "    float k = sunFlags.x > 0.5 ? sunFlags.w : -1;\n"
-        "    float3 c = k == 1 ? float3(1, 0.2, 0.2) : k == 2 ? float3(0.2, 1, 0.2) : k == 3 ? float3(0.2, 0.4, 1) : k == 4 ? float3(1, 1, 0.2) : k == 0 ? float3(1, 0.3, 1) : float3(0.5, 0.5, 0.5);\n"
-        "    return float4(lerp(color.rgb, c, 0.7), color.a); }\n"
+        "float3 GameSun() { return max(ToLinear(saturate(gameAmbient.rgb + gameSun.rgb)) - ToLinear(saturate(gameAmbient.rgb)), 0) * relightParams.x * todSun.rgb; }\n"
+        // Native terrain height field (terrain_light.cpp): one sample per world unit, height up =
+        // -renderer Y. Smooth normals from central differences; horizon shadows by marching
+        // toward the sun with growing steps up to ~300 units.
+        "Texture2D<float> terrainHeight : register(t15); SamplerState terrainSmp : register(s11);\n"
+        "float TerrainH(float2 p) { return terrainHeight.SampleLevel(terrainSmp, (p + 0.5) * terrainMap.yz, 0); }\n"
+        "bool TerrainInside(float2 p) { float2 uv = (p + 0.5) * terrainMap.yz; return all(uv > 0) && all(uv < 1); }\n"
+        "float3 TerrainNormal(float2 p) {\n"
+        "  float hx = TerrainH(p + float2(1, 0)) - TerrainH(p - float2(1, 0));\n"
+        "  float hz = TerrainH(p + float2(0, 1)) - TerrainH(p - float2(0, 1));\n"
+        "  return normalize(float3(-0.5 * hx, -1, -0.5 * hz)); }\n"
+        "float HorizonShadow(float3 w, float3 L) {\n"
+        "  float len = length(L.xz); if (len < 1e-3) return 1;\n"
+        "  float2 d = L.xz / len; float rise = -L.y / len;\n" // height gained per unit toward the sun
+        "  if (rise <= 0) return 0;\n"
+        "  float h0 = -w.y + 0.25, vis = 1, t = 1.5;\n"
+        "  [loop] for (int k = 0; k < 24; k++) {\n"
+        "    float2 q = w.xz + d * t; if (!TerrainInside(q)) break;\n"
+        "    vis = min(vis, 1 - saturate((TerrainH(q) - (h0 + t * rise)) / (0.4 + 0.03 * t)));\n"
+        "    t *= 1.27;\n"
+        "  }\n"
+        "  return vis; }\n"
+        // Rim light (time of day, todAmbient.w): the moon or a low sun outlines silhouettes, most
+        // strongly when it is behind the model.
+        "float3 RimLight(float3 N, float3 world) {\n"
+        "  if (todAmbient.w <= 0) return 0;\n"
+        "  float3 V = sunCamera.xyz - world; float vl = dot(V, V); if (vl < 1e-8) return 0;\n"
+        "  V *= rsqrt(vl); if (dot(N, V) < 0) N = -N;\n"
+        "  float3 L = normalize(sunDirection.xyz);\n"
+        "  float edge = pow(1 - saturate(dot(N, V)), 3);\n"
+        "  float facing = saturate(dot(N, L) * 0.7 + 0.3), back = saturate(dot(-V, L) * 0.5 + 0.5);\n"
+        "  return todSun.rgb * edge * facing * lerp(0.5, 1.5, back) * todAmbient.w; }\n"
+        "float4 RelightSurface(float4 color, VSOut i) {\n"
         "  if (sunFlags.x < 0.5 || sunFlags.y > 0.5 || sunControl.x < 0.5) return color;\n"
         "  bool rigid = sunFlags.w == 3 && sunFlags.z > 0.5;\n" // paths, relit with the terrain's light
         "  if (sunFlags.w != 1 && sunFlags.w != 2 && !rigid) return color;\n" // grass keeps its baked light
@@ -531,7 +559,18 @@ std::string SunPixelCode() {
         "  float nlen = dot(rawN, rawN); if (nlen < 1e-12) return color;\n"
         "  float3 N = rawN * rsqrt(nlen);\n"
         "  if (sunFlags.w != 1 && N.y > 0) N = -N;\n" // terrain and paths face up (-Y)
+        "  bool field = sunFlags.w != 1 && terrainMap.x > 0.5 && TerrainInside(i.world.xz);\n"
+        "  if (field) N = TerrainNormal(i.world.xz);\n"
         "  if (sunControl.y == 2) return float4(N*0.5+0.5,color.a);\n"
+        // The game's baked factor also holds painted darkening (under trees, hollows): its ratio
+        // to what the field normal gives under the same sun is kept as occlusion (sunControl.w),
+        // so the game's sun reproduces the baked look and a moved sun keeps that detail.
+        "  float fieldNdl = 1, fieldShadow = 1;\n"
+        "  if (field) {\n"
+        "    float3 L = normalize(sunDirection.xyz);\n"
+        "    fieldNdl = saturate(dot(N, L));\n"
+        "    fieldShadow = lerp(1, HorizonShadow(i.world, L), terrainMap.w);\n"
+        "  }\n"
         // Paths: their vertex colour is the game's light saturate(A + S * f) times a tint. Recover
         // the sun factor f from its brightness and keep the rest as tint.
         "  if (rigid) {\n"
@@ -539,16 +578,36 @@ std::string SunPixelCode() {
         "    float3 A = saturate(gameAmbient.rgb), S = gameSun.rgb, baked = saturate(i.d0.rgb);\n"
         "    float f = saturate((dot(baked, luma) - dot(A, luma)) / max(dot(S, luma), 1e-3));\n"
         "    float3 tint = clamp(baked / max(saturate(A + S * f), 1e-3), 0, 2);\n"
-        "    float3 light = GameAmbient(N) + GameSun() * f;\n"
+        "    float sunF = f;\n"
+        "    if (field) sunF = fieldNdl * min(fieldShadow, lerp(1, fieldNdl > 0.05 ? saturate(f / fieldNdl) : 1, sunControl.w));\n"
+        "    float3 light = GameAmbient(N) + GameSun() * sunF;\n"
         "    return float4(LinearToOutput(ToLinear(color.rgb * tint) * light), color.a);\n"
         "  }\n"
         // Terrain: the game's per-vertex sun factor (v0.w, passed in t7.x) keeps its smooth slopes.
-        "  float ndl = sunFlags.w == 2 ? saturate(i.t7.x) : saturate(dot(N, sunDirection.xyz));\n"
+        "  float ndl = saturate(dot(N, sunDirection.xyz));\n"
+        "  if (sunFlags.w == 2) {\n"
+        "    float baked = saturate(i.t7.x);\n"
+        "    ndl = field ? fieldNdl * min(fieldShadow, lerp(1, fieldNdl > 0.05 ? saturate(baked / fieldNdl) : 1, sunControl.w)) : baked;\n"
+        "  }\n"
         "  float3 light = GameAmbient(N) + GameSun() * ndl;\n"
+        "  float3 rim = sunFlags.w == 1 ? RimLight(N, i.world) : 0;\n"
+        "  light += rim;\n"
         // The terrain shader fades its lighting out under distant haze; keep that.
         "  if (sunFlags.w == 2) light = lerp(light, 1, saturate(i.d1.w));\n"
-        "  return float4(LinearToOutput(ToLinear(color.rgb) * light), color.a);\n"
-        "}\n";
+        "  return float4(LinearToOutput(ToLinear(color.rgb) * light + rim * 0.08), color.a);\n"
+        "}\n"
+        "float4 ApplySun(float4 color, VSOut i) {\n"
+        "  if (sunControl.y == 13 && sunFlags.y < 0.5) {\n"
+        "    float k = sunFlags.x > 0.5 ? sunFlags.w : -1;\n"
+        "    float3 c = k == 1 ? float3(1, 0.2, 0.2) : k == 2 ? float3(0.2, 1, 0.2) : k == 3 ? float3(0.2, 0.4, 1) : k == 4 ? float3(1, 1, 0.2) : k == 0 ? float3(1, 0.3, 1) : float3(0.5, 0.5, 0.5);\n"
+        "    return float4(lerp(color.rgb, c, 0.7), color.a); }\n"
+        "  bool relit = sunFlags.x > 0.5 && sunFlags.y < 0.5 && sunControl.x > 0.5 &&\n"
+        "    (sunFlags.w == 1 || sunFlags.w == 2 || (sunFlags.w == 3 && sunFlags.z > 0.5));\n"
+        // Called unconditionally (it returns the colour unchanged when not relit): fxc overflows
+        // its stack on this function inlined inside a branch.
+        "  float4 lit = RelightSurface(color, i);\n"
+        "  if (!relit && todNight.w > 0.5) lit.rgb *= todNight.rgb;\n" // grass, water, other world surfaces
+        "  return lit; }\n";
 }
 }
 

@@ -23,10 +23,23 @@ highlight-only shoulder above 0.8 (the hue-preserving shoulder of Khronos PBR Ne
 toe) so everything the game kept below 1 is unchanged. The fog lerp is applied afterwards, as the
 game does. With the replacement on, the material pilot also uses these light colours and output.
 
-Known limits: the terrain keeps the game's baked sun factor, so it only follows a sun direction
-close to the game's (`SunSource=game`); a day/night cycle needs real terrain normals (planned: a
-top-down height map rendered from the terrain draws). Cast shadows still come from the shadow
-resolve multiplying the whole colour, not only the sun term.
+### Terrain height field
+
+With `HeightfieldLighting=1` the terrain and the paths no longer use the baked sun factor: their
+normal comes from the game's own terrain height field, read through the exported native accessors
+also used by the water (`native_terrain.h`: `THeightField::GetHeight`, one sample per world unit,
+height up = -renderer Y). `terrain_light.cpp` scans it incrementally (16384 samples per frame),
+uploads it as an R32 texture (t15, sampler s11) and rescans every 3 s so terraforming shows up.
+The pixel shader takes central differences for a smooth normal at any sun direction and marches
+up to ~300 units toward the sun for horizon shadows (`HorizonShadows`: hills shade the terrain
+behind them). The game's baked factor also contains painted darkening (under trees, in hollows):
+its ratio to the field normal's N.L under the same sun is kept as occlusion (`BakedTerrainDetail`),
+so with the game's sun the terrain matches the baked look and a moved sun keeps that detail; the
+smaller of it and the horizon shadow is used. Paths keep the tint recovered from their vertex colour. Outside the field, or until
+the first scan completes, the baked factor is used. Debug view 2 shows the resulting normals.
+
+Known limits: cast shadows still come from the shadow resolve multiplying the whole colour, not
+only the sun term. Grass keeps the terrain colour map's baked light.
 
 ## Earlier experimental stage
 
@@ -109,3 +122,20 @@ already contain painted or precomputed light. Shared camera extraction and
 material classification still require validation in the real game.
 
 Do not launch or close SimJP automatically. The user performs the game test.
+
+## Time-of-day preview
+
+Insert panel, Sun direction: "Time of day (preview)" and an Hour slider (not saved). The sun
+crosses a tilted arc (east at 6 h, 70 degrees at noon, west at 18 h); below the horizon the moon,
+opposite the sun, becomes the light. `EvaluateTimeOfDay` (sun.cpp) derives per hour:
+
+- light colour (golden low sun, white noon, silvery full moon) and ambient colour (blue sky at
+  dusk and night), as multipliers on the game's own light colours;
+- eye adaptation: exposure raised up to 2.2x when the light is low or grazing;
+- shadow depth from the direct light's share of the total away from noon, and a cooler shadow tint;
+- rim light on skinned models (silhouettes outlined by the moon or a low sun);
+- a tint for surfaces that are not relit (grass, water, other world draws);
+- the sky: the game's sky texture by day, a procedural sky at dusk and night (horizon glow toward
+  the sun, stars, moon disc and halo), composited in the shadow resolve on sky pixels.
+
+Not yet: lights at night (lamps, windows), relit grass and water, clouds.

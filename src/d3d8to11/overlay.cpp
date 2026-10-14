@@ -271,6 +271,13 @@ void Device::DrawOverlay()
                 g_config.sunMinElevation = std::sin(minDeg * 3.14159265f / 180);
             ImGui::SetItemTooltip("A lower sun gives longer shadows. The game's sun is raised to this.");
             ImGui::Text("Current sun (Y up): %.2f %.2f %.2f", m_sun.direction[0], -m_sun.direction[1], m_sun.direction[2]);
+            ImGui::Checkbox("Time of day (preview)", &g_config.timeOfDay);
+            ImGui::SetItemTooltip("Moves the sun through the day and the moon at night. Best with Replace the game's lighting.");
+            ImGui::BeginDisabled(!g_config.timeOfDay);
+            int hh = (int)g_config.timeOfDayHour, mm = (int)((g_config.timeOfDayHour - hh) * 60);
+            char label[32]; sprintf_s(label, "%02d:%02d", hh, mm);
+            ImGui::SliderFloat("Hour", &g_config.timeOfDayHour, 0, 23.99f, label);
+            ImGui::EndDisabled();
         }
 
         if (ImGui::CollapsingHeader("Sunlight & colour", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -495,6 +502,12 @@ void Device::DrawOverlay()
             ImGui::SetItemTooltip("Blue sky light on faces looking up, warm ground bounce on faces looking down.");
             ImGui::SliderFloat("Exposure##relight", &g_config.relightExposure, 0.25f, 4, "%.2f");
             ImGui::Checkbox("Soft highlights (tonemap)", &g_config.relightTonemap);
+            ImGui::Checkbox("Terrain from height field", &g_config.heightfieldLighting);
+            ImGui::SetItemTooltip("Smooth terrain normals from the game's height field instead of its baked light.");
+            ImGui::SliderFloat("Hill shadows", &g_config.horizonShadows, 0, 1, "%.2f");
+            ImGui::SliderFloat("Baked detail", &g_config.bakedTerrainDetail, 0, 1, "%.2f");
+            ImGui::SetItemTooltip("Keeps the shading the game painted into the terrain (under trees, hollows).");
+            ImGui::Text(m_terrainReady ? "Height field: %ux%u" : "Height field: loading (%ux%u)", m_terrainW, m_terrainH);
             ImGui::EndDisabled();
             ImGui::SliderFloat("Pilot ambient", &g_config.sunAmbient, 0.1f, 2.0f, "%.2f");
             ImGui::SetItemTooltip("Material pilot light when the replacement is off.");
