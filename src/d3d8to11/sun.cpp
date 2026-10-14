@@ -645,10 +645,27 @@ void Device::UploadGrass()
             m_grassApplied = on;
         }
     }
-    m_ctx->VSSetConstantBuffers(3, 1, m_grassCB.GetAddressOf());
+    BindVSCB(3, 1, m_grassCB.GetAddressOf());
 }
 void Device::UpdateSun(bool shadowPass)
 {
+    if (!g_config.effectsEnabled) {
+        // Translated shaders still reference b1/b2: upload a neutral state, not stale
+        // relighting/night/grass parameters from the last enabled frame.
+        m_worldDraw = m_worldCaster = false;
+        m_sun = {};
+        if (!m_sunUploadedValid || memcmp(&m_sunUploaded, &m_sun, sizeof(m_sun))) {
+            D3D11_MAPPED_SUBRESOURCE map;
+            if (SUCCEEDED(m_ctx->Map(m_sunCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+                memcpy(map.pData, &m_sun, sizeof(m_sun)); m_ctx->Unmap(m_sunCB.Get(), 0);
+                m_sunUploaded = m_sun; m_sunUploadedValid = true;
+            }
+        }
+        BindVSCB(2, 1, m_sunCB.GetAddressOf());
+        BindPSCB(1, 1, m_sunCB.GetAddressOf());
+        if (m_worldKind == 4) UploadGrass(); // explicitly disable old pusher data
+        return;
+    }
     if (!SceneFx()) {
         m_worldDraw = false;
     } else {
@@ -731,14 +748,15 @@ void Device::UpdateSun(bool shadowPass)
             m_sunUploaded = m_sun; m_sunUploadedValid = true;
         }
     }
-    m_ctx->VSSetConstantBuffers(2, 1, m_sunCB.GetAddressOf());
+    BindVSCB(2, 1, m_sunCB.GetAddressOf());
     if (m_worldKind == 4) UploadGrass();
-    m_ctx->PSSetConstantBuffers(1, 1, m_sunCB.GetAddressOf());
+    BindPSCB(1, 1, m_sunCB.GetAddressOf());
 }
 
 void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base)
 {
-    if (!g_config.sunLighting || !m_worldCaster || !m_sunStarted || m_sunResolved || !m_sunDSV) return;
+    CpuPerformanceScope cpu(m_perf,2);
+    if (!g_config.effectsEnabled || !g_config.sunLighting || !m_worldCaster || !m_sunStarted || m_sunResolved || !m_sunDSV) return;
     UpdateSun(true);
     ID3D11PixelShader* depthPixel = GetPixelShader();
     if (!depthPixel) { UpdateSun(false); return; }
@@ -958,7 +976,7 @@ void Device::DumpSunFrame()
 
 void Device::TraceSun(const char* fmt, ...)
 {
-    if (!m_trace) return;
+    if (!m_trace || !g_config.effectsEnabled) return;
     char line[512];
     va_list ap;
     va_start(ap, fmt);
@@ -985,6 +1003,13 @@ void Device::TraceFlush()
 void Device::EndSunFrame()
 {
     ResolveSun("present");
+    InvalidateBindings();
+    if (!g_config.effectsEnabled) {
+        // A trace scheduled while shadows were enabled must not start (or wait
+        // forever for a shadow draw) after the master switch is turned off.
+        m_trace=false; m_traceAt=0; m_traceRepeat=0;
+        m_traceBuf.clear(); m_traceLast.clear();
+    }
     if (m_trace) {
         TraceFlush();
         // Keep only a frame that actually rendered the park with shadows.
@@ -999,7 +1024,7 @@ void Device::EndSunFrame()
         }
         m_traceBuf.clear();
     }
-    if (g_config.sunLighting && !m_traceDone && !m_trace) {
+    if (g_config.effectsEnabled && g_config.sunLighting && !m_traceDone && !m_trace) {
         if (!m_traceAt && m_shadowDraws) m_traceAt = m_frame + 1000;
         if (m_traceAt && m_frame + 1 >= m_traceAt) m_trace = true;
     }

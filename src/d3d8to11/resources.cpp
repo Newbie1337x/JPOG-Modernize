@@ -523,6 +523,8 @@ HRESULT Volume::GetContainer(REFIID, void** container)
 
 bool BufferImpl::Create(Device* dev, UINT size, DWORD usage, DWORD pool, UINT bind)
 {
+    static std::atomic<UINT64> next{1};
+    m_identity = next.fetch_add(1);
     m_dev = dev;
     m_size = size ? size : 4;
     m_usage = usage;
@@ -562,6 +564,9 @@ HRESULT BufferImpl::Unlock()
     if (m_lockCount == 0) return D8ERR_INVALIDCALL;
     if (--m_lockCount) return S_OK;
     if (m_lockFlags & D8LOCK_READONLY) return S_OK;
+    CpuPerformanceScope cpu(m_dev->m_perf,Performance::CpuGeometryUpload);
+    ++m_revision;
+    m_dev->InvalidateTessellation(m_identity);
     ID3D11DeviceContext* ctx = m_dev->Ctx();
     if (m_dynamic) {
         D3D11_MAPPED_SUBRESOURCE map;
@@ -569,18 +574,26 @@ HRESULT BufferImpl::Unlock()
             if (SUCCEEDED(ctx->Map(m_buf.Get(), 0, D3D11_MAP_WRITE_NO_OVERWRITE, 0, &map))) {
                 memcpy((BYTE*)map.pData + m_lockOffset, m_shadow.data() + m_lockOffset, m_lockSize);
                 ctx->Unmap(m_buf.Get(), 0);
+                ++m_dev->m_perf.geometryUploads; m_dev->m_perf.geometryUploadBytes+=m_lockSize;
             }
         } else if (SUCCEEDED(ctx->Map(m_buf.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
             // The shadow always holds the full contents, so a discard never loses data.
             memcpy(map.pData, m_shadow.data(), m_size);
             ctx->Unmap(m_buf.Get(), 0);
+            ++m_dev->m_perf.geometryUploads; m_dev->m_perf.geometryUploadBytes+=m_size;
             m_everDiscarded = true;
         }
     } else {
         D3D11_BOX box = { m_lockOffset, 0, 0, m_lockOffset + m_lockSize, 1, 1 };
         ctx->UpdateSubresource(m_buf.Get(), 0, &box, m_shadow.data() + m_lockOffset, 0, 0);
+        ++m_dev->m_perf.geometryUploads; m_dev->m_perf.geometryUploadBytes+=m_lockSize;
     }
     return S_OK;
+}
+
+BufferImpl::~BufferImpl()
+{
+    if (m_dev && m_identity) m_dev->InvalidateTessellation(m_identity);
 }
 
 HRESULT VertexBuffer::QueryInterface(REFIID, void** out)

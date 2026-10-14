@@ -76,7 +76,7 @@ void Device::UpdateWaterRegions()
     m_waterRegionNext+=count;
     if(m_waterRegionNext==total && m_waterRegions.Build(info.w,info.h,m_waterRegionHeights,m_waterRegionLevel)){
         ID3D11ShaderResourceView* none[3]={};
-        m_ctx->PSSetShaderResources(12,3,none);m_ctx->VSSetShaderResources(12,3,none);
+        BindPSSrv(12,3,none);BindVSSrv(12,3,none);
         if(!m_waterRegionTexture){
             D3D11_TEXTURE2D_DESC td={info.w,info.h,1,1,DXGI_FORMAT_R8_UNORM,{1,0},D3D11_USAGE_DEFAULT,D3D11_BIND_SHADER_RESOURCE,0,0};
             if(FAILED(m_device->CreateTexture2D(&td,nullptr,&m_waterRegionTexture)) ||

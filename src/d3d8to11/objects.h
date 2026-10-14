@@ -180,6 +180,8 @@ public:
 // locks without DISCARD/NOOVERWRITE never stall or corrupt in-flight draws.
 class BufferImpl {
 public:
+    ~BufferImpl();
+    UINT64 m_identity = 0, m_revision = 0;
     bool Create(Device* dev, UINT size, DWORD usage, DWORD pool, UINT bind);
     HRESULT Lock(UINT offset, UINT size, BYTE** data, DWORD flags);
     HRESULT Unlock();

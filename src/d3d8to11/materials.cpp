@@ -20,13 +20,14 @@ int Device::MaterialTextureStage() const {
     return -1;
 }
 int Device::ActiveMaterial() const {
+    if(!g_config.effectsEnabled)return 0;
     if(PickedDraw())return 1;
     if(!g_config.effectsEnabled || !g_config.materialsEnabled || m_materialFailed || !m_worldDraw ||
        m_sun.flags[1]>.5f || (m_worldKind!=1 && m_worldKind!=3) ||
        MaterialTextureStage()<0)return 0;
     int profile=static_cast<Texture*>(static_cast<ID8Texture*>(m_textures[MaterialTextureStage()]))->m_materialProfile;
     if(profile && m_psHandle && m_psHandle<=m_pixelShaders.size() && m_pixelShaders[m_psHandle-1] &&
-       IsWaterPixelShader(m_pixelShaders[m_psHandle-1]->func.data()))return 0;
+       m_pixelShaders[m_psHandle-1]->water)return 0;
     return profile;
 }
 bool Device::PrepareMaterial(){
@@ -39,7 +40,7 @@ bool Device::PrepareMaterial(){
     D3D11_MAPPED_SUBRESOURCE map;
     if(FAILED(m_ctx->Map(m_materialCB.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&map))){m_materialFailed=true;Log("Material CB mapping failed; pilot disabled");return false;}
     memcpy(map.pData,cb,sizeof(cb));m_ctx->Unmap(m_materialCB.Get(),0);
-    m_ctx->PSSetConstantBuffers(3,1,m_materialCB.GetAddressOf());
+    BindPSCB(3,1,m_materialCB.GetAddressOf());
     ++m_materialDraws[profile];
     LogOnce("material-stage-"+std::to_string(profile)+"-"+std::to_string(MaterialTextureStage()),"GGX material pilot active: profile %d stage %d, VS 0x%lx PS 0x%lx",profile,MaterialTextureStage(),m_vsHandle,m_psHandle);
     return true;

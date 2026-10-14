@@ -75,6 +75,9 @@ void Performance::Tick(double frequency)
 void Device::RecordPerformance()
 {
     auto& p=m_perf;const ULONGLONG now=GetTickCount64();
+    if(p.cpuMeasured){for(int i=0;i<Performance::CpuCount;++i){p.cpuShown[i]=p.cpu[i];p.cpuWindow[i]+=p.cpu[i];}++p.cpuSamples;}
+    for(double& value:p.cpu)value=0;
+    p.cpuMeasured=false;
     // The first Present has no frame-to-frame interval yet; do not mix its
     // draw/wait counts into the following interval's averages.
     if(!p.historyAt){p.csvOrigin=p.csvTick=now;return;}
@@ -83,7 +86,9 @@ void Device::RecordPerformance()
     if(!g_config.performanceLog){
         if(p.csv){fclose(p.csv);p.csv=nullptr;++p.csvPart;}
         p.csvTick=now;p.windowFrames=0;p.windowMs=p.windowPeak=p.windowPresent=p.windowLimiter=0;
-        p.windowDraws=p.windowWater=p.windowShadows=0;return;
+        p.windowDraws=p.windowWater=p.windowShadows=0;p.cpuSamples=0;
+        for(double& value:p.cpuWindow)value=0;
+        return;
     }
     if(p.csvFailed)return;
     if(!p.csvOrigin)p.csvOrigin=now;
@@ -95,7 +100,7 @@ void Device::RecordPerformance()
             t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond,GetCurrentProcessId(),p.csvPart);
         p.csvPath=g_gameDir+name;p.csv=_fsopen(p.csvPath.c_str(),"w",_SH_DENYNO);
         if(!p.csv){p.csvFailed=true;Log("Performance CSV creation failed: %s",p.csvPath.c_str());return;}
-        fputs("elapsed_s,frames,frame_avg_ms,frame_peak_ms,present_avg_ms,limiter_avg_ms,gpu_valid,gpu_age_ms,gpu_total_ms,gpu_ao_shafts_ms,gpu_composition_ms,gpu_water_copy_ms,gpu_taa_ms,gpu_fsr1_ms,private_mib,resident_mib,private_delta_mib,gpu_budget_valid,gpu_local_mib,gpu_budget_mib,draws_avg,water_draws_avg,shadow_draws_avg,surfaces,textures,volumes,vertex_buffers,index_buffers,blend_cache,depth_cache,raster_cache,sampler_cache,vs_live,ps_live,ps_variants,ff_shaders,dynamic_buffers_mib,msaa,effects,shadows,ao,shafts,normals,grass,water,interaction,ssr,ssr_steps,gpu_skipped,taa,fsr1,water_surface_mode,water_region_ready,water_ocean_cells,water_pond_cells,water_map_cpu_ms,fsr31_requested,fsr31_active,fsr31_failed,fg_requested,fg_presented,fg_failed,generated_presents_total\n",p.csv);
+        fputs("elapsed_s,frames,frame_avg_ms,frame_peak_ms,present_avg_ms,limiter_avg_ms,gpu_valid,gpu_age_ms,gpu_total_ms,gpu_ao_shafts_ms,gpu_composition_ms,gpu_water_copy_ms,gpu_taa_ms,gpu_fsr1_ms,private_mib,resident_mib,private_delta_mib,gpu_budget_valid,gpu_local_mib,gpu_budget_mib,draws_avg,water_draws_avg,shadow_draws_avg,surfaces,textures,volumes,vertex_buffers,index_buffers,blend_cache,depth_cache,raster_cache,sampler_cache,vs_live,ps_live,ps_variants,ff_shaders,dynamic_buffers_mib,msaa,effects,shadows,ao,shafts,normals,grass,water,interaction,ssr,ssr_steps,gpu_skipped,taa,fsr1,water_surface_mode,water_region_ready,water_ocean_cells,water_pond_cells,water_map_cpu_ms,fsr31_requested,fsr31_active,fsr31_failed,fg_requested,fg_presented,fg_failed,generated_presents_total,cpu_prepare_sample_avg_ms,cpu_tess_sample_avg_ms,cpu_shadow_sample_avg_ms,cpu_sample_frames,tess_cache_hits_total,tess_cache_misses_total,tess_cache_entries,tess_cache_mib,effective_fps_limit,effective_vsync,effective_anisotropy,cpu_setup_sample_avg_ms,cpu_scene_sample_avg_ms,cpu_diagnostics_sample_avg_ms,cpu_vertex_sample_avg_ms,cpu_constants_sample_avg_ms,cpu_resources_sample_avg_ms,cpu_pipeline_sample_avg_ms,cpu_geometry_upload_sample_avg_ms,duplicate_constant_writes_total,vs_constant_uploads_total,ps_constant_uploads_total,geometry_uploads_total,geometry_upload_bytes_total,redundant_render_states_total,redundant_texture_states_total,sampler_selection_hits_total,sampler_selection_lookups_total,redundant_binds_total,vs_constant_bytes_total\n",p.csv);
         Log("Performance CSV (1 sample/sec): %s",p.csvPath.c_str());p.csvRows=0;
     }
     unsigned vs=0,ps=0,variants=0;
@@ -111,7 +116,7 @@ void Device::RecordPerformance()
         p.privateBytes/mib,p.workingSet/mib,(double(p.privateBytes)-double(p.basePrivate))/mib,
         p.budgetValid,p.gpuUsage/mib,p.gpuBudget/mib,p.windowDraws/frames,p.windowWater/frames,p.windowShadows/frames);
     for(auto& n:ResourceCount::live)fprintf(p.csv,"%u,",n.load());
-    fprintf(p.csv,"%u,%u,%u,%u,%u,%u,%u,%u,%.3f,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,%d,%d,%d,%d,%u,%u,%.3f,%d,%d,%d,%d,%d,%d,%llu\n",
+    fprintf(p.csv,"%u,%u,%u,%u,%u,%u,%u,%u,%.3f,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,%d,%d,%d,%d,%u,%u,%.3f,%d,%d,%d,%d,%d,%d,%llu,",
         unsigned(m_blendStates.size()),unsigned(m_depthStates.size()),unsigned(m_rasterStates.size()),unsigned(m_samplers.size()),
         vs,ps,variants,unsigned(m_ffShaders.size()),(double(m_dynVBSize)+m_dynIBSize)/mib,m_msaaApplied,
         g_config.effectsEnabled,g_config.sunLighting,g_config.aoEnabled,g_config.shafts,g_config.normalMaps,
@@ -119,10 +124,22 @@ void Device::RecordPerformance()
         g_config.waterSurfaceMode,m_waterRegionReady,m_waterRegions.oceanCells,m_waterRegions.pondCells,m_waterRegionCpuMs,
         g_config.fsr31,g_config.effectsEnabled && g_config.fsr31 && !m_fsr31Failed && m_fsr31Frame==m_frame,m_fsr31Failed,
         g_config.frameGeneration,m_generatedPresentFrame==m_frame,m_frameGenFailed,m_generatedPresents);
+    if(p.cpuSamples) fprintf(p.csv,"%.4f,%.4f,%.4f,",p.cpuWindow[0]/p.cpuSamples,p.cpuWindow[1]/p.cpuSamples,p.cpuWindow[2]/p.cpuSamples);
+    else fputs("NA,NA,NA,",p.csv);
+    fprintf(p.csv,"%u,%llu,%llu,%u,%.3f,%d,%d,%d",p.cpuSamples,m_tessCacheHits,m_tessCacheMisses,unsigned(m_tessCache.size()),m_tessCacheBytes/1048576.0,
+        g_config.EffectiveFpsLimit(),g_config.EffectiveVSync(),g_config.EffectiveAnisotropy());
+    for(int i=Performance::CpuSetup;i<Performance::CpuCount;++i) {
+        if(p.cpuSamples)fprintf(p.csv,",%.4f",p.cpuWindow[i]/p.cpuSamples);
+        else fputs(",NA",p.csv);
+    }
+    fprintf(p.csv,",%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",p.duplicateConstants,p.vsUploads,p.psUploads,p.geometryUploads,p.geometryUploadBytes,
+        p.redundantRenderStates,p.redundantTextureStates,p.samplerSelectionHits,p.samplerSelectionLookups,
+        p.redundantBinds,p.constantBytes);
     if(fflush(p.csv)!=0 || ferror(p.csv)){p.csvFailed=true;Log("Performance CSV write failed");fclose(p.csv);p.csv=nullptr;}
     else if(++p.csvRows>=36000){fclose(p.csv);p.csv=nullptr;++p.csvPart;}
     p.csvTick=now;p.windowFrames=0;p.windowMs=p.windowPeak=p.windowPresent=p.windowLimiter=0;
     p.windowDraws=p.windowWater=p.windowShadows=0;
+    p.cpuSamples=0;for(double& value:p.cpuWindow)value=0;
 }
 void Performance::SampleMemory(ID3D11Device* d)
 {

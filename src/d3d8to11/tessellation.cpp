@@ -17,6 +17,7 @@ bool Device::TessellationCandidate() const
 
 bool Device::BeginTessellation(DWORD type, D3D11_PRIMITIVE_TOPOLOGY& topo)
 {
+    CpuPerformanceScope cpu(m_perf,1);
     if (!m_tessCandidate) return false;
     // Strips are expanded to lists by the caller (device.cpp StripToList).
     if (type != D8PT_TRIANGLELIST && type != D8PT_TRIANGLESTRIP) {
@@ -86,8 +87,8 @@ bool Device::BeginTessellation(DWORD type, D3D11_PRIMITIVE_TOPOLOGY& topo)
 // the current palette.
 void Device::DrawTessellated(const std::vector<UINT>& list, INT baseVertex)
 {
+    CpuPerformanceScope cpu(m_perf,1);
     if (list.empty()) return;
-    std::vector<UINT> canon(list);
     const VSInput* posIn = nullptr;
     size_t vsIdx = m_vsHandle >> 1;
     if (g_config.tessWeld && vsIdx < m_vertexShaders.size() && m_vertexShaders[vsIdx])
@@ -95,6 +96,20 @@ void Device::DrawTessellated(const std::vector<UINT>& list, INT baseVertex)
             if (in.reg == 0 && in.stream == 0 && in.type == 2) posIn = &in;
     const VertexBuffer* vb = m_streams[0].vb;
     const UINT stride = m_streams[0].stride;
+    const UINT64 identity=vb ? vb->m_impl.m_identity:0, revision=vb ? vb->m_impl.m_revision:0;
+    const UINT offset=posIn ? posIn->offset:0;
+    const bool weld=posIn && vb && stride && !vb->m_impl.m_shadow.empty();
+    for(const auto& entry:m_tessCache) {
+        if(entry.Matches(identity,revision,baseVertex,stride,offset,weld,list)) {
+            ++m_tessCacheHits;
+            m_ctx->IASetIndexBuffer(entry.buffer.Get(),DXGI_FORMAT_R32_UINT,0);
+            m_lastIB=entry.buffer.Get();m_lastIBFormat=DXGI_FORMAT_R32_UINT;
+            m_ctx->DrawIndexed(entry.count,0,baseVertex);
+            return;
+        }
+    }
+    ++m_tessCacheMisses;
+    std::vector<UINT> canon(list);
     if (posIn && vb && stride && !vb->m_impl.m_shadow.empty()) {
         const std::vector<BYTE>& data = vb->m_impl.m_shadow;
         struct Key { float p[3]; bool operator==(const Key& o) const { return !memcmp(p, o.p, sizeof(p)); } };
@@ -118,8 +133,34 @@ void Device::DrawTessellated(const std::vector<UINT>& list, INT baseVertex)
     for (size_t t = 0; t + 2 < list.size(); t += 3) {
         patches.insert(patches.end(), { list[t], list[t + 1], list[t + 2], canon[t], canon[t + 1], canon[t + 2] });
     }
+    const size_t bytes=patches.size()*sizeof(UINT)+list.size()*sizeof(UINT);
+    constexpr size_t budget=32*1024*1024;
+    if(bytes<=budget && !patches.empty()) {
+        D3D11_BUFFER_DESC desc={};desc.ByteWidth=(UINT)patches.size()*4;
+        desc.Usage=D3D11_USAGE_IMMUTABLE;desc.BindFlags=D3D11_BIND_INDEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA data={patches.data(),0,0};
+        TessCacheEntry entry;
+        if(SUCCEEDED(m_device->CreateBuffer(&desc,&data,&entry.buffer))) {
+            if(m_tessCacheBytes+bytes>budget || m_tessCache.size()>=128){m_tessCache.clear();m_tessCacheBytes=0;}
+            entry.identity=identity;entry.revision=revision;entry.base=baseVertex;
+            entry.stride=stride;entry.offset=offset;entry.weld=weld;entry.list=list;
+            entry.count=(UINT)patches.size();entry.bytes=bytes;
+            m_ctx->IASetIndexBuffer(entry.buffer.Get(),DXGI_FORMAT_R32_UINT,0);
+            m_lastIB=entry.buffer.Get();m_lastIBFormat=DXGI_FORMAT_R32_UINT;
+            m_ctx->DrawIndexed(entry.count,0,baseVertex);
+            m_tessCacheBytes+=bytes;m_tessCache.push_back(std::move(entry));return;
+        }
+    }
     UploadDynamicIndices(patches.data(), (UINT)patches.size() * 4, DXGI_FORMAT_R32_UINT);
     m_ctx->DrawIndexed((UINT)patches.size(), 0, baseVertex);
+}
+
+void Device::InvalidateTessellation(UINT64 identity)
+{
+    for(auto it=m_tessCache.begin();it!=m_tessCache.end();) {
+        if(it->identity==identity){m_tessCacheBytes-=it->bytes;it=m_tessCache.erase(it);}
+        else ++it;
+    }
 }
 
 void Device::EndTessellation()

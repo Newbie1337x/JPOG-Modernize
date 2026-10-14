@@ -70,6 +70,18 @@ static void* g_mice[8] = {};
 static DWORD g_mouseButtons = 0;
 static MouseInput_t g_mouseInput = nullptr;
 static InputBlocked_t g_inputBlocked = nullptr;
+static MouseInput_t g_cameraMouseInput = nullptr;
+
+static void FindCameraInput()
+{
+    if (g_cameraMouseInput) return;
+    HMODULE plugin = GetModuleHandleA("JPOGMouseFix.asi");
+    if (plugin) {
+        g_cameraMouseInput = (MouseInput_t)GetProcAddress(plugin, "JPOGCamera_MouseInput");
+        if (!g_cameraMouseInput)
+            g_cameraMouseInput = (MouseInput_t)GetProcAddress(plugin, "_JPOGCamera_MouseInput@16");
+    }
+}
 
 static void FindOverlay()
 {
@@ -101,13 +113,19 @@ static HRESULT STDMETHODCALLTYPE Hook_GetDeviceState(void* self, DWORD size, voi
     HRESULT hr = g_origGetState(self, size, data);
     if (FAILED(hr) || !data) return hr;
     FindOverlay();
-    if (IsMouse(self) && (size == 16 || size == 20) && g_mouseInput) {
+    FindCameraInput();
+    if (IsMouse(self) && (size == 16 || size == 20)) {
         // DIMOUSESTATE / DIMOUSESTATE2: lX, lY, lZ, rgbButtons[4 or 8]
         const LONG* axes = (const LONG*)data;
         const BYTE* buttons = (const BYTE*)data + 12;
         DWORD bits = 0;
         for (int i = 0; i < 3; i++) if (buttons[i] & 0x80) bits |= 1u << i;
-        if (g_mouseInput(axes[0], axes[1], axes[2], bits)) memset(data, 0, size);
+        const bool blocked = g_mouseInput ? g_mouseInput(axes[0], axes[1], axes[2], bits) != FALSE : false;
+        if (blocked) memset(data, 0, size);
+        else if (g_cameraMouseInput && g_cameraMouseInput(axes[0], axes[1], axes[2], bits)) {
+            ((LONG*)data)[0] = ((LONG*)data)[1] = 0;
+            ((BYTE*)data)[14] = 0; // middle only; preserve selection, right click and wheel
+        }
     } else if (g_inputBlocked && g_inputBlocked()) {
         memset(data, 0, size);
     }
@@ -119,7 +137,8 @@ static HRESULT STDMETHODCALLTYPE Hook_GetDeviceData(void* self, DWORD objSize, v
     HRESULT hr = g_origGetData(self, objSize, items, count, flags);
     if (FAILED(hr) || !count) return hr;
     FindOverlay();
-    if (IsMouse(self) && g_mouseInput && items && objSize >= 8) {
+    FindCameraInput();
+    if (IsMouse(self) && items && objSize >= 8) {
         // DIDEVICEOBJECTDATA: dwOfs, dwData, ... ; DIMOFS_X/Y/Z = 0/4/8, DIMOFS_BUTTON0.. = 12..
         LONG dx = 0, dy = 0, dz = 0;
         for (DWORD i = 0; i < *count; i++) {
@@ -132,7 +151,20 @@ static HRESULT STDMETHODCALLTYPE Hook_GetDeviceData(void* self, DWORD objSize, v
                 g_mouseButtons = (item[1] & 0x80) ? (g_mouseButtons | bit) : (g_mouseButtons & ~bit);
             }
         }
-        if (g_mouseInput(dx, dy, dz, g_mouseButtons)) *count = 0;
+        const bool blocked = g_mouseInput ? g_mouseInput(dx, dy, dz, g_mouseButtons) != FALSE : false;
+        if (blocked) *count = 0;
+        else if (!(flags & 1) && g_cameraMouseInput && g_cameraMouseInput(dx, dy, dz, g_mouseButtons)) {
+            // Remove only consumed axes/middle events from the game's batch.
+            DWORD kept = 0;
+            for (DWORD i = 0; i < *count; ++i) {
+                BYTE* item = (BYTE*)items + (size_t)i * objSize;
+                const DWORD offset = *(DWORD*)item;
+                if (offset == 0 || offset == 4 || offset == 14) continue;
+                if (kept != i) memmove((BYTE*)items + (size_t)kept * objSize, item, objSize);
+                ++kept;
+            }
+            *count = kept;
+        }
     } else if (g_inputBlocked && g_inputBlocked()) {
         *count = 0;
     }

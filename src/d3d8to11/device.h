@@ -4,11 +4,14 @@
 #include "objects.h"
 #include "shaders.h"
 #include "performance.h"
+#include "draw_diagnostics.h"
+#include "descriptor_reuse.h"
 #include "water_regions.h"
 
 struct VertexShader8 {
     std::vector<DWORD> decl, func;
     VSDecl parsed;
+    int worldKind=0; // immutable declaration classification, computed at creation
     ComPtr<ID3D11VertexShader> vs;
     ComPtr<ID3D11InputLayout> layout;
     bool failed = false;
@@ -17,14 +20,18 @@ struct VertexShader8 {
 struct PixelShader8 {
     std::vector<DWORD> func;
     bool samplesStage1=false;
+    bool water=false; // immutable bytecode classification, computed at creation
     std::vector<std::pair<PSVariant, ComPtr<ID3D11PixelShader>>> variants;
 };
 
 class Device : public ID8Device {
+    friend struct TessCacheKeyTest;
+    friend class BufferImpl; // geometry upload profiling, no ownership change
 public:
     Device(Direct3D8* d3d, HWND focus, DWORD flags, D3D8PresentParameters* pp);
     ~Device();
     bool Init();
+    void InvalidateTessellation(UINT64 identity);
 
     // IUnknown
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** out) override;
@@ -210,8 +217,10 @@ private:
     std::unordered_map<uint64_t, ComPtr<ID3D11DepthStencilState>> m_depthStates;
     std::unordered_map<uint64_t, ComPtr<ID3D11RasterizerState>> m_rasterStates;
     std::unordered_map<std::string, ComPtr<ID3D11SamplerState>> m_samplers;
+    DescriptorReuse<DWORD,ID3D11SamplerState*> m_samplerSelections[kMaxStages];
     std::unordered_map<std::string, ComPtr<ID3D11PixelShader>> m_ffShaders;
     ComPtr<ID3D11Buffer> m_vsCB, m_vsExtraCB, m_psCB;
+    UINT m_swapFlags = 0; // DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING when supported
     ComPtr<ID3D11Buffer> m_dynVB, m_dynIB;
     UINT m_dynVBSize = 0, m_dynIBSize = 0;
     ComPtr<ID3D11Buffer> m_fanIB;   // index pattern for triangle fans (0, i, i+1)
@@ -301,6 +310,19 @@ private:
     ComPtr<ID3D11Buffer> m_tessCB;
     ComPtr<ID3D11SamplerState> m_tessSampler;
     UINT m_tessDraws=0, m_tessDrawsShown=0;
+    struct TessCacheEntry {
+        UINT64 identity=0, revision=0;
+        INT base=0; UINT stride=0, offset=0; bool weld=false;
+        std::vector<UINT> list;
+        ComPtr<ID3D11Buffer> buffer;
+        UINT count=0; size_t bytes=0;
+        bool Matches(UINT64 id,UINT64 rev,INT b,UINT s,UINT o,bool w,const std::vector<UINT>& indices) const {
+            return identity==id && revision==rev && base==b && stride==s && offset==o && weld==w && list==indices;
+        }
+    };
+    std::vector<TessCacheEntry> m_tessCache;
+    size_t m_tessCacheBytes=0;
+    UINT64 m_tessCacheHits=0, m_tessCacheMisses=0;
     void TrackSkinTexture();
     // Skin picker (Insert panel): distinct stage-0 textures of skinned world draws, in draw order.
     int m_pickSkin=-1;
@@ -332,6 +354,7 @@ private:
     UINT64 m_taaFrame=~UINT64(0);
     float m_taaPrevVP[4][4]={},m_taaPrevOffset[4]={};
     Performance m_perf;
+    DrawDiagnostics m_drawDiagnostics;
     void RecordPerformance();
     UINT m_perfDraws=0, m_perfWaterDraws=0, m_perfShadowDraws=0;
     // Sun shadows (sun.cpp). Casters are drawn into m_sunMap as the frame is rendered; once the
@@ -441,6 +464,23 @@ private:
     bool m_grassUploaded = false;
     bool m_grassApplied = false;
     UINT m_vsWriteLo = 0, m_vsWriteHi = 0;
+    UINT m_vsConstUsed = 0; // registers 0..used-1 have been written at least once: the upload copies only those
+    // Per-draw bindings last sent to the driver: unchanged ones are not sent again. Passes that
+    // bind outside the draw path (clears, resolve, bloom, AA, FSR, Present, ImGui) end with
+    // InvalidateBindings(); binding a render target nulls stages 0-7 through BindPSSrv.
+    struct BindingCache {
+        static const UINT Srv = 20, Samp = 12, Cb = 6;
+        ID3D11ShaderResourceView *psSrv[Srv], *vsSrv[Srv];
+        ID3D11SamplerState *psSamp[Samp], *vsSamp[Samp];
+        ID3D11Buffer *vsCb[Cb], *psCb[Cb];
+    } m_bind{};
+    void InvalidateBindings();
+    void BindPSSrv(UINT slot, UINT n, ID3D11ShaderResourceView* const* v);
+    void BindVSSrv(UINT slot, UINT n, ID3D11ShaderResourceView* const* v);
+    void BindPSSamplers(UINT slot, UINT n, ID3D11SamplerState* const* v);
+    void BindVSSamplers(UINT slot, UINT n, ID3D11SamplerState* const* v);
+    void BindVSCB(UINT slot, UINT n, ID3D11Buffer* const* v);
+    void BindPSCB(UINT slot, UINT n, ID3D11Buffer* const* v);
     UINT SupportedSamples(int requested);
     void ApplyMsaa();
     UINT m_msaaApplied = 1;

@@ -2,12 +2,23 @@
 
 Press **Insert** in game (configurable: `[Overlay] Key` in `d3d8to11.ini`, a Windows
 virtual-key code) to open the D3D11 renderer's settings panel. Changes apply immediately;
-**Save** writes them to `d3d8to11.ini`, **Reload ini** reads the file again.
+**Guardar graficos** writes them to `d3d8to11.ini`, **Recargar graficos** reads the file again.
 
-Sections: sun shadows (on/off, strength, distance, map resolution, terrain/grass casters),
-sun direction (follow the game or manual azimuth/height, minimum height), display (FPS
-limit, VSync, anisotropic filtering, game gamma, FPS counter) and experimental options
-(replacement lighting, debug views).
+The bounded, resizable panel uses five tabs, with independent scroll positions:
+
+- **Graficos**: shadows, sun/day-night, colour, AO/shafts, normals, screen/MSAA/FSR1.
+- **Agua y pasto**: water, waves/foam/SSR/interactions, interactive grass.
+- **Camara**: live native camera limits and its separate save-to-default button.
+- **Rendimiento**: frame timings, resource counters and memory measurements.
+- **Experimental**: tessellation, parallax, material pilots, temporal AA/FSR31,
+  frame generation and replacement-lighting diagnostics.
+
+Visible labels/help are Spanish (standard technical names such as MSAA/FSR remain).
+Only the first main section opens by default; advanced sections are collapsed.
+Graphics save/reload/close remain in a fixed footer outside the scroll area.
+Camera defaults still use **Guardar camara como predeterminada** and
+`JPOGMouseFix.ini`; the footer does not save camera settings. No controls were
+removed and the renderer option bindings/ranges/defaults are unchanged.
 
 ## Implementation
 
@@ -43,8 +54,11 @@ The top button switches all custom scene effects off/on through
 [Renderer] EffectsEnabled. Individual toggles and strengths are preserved;
 Save persists the master switch as well. It covers shadows, ambient occlusion,
 light shafts, colour grading, replacement lighting, normal maps, enhanced water
-and interaction, and interactive grass. Display options (MSAA, filtering,
-gamma, VSync and frame cap) and texture replacements remain independent.
+and interaction, and interactive grass. Disabled mode also overrides MSAA,
+forced anisotropy, VSync and the frame cap to off without changing their saved
+preferences. Turning the master back on restores those preferences. The game's
+gamma ramp, texture replacements, camera/HUD improvements and profiling remain
+available; this is the custom DX11 baseline, not the original D3D8 backend.
 The grass constant cache explicitly uploads a disabled state when switching
 off, preventing already-bound pusher data from continuing to bend blades.
 

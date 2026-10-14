@@ -25,7 +25,7 @@ void Device::PrepareRelief()
     if (FAILED(m_ctx->Map(m_reliefCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
     memcpy(map.pData, &c, sizeof(c));
     m_ctx->Unmap(m_reliefCB.Get(), 0);
-    m_ctx->PSSetConstantBuffers(4, 1, m_reliefCB.GetAddressOf());
+    BindPSCB(4, 1, m_reliefCB.GetAddressOf());
     m_reliefActive = true;
     ++m_reliefDraws;
 }

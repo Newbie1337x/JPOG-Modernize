@@ -22,6 +22,8 @@
 #include <unordered_map>
 #include <stdarg.h>
 #include "d3d8_profiler.h"
+#include "camera_math.h"
+#include "camera_settings.h"
 
 static float g_cursorSpeed = 0.5f;
 static bool  g_disableAccel = true;
@@ -32,6 +34,270 @@ static bool  g_wheelFix = true;
 static bool  g_horPlus = true;
 static bool  g_freeKeyboard = true;
 static float g_remX = 0.0f, g_remY = 0.0f;
+static HWND g_gameWnd = nullptr;
+static bool g_modernCamera = true;
+static float g_cameraResponse = 0.12f;
+static float g_dragPanSensitivity = 0.0015f;
+static float g_dragRotateSensitivity = 0.0018f;
+static bool g_proportionalZoom = true;
+static bool g_independentCamera = true;
+static float g_cameraMinDistance = 2.0f, g_cameraMaxDistance = 250.0f;
+static float g_cameraMinPitch = -85.0f, g_cameraMaxPitch = 0.0f;
+static float g_cameraFov = 50.0f;
+static float g_focusMinDistance = 2.0f, g_focusMaxDistance = 250.0f;
+static char g_cameraConfigPath[MAX_PATH] = {};
+static bool g_cameraLimitsReady = false, g_followLimitsReady = false;
+static void* g_followCameraVtable = nullptr;
+static void* g_worldUpdateTramp = nullptr;
+static void* g_worldMinDistanceTramp = nullptr;
+typedef bool(__thiscall* CameraUpdate_t)(BYTE*, float);
+typedef void(__thiscall* CameraSetFloat_t)(BYTE*, float, bool);
+typedef void(__thiscall* CameraSetRotation_t)(BYTE*, float, bool, bool);
+static CameraUpdate_t g_baseCameraUpdate = nullptr;
+static CameraSetFloat_t g_setCameraPitch = nullptr, g_setCameraDistance = nullptr;
+static CameraSetRotation_t g_setCameraRotation = nullptr;
+typedef BYTE*(__stdcall* CameraManager_t)();
+typedef BYTE*(__thiscall* ActiveCamera_t)(BYTE*);
+typedef void(__thiscall* CameraInput_t)(BYTE*, float);
+typedef float(__thiscall* CameraDistance_t)(BYTE*);
+typedef BOOL(WINAPI* CameraInputBlocked_t)();
+static CameraInput_t g_moveCameraForward = nullptr, g_moveCameraRight = nullptr, g_moveCameraUp = nullptr;
+static CameraInput_t g_setCameraFovDegrees = nullptr;
+static CameraDistance_t g_getCameraPitch = nullptr, g_getCameraRotation = nullptr;
+struct OwnedCamera {
+    BYTE* camera = nullptr;
+    CameraMath::OrbitPose pose;
+    float oldMinPitch = 0, oldMaxPitch = 0, oldMinDistance = 0, oldMaxDistance = 0, oldFov = 0;
+    DWORD oldFlags = 0;
+};
+static OwnedCamera g_ownedCamera;
+static float g_cameraHeightImpulse = 0;
+static CameraManager_t g_getCameraManager = nullptr;
+static ActiveCamera_t g_getActiveCamera = nullptr;
+static CameraDistance_t g_getCameraDistance = nullptr;
+static CameraInput_t g_cameraPanRight = nullptr, g_cameraPanForward = nullptr;
+static CameraInput_t g_cameraRotateRight = nullptr, g_cameraRotateDown = nullptr;
+static void* g_worldCameraVtable = nullptr;
+static void* g_scrollingUpdateTramp = nullptr;
+static BYTE** g_cameraInputMap = nullptr;
+static volatile LONG g_dragDx = 0, g_dragDy = 0, g_dragMode = 0;
+static volatile LONG g_cameraPanAllowed = 0, g_cameraRotateAllowed = 0;
+static DWORD g_cameraControlTick = 0;
+
+static BYTE* ActiveWorldCamera()
+{
+    if (!g_getCameraManager || !g_getActiveCamera || !g_worldCameraVtable) return nullptr;
+    BYTE* manager = g_getCameraManager();
+    BYTE* camera = manager ? g_getActiveCamera(manager) : nullptr;
+    return camera && (*(void**)camera == g_worldCameraVtable ||
+        (g_followLimitsReady && *(void**)camera == g_followCameraVtable)) ? camera : nullptr;
+}
+
+static bool IsFollowCamera(BYTE* camera) { return camera && *(void**)camera == g_followCameraVtable; }
+static float CameraMinDistance(BYTE* camera) { return IsFollowCamera(camera) ? g_focusMinDistance : g_cameraMinDistance; }
+static float CameraMaxDistance(BYTE* camera) { return IsFollowCamera(camera) ? g_focusMaxDistance : g_cameraMaxDistance; }
+struct CameraLimitTable {
+    void* table = nullptr;
+    CameraDistance_t original[4] = {}; // max distance, min distance, min pitch, max pitch
+};
+static CameraLimitTable g_worldLimits, g_followLimits;
+static float NativeCameraLimit(BYTE* camera, int which)
+{
+    const CameraLimitTable& table = IsFollowCamera(camera) ? g_followLimits : g_worldLimits;
+    if (g_independentCamera && g_cameraLimitsReady && g_worldUpdateTramp && camera == ActiveWorldCamera()) {
+        if (which == 0) return CameraMaxDistance(camera);
+        if (which == 1) return CameraMinDistance(camera);
+        return (which == 2 ? g_cameraMinPitch : g_cameraMaxPitch) * (3.14159265f / 180.0f);
+    }
+    return table.original[which](camera);
+}
+static float __fastcall CameraMaxDistance_Hook(BYTE* c, void*) { return NativeCameraLimit(c, 0); }
+static float __fastcall CameraMinDistance_Hook(BYTE* c, void*) { return NativeCameraLimit(c, 1); }
+static float __fastcall CameraMinPitch_Hook(BYTE* c, void*) { return NativeCameraLimit(c, 2); }
+static float __fastcall CameraMaxPitch_Hook(BYTE* c, void*) { return NativeCameraLimit(c, 3); }
+
+extern "C" __declspec(dllexport) BOOL WINAPI JPOGCamera_GetSettings(JPOGCameraSettings* out)
+{
+    if (!out || out->size != sizeof(*out) || out->version != 1) return FALSE;
+    *out = { sizeof(*out), 1, g_cameraMinDistance, g_cameraMaxDistance, g_focusMinDistance, g_focusMaxDistance,
+        g_cameraMinPitch, g_cameraMaxPitch, g_cameraFov, g_cameraResponse, g_dragPanSensitivity, g_dragRotateSensitivity,
+        g_worldUpdateTramp && g_cameraLimitsReady && g_independentCamera, g_followLimitsReady };
+    return TRUE;
+}
+extern "C" __declspec(dllexport) BOOL WINAPI JPOGCamera_SetSettings(const JPOGCameraSettings* in, BOOL save)
+{
+    if (!in || in->size != sizeof(*in) || in->version != 1) return FALSE;
+    const float values[] = { in->minDistance, in->maxDistance, in->focusMinDistance, in->focusMaxDistance,
+        in->minPitch, in->maxPitch, in->fixedFov, in->responseSeconds, in->panSensitivity, in->rotateSensitivity };
+    for (float value : values) if (!_finite(value)) return FALSE;
+    g_cameraMinDistance = CameraMath::Clamp(in->minDistance, 0.5f, 100);
+    g_cameraMaxDistance = CameraMath::Clamp(in->maxDistance, g_cameraMinDistance + 1, 2000);
+    g_focusMinDistance = CameraMath::Clamp(in->focusMinDistance, 0.5f, 100);
+    g_focusMaxDistance = CameraMath::Clamp(in->focusMaxDistance, g_focusMinDistance + 1, 2000);
+    g_cameraMinPitch = CameraMath::Clamp(in->minPitch, -89, -5);
+    g_cameraMaxPitch = CameraMath::Clamp(in->maxPitch, -10, 0);
+    if (g_cameraMaxPitch <= g_cameraMinPitch) g_cameraMaxPitch = g_cameraMinPitch + 1;
+    g_cameraFov = CameraMath::Clamp(in->fixedFov, 25, 90);
+    g_cameraResponse = CameraMath::Clamp(in->responseSeconds, 0.03f, 0.5f);
+    g_dragPanSensitivity = CameraMath::Clamp(in->panSensitivity, 0.0001f, 0.02f);
+    g_dragRotateSensitivity = CameraMath::Clamp(in->rotateSensitivity, 0.0001f, 0.02f);
+    if (!save) return TRUE;
+    const char* keys[] = { "MinDistance", "MaxDistance", "FocusMinDistance", "FocusMaxDistance", "MinPitch", "MaxPitch",
+        "FixedFOV", "ResponseSeconds", "DragPanSensitivity", "DragRotateSensitivity" };
+    const float applied[] = { g_cameraMinDistance, g_cameraMaxDistance, g_focusMinDistance, g_focusMaxDistance,
+        g_cameraMinPitch, g_cameraMaxPitch, g_cameraFov, g_cameraResponse, g_dragPanSensitivity, g_dragRotateSensitivity };
+    BOOL ok = TRUE;
+    for (int i = 0; i < 10; ++i) {
+        char value[32]; sprintf_s(value, "%.6g", applied[i]);
+        if (!WritePrivateProfileStringA("Camera", keys[i], value, g_cameraConfigPath)) ok = FALSE;
+    }
+    return ok;
+}
+
+static bool CameraControlsBlocked()
+{
+    if (!g_gameWnd || GetForegroundWindow() != g_gameWnd) return true;
+    HMODULE renderer = GetModuleHandleA("d3d8.dll");
+    CameraInputBlocked_t blocked = renderer ? (CameraInputBlocked_t)GetProcAddress(renderer, "D3D8to11_InputBlocked") : nullptr;
+    return blocked && blocked();
+}
+
+static float __fastcall WorldMinDistance_Hook(BYTE* camera, void*)
+{
+    if (g_independentCamera && g_worldUpdateTramp && camera == ActiveWorldCamera()) return CameraMinDistance(camera);
+    return ((CameraDistance_t)g_worldMinDistanceTramp)(camera);
+}
+
+// Raw DirectInput feed from our proxy: no Windows cursor warping or edge clamp.
+// Return TRUE only for a camera drag; proxy removes axes/middle, not left/right.
+extern "C" __declspec(dllexport) BOOL WINAPI JPOGCamera_MouseInput(LONG dx, LONG dy, LONG /*wheel*/, DWORD buttons)
+{
+    const bool height = g_worldUpdateTramp && (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    const bool rotate = !height && (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    const LONG mode = height ? 3 : rotate ? 2 : 1;
+    if (!g_modernCamera || !g_scrollingUpdateTramp || CameraControlsBlocked() ||
+        GetTickCount() - g_cameraControlTick > 100 || !(buttons & 4) ||
+        !(rotate ? g_cameraRotateAllowed : g_cameraPanAllowed) || !ActiveWorldCamera()) {
+        InterlockedExchange(&g_dragMode, 0);
+        InterlockedExchange(&g_dragDx, 0);
+        InterlockedExchange(&g_dragDy, 0);
+        return FALSE;
+    }
+    if (InterlockedExchange(&g_dragMode, mode) != mode) {
+        InterlockedExchange(&g_dragDx, 0);
+        InterlockedExchange(&g_dragDy, 0);
+    }
+    // Bound corrupt/stale input, while keeping normal fast drags intact.
+    if (dx < -4096) dx = -4096; else if (dx > 4096) dx = 4096;
+    if (dy < -4096) dy = -4096; else if (dy > 4096) dy = 4096;
+    InterlockedExchangeAdd(&g_dragDx, dx);
+    InterlockedExchangeAdd(&g_dragDy, dy);
+    return TRUE;
+}
+
+static bool __fastcall ScrollingUpdate_Hook(BYTE* state, void*, float dt)
+{
+    BYTE* camera = ActiveWorldCamera();
+    BYTE* inputMap = g_cameraInputMap ? *g_cameraInputMap : nullptr;
+    const bool allowed = g_modernCamera && camera && inputMap &&
+        (*(DWORD*)(inputMap + 0x78) & 2) && !CameraControlsBlocked() && dt > 0 && dt < 0.25f;
+    g_cameraPanAllowed = allowed && state[0x48] != 0;
+    g_cameraRotateAllowed = allowed && state[0x4a] != 0;
+    g_cameraControlTick = allowed ? GetTickCount() : 0;
+    const LONG mode = InterlockedCompareExchange(&g_dragMode, 0, 0);
+    const LONG dx = InterlockedExchange(&g_dragDx, 0);
+    const LONG dy = InterlockedExchange(&g_dragDy, 0);
+    const bool dragging = allowed && ((mode == 1 || mode == 3) ? g_cameraPanAllowed : mode == 2 && g_cameraRotateAllowed);
+    const BYTE translate = state[0x48], rotate = state[0x4a];
+    if (dragging) { state[0x48] = 0; state[0x4a] = 0; }
+    const bool result = ((bool(__thiscall*)(BYTE*, float))g_scrollingUpdateTramp)(state, dt);
+    state[0x48] = translate;
+    state[0x4a] = rotate;
+    if (dragging) {
+        // Native input methods generate displacement impulses. Mouse deltas are
+        // already displacement, so NEVER multiply them by frame dt again.
+        if (mode == 1) {
+            if (dx) g_cameraPanRight(camera, -dx * g_dragPanSensitivity);
+            if (dy) g_cameraPanForward(camera, dy * g_dragPanSensitivity);
+        } else if (mode == 2) {
+            if (dx) g_cameraRotateRight(camera, dx * g_dragRotateSensitivity);
+            if (dy) g_cameraRotateDown(camera, dy * g_dragRotateSensitivity);
+        } else {
+            g_cameraHeightImpulse += -dy * 0.05f;
+        }
+    } else InterlockedExchange(&g_dragMode, 0);
+    return result;
+}
+
+// Replacement controller: native AWorldCamera::OnUpdate is NOT called for the
+// active park camera. Only ACamera's matrix/listener/picking bridge is retained.
+static bool __fastcall WorldCameraUpdate_Hook(BYTE* camera, void*, float dt)
+{
+    const DWORD automaticFlags = (1u << 6) | (1u << 0x15) | (1u << 0x16);
+    if (!g_independentCamera || !g_cameraLimitsReady || camera != ActiveWorldCamera()) {
+        if (g_ownedCamera.camera == camera) {
+            *(float*)(camera + 0x3c0) = g_ownedCamera.oldMinPitch;
+            *(float*)(camera + 0x3c4) = g_ownedCamera.oldMaxPitch;
+            *(float*)(camera + 0x3b8) = g_ownedCamera.oldMinDistance;
+            *(float*)(camera + 0x3bc) = g_ownedCamera.oldMaxDistance;
+            *(float*)(camera + 0x134) = g_ownedCamera.oldFov;
+            DWORD& flags = *(DWORD*)(camera + 0x58);
+            flags = (flags & ~automaticFlags) | (g_ownedCamera.oldFlags & automaticFlags);
+            g_ownedCamera = OwnedCamera();
+        }
+        g_cameraHeightImpulse = 0;
+        return ((CameraUpdate_t)g_worldUpdateTramp)(camera, dt);
+    }
+    if (g_ownedCamera.camera != camera) {
+        g_ownedCamera = OwnedCamera();
+        g_ownedCamera.camera = camera;
+        g_ownedCamera.pose.pitch = g_getCameraPitch(camera);
+        g_ownedCamera.pose.yaw = g_getCameraRotation(camera);
+        g_ownedCamera.pose.distance = g_getCameraDistance(camera);
+        g_ownedCamera.oldMinPitch = *(float*)(camera + 0x3c0);
+        g_ownedCamera.oldMaxPitch = *(float*)(camera + 0x3c4);
+        g_ownedCamera.oldMinDistance = *(float*)(camera + 0x3b8);
+        g_ownedCamera.oldMaxDistance = *(float*)(camera + 0x3bc);
+        g_ownedCamera.oldFov = *(float*)(camera + 0x134);
+        g_ownedCamera.oldFlags = *(DWORD*)(camera + 0x58);
+    }
+    const float radians = 3.14159265f / 180.0f;
+    *(float*)(camera + 0x3c0) = g_cameraMinPitch * radians;
+    *(float*)(camera + 0x3c4) = g_cameraMaxPitch * radians;
+    const float minDistance = CameraMinDistance(camera), maxDistance = CameraMaxDistance(camera);
+    *(float*)(camera + 0x3b8) = minDistance;
+    *(float*)(camera + 0x3bc) = maxDistance;
+    // Default-pitch lock, focal-ground deflection and altitude-driven FOV off.
+    // Keep flag 8: GetPosition still lifts the eye above terrain when necessary.
+    *(DWORD*)(camera + 0x58) &= ~automaticFlags;
+    float input[6];
+    for (int i = 0; i < 5; ++i) {
+        input[i] = *(float*)(camera + 0x384 + i * 4);
+        *(float*)(camera + 0x384 + i * 4) = 0;
+        *(float*)(camera + 0x370 + i * 4) = 0; // old per-frame momentum unused
+    }
+    input[5] = g_cameraHeightImpulse;
+    g_cameraHeightImpulse = 0;
+    if (CameraControlsBlocked()) {
+        memset(input, 0, sizeof(input));
+        memset(g_ownedCamera.pose.velocity, 0, sizeof(g_ownedCamera.pose.velocity));
+    }
+    float movement[3];
+    CameraMath::StepOrbit(g_ownedCamera.pose, input, dt, g_cameraResponse,
+        g_cameraMinPitch * radians, g_cameraMaxPitch * radians,
+        minDistance, maxDistance, movement);
+    // Cancel native distance/orientation interpolation. Focal transitions (e.g.
+    // selecting a point of interest) still use the engine's positional bridge.
+    *(DWORD*)(camera + 0x58) &= ~((1u << 1) | (1u << 2));
+    g_setCameraRotation(camera, g_ownedCamera.pose.yaw, false, false);
+    g_setCameraPitch(camera, g_ownedCamera.pose.pitch, false);
+    g_setCameraDistance(camera, g_ownedCamera.pose.distance, false);
+    if (movement[0]) g_moveCameraForward(camera, movement[0]);
+    if (movement[1]) g_moveCameraRight(camera, movement[1]);
+    if (movement[2]) g_moveCameraUp(camera, movement[2]);
+    g_setCameraFovDegrees(camera, g_cameraFov);
+    return g_baseCameraUpdate(camera, dt);
+}
 
 static const float g_four3 = 4.0f / 3.0f;
 static const float g_half = 0.5f;
@@ -54,6 +320,32 @@ static bool BytesMatch(const void* addr, const unsigned char* expected, size_t l
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+}
+
+static bool InstallCameraLimits(HMODULE exe, void* vtable, const char* className, CameraLimitTable& state)
+{
+    if (!vtable) return false;
+    const int offsets[] = { 0x9c, 0xa0, 0xa8, 0xac };
+    const char* methods[] = { "ConstMaxDistance", "ConstMinDistance", "ConstMinPitch", "ConstMaxPitch" };
+    void* hooks[] = { (void*)&CameraMaxDistance_Hook, (void*)&CameraMinDistance_Hook,
+        (void*)&CameraMinPitch_Hook, (void*)&CameraMaxPitch_Hook };
+    state.table = vtable;
+    for (int i = 0; i < 4; ++i) {
+        char symbol[128]; sprintf_s(symbol, "?%s@%s@@UBEMXZ", methods[i], className);
+        void* fn = (void*)GetProcAddress(exe, symbol);
+        void** slot = (void**)((BYTE*)vtable + offsets[i]);
+        if (!fn || *slot != fn) return false;
+        state.original[i] = (CameraDistance_t)fn;
+    }
+    for (int i = 0; i < 4; ++i) {
+        void** slot = (void**)((BYTE*)vtable + offsets[i]);
+        if (!PatchBytes(slot, &hooks[i], sizeof(void*))) {
+            for (int j = 0; j < i; ++j)
+                PatchBytes((BYTE*)vtable + offsets[j], &state.original[j], sizeof(void*));
+            return false;
+        }
+    }
+    return true;
 }
 
 static void WriteRel(void* from, void* to, unsigned char opcode, size_t totalLen)
@@ -227,6 +519,61 @@ __declspec(naked) static void EdgeXStub()
 // anchored and positions are restored.
 // Children: first node at +0x50, sentinel at +0x44, next at +0xc. Visible: flags +0x88 & 4.
 static int g_hudMode = 2; // 0 = stretched, 1 = 4:3 centered, 2 = 16:9 anchored
+static bool g_minimapEnhanced = true;
+static bool g_minimapHooksReady = false;
+static int g_minimapSize = 128;
+static int g_minimapMargin = 16;
+static int g_minimapBottom = 56; // space for the native mail button
+static void* g_minimapCtorTramp = nullptr;
+static void* g_minimapPaintTramp = nullptr;
+static int HudExtent(int W);
+
+// AMinimap is a native HUD element, NOT a TGUIWidget. REA verified its
+// unsigned x/y (3a/3c), texture width/height (26/28) and terrain sampling shift
+// (2a). SetSize is a no-op. Resize BEFORE Init allocates the CPU/GPU texture;
+// never modify dimensions on a live map (Refresh uses them as buffer strides).
+static BYTE* __fastcall MinimapCtor_Hook(BYTE* self, void*)
+{
+    BYTE* result = ((BYTE*(__thiscall*)(BYTE*))g_minimapCtorTramp)(self);
+    const unsigned short shift = g_minimapSize == 256 ? 2 : g_minimapSize == 128 ? 3 : 4;
+    *(unsigned short*)(result + 0x26) = (unsigned short)g_minimapSize;
+    *(unsigned short*)(result + 0x28) = (unsigned short)g_minimapSize;
+    *(unsigned short*)(result + 0x2a) = shift; // same 1024-cell coverage, finer samples
+    return result;
+}
+
+static void PlaceNativeMinimap(BYTE* map, int W, int H)
+{
+    if (W < 320 || H < 240) return;
+    const int width = *(unsigned short*)(map + 0x26);
+    const int height = *(unsigned short*)(map + 0x28);
+    // Unsigned native coordinates cannot represent the negative left extension.
+    // The right extension is positive and uses the existing widescreen transform.
+    int x = W + HudExtent(W) - width - g_minimapMargin;
+    int y = H - height - g_minimapBottom;
+    if (x < 0) x = 0;
+    if (x > 32767) x = 32767;
+    if (y < 0) y = 0;
+    *(unsigned short*)(map + 0x3a) = (unsigned short)x;
+    *(unsigned short*)(map + 0x3c) = (unsigned short)y;
+}
+
+static void __fastcall MinimapPosition_Hook(BYTE* map, void*, int x, int y)
+{
+    *(unsigned short*)(map + 0x3a) = (unsigned short)x;
+    *(unsigned short*)(map + 0x3c) = (unsigned short)y;
+    float gui[2] = {};
+    GetGuiScreenSize(gui);
+    PlaceNativeMinimap(map, (int)gui[0], (int)gui[1]);
+}
+
+static bool __stdcall MinimapPaint_Hook(BYTE* map, BYTE* screen, void* event)
+{
+    PlaceNativeMinimap(map, *(short*)(screen + 0x70), *(short*)(screen + 0x72));
+    // Original paint reads these same fields for terrain AND camera marker;
+    // GetBBox/GetPosition also use them. Keep native visibility/events intact.
+    return ((bool(__stdcall*)(BYTE*, BYTE*, void*))g_minimapPaintTramp)(map, screen, event);
+}
 static void* g_screenPaintTramp = nullptr;
 struct AnchorState { short origX, setX; };
 static std::unordered_map<BYTE*, AnchorState>* g_anchors = nullptr;
@@ -406,7 +753,14 @@ static float __cdecl AdjustZoomDt(const int* inputEvent, float dt)
     __try {
         const int doodad = inputEvent[0];
         if (doodad == DOODAD_WHEEL_FORWARD || doodad == DOODAD_WHEEL_BACKWARD)
+        {
+            BYTE* camera = g_modernCamera && g_proportionalZoom ? ActiveWorldCamera() : nullptr;
+            if (camera && g_getCameraDistance) {
+                const float ratio = CameraMath::ZoomRatio(g_getCameraDistance(camera));
+                return g_wheelDt * ratio;
+            }
             return g_wheelDt;
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
     return dt;
@@ -457,6 +811,7 @@ static float __cdecl DampeningFor(float dt)
 {
     const float d = *scm_fDampening;
     if (d <= 0.0f || d >= 1.0f) return d;
+    if (g_modernCamera) return CameraMath::ResponseDamping(dt, g_cameraResponse);
     return powf(d, ClampDt(dt) * g_refFps);
 }
 
@@ -465,7 +820,7 @@ static float __cdecl OMDampeningFor(float dt)
     const float d = *scm_fDampening;
     const float om = *scm_fOMDampening;
     if (d <= 0.0f || d >= 1.0f) return om;
-    const float dEff = powf(d, ClampDt(dt) * g_refFps);
+    const float dEff = DampeningFor(dt);
     return om * (1.0f - dEff) / (1.0f - d);
 }
 
@@ -602,7 +957,6 @@ static CreateDevice_t g_origCreateDevice = nullptr;
 static Reset_t g_origReset = nullptr;
 static UINT g_bbWidth = 0, g_bbHeight = 0;
 static DWORD g_desktopFormat = 0; // D3DFMT_UNKNOWN
-static HWND g_gameWnd = nullptr;
 static WNDPROC g_origWndProc = nullptr;
 
 static void FitWindowToMonitor(HWND hwnd)
@@ -1155,6 +1509,7 @@ static void LoadConfig(HMODULE self)
     GetModuleFileNameA(self, path, MAX_PATH);
     char* dot = strrchr(path, '.');
     if (dot) strcpy_s(dot, path + MAX_PATH - dot, ".ini");
+    strcpy_s(g_cameraConfigPath, path);
 
     char buf[64];
     GetPrivateProfileStringA("Cursor", "Speed", "0.5", buf, sizeof(buf), path);
@@ -1179,6 +1534,13 @@ static void LoadConfig(HMODULE self)
     if (!g_fixHud) g_hudMode = 0;
     if (g_hudMode < 0 || g_hudMode > 2) g_hudMode = 2;
     g_fixHud = g_hudMode != 0;
+    g_minimapEnhanced = GetPrivateProfileIntA("HUD", "EnhancedMinimap", 1, path) != 0;
+    g_minimapSize = GetPrivateProfileIntA("HUD", "MinimapSize", 128, path);
+    if (g_minimapSize != 64 && g_minimapSize != 128 && g_minimapSize != 256) g_minimapSize = 128;
+    g_minimapMargin = GetPrivateProfileIntA("HUD", "MinimapMargin", 16, path);
+    if (g_minimapMargin < 0 || g_minimapMargin > 96) g_minimapMargin = 16;
+    g_minimapBottom = GetPrivateProfileIntA("HUD", "MinimapBottom", 56, path);
+    if (g_minimapBottom < 32 || g_minimapBottom > 160) g_minimapBottom = 56;
     g_texModsEnabled = GetPrivateProfileIntA("Mods", "TextureReplacement", 1, path) != 0;
     g_profileD3D8 = GetPrivateProfileIntA("Debug", "ProfileD3D8", 0, path) != 0;
     g_borderless = GetPrivateProfileIntA("Display", "Borderless", 1, path) != 0;
@@ -1198,10 +1560,156 @@ static void LoadConfig(HMODULE self)
     GetPrivateProfileStringA("Camera", "ReferenceFPS", "30", buf, sizeof(buf), path);
     g_refFps = (float)atof(buf);
     if (g_refFps < 10.0f || g_refFps > 300.0f) g_refFps = 30.0f;
+    g_modernCamera = GetPrivateProfileIntA("Camera", "ModernControls", 1, path) != 0;
+    g_independentCamera = GetPrivateProfileIntA("Camera", "IndependentController", 1, path) != 0;
+    struct { const char* key; const char* def; float* value; float low, high; } cameraOptions[] = {
+        { "MinDistance", "2", &g_cameraMinDistance, 0.5f, 100 },
+        { "MaxDistance", "250", &g_cameraMaxDistance, 2, 2000 },
+        { "FocusMinDistance", "2", &g_focusMinDistance, 0.5f, 100 },
+        { "FocusMaxDistance", "250", &g_focusMaxDistance, 2, 2000 },
+        { "MinPitch", "-85", &g_cameraMinPitch, -89, -5 },
+        { "MaxPitch", "0", &g_cameraMaxPitch, -10, 0 },
+        { "FixedFOV", "50", &g_cameraFov, 25, 90 }
+    };
+    for (const auto& option : cameraOptions) {
+        GetPrivateProfileStringA("Camera", option.key, option.def, buf, sizeof(buf), path);
+        *option.value = (float)atof(buf);
+        if (!(*option.value >= option.low && *option.value <= option.high)) *option.value = (float)atof(option.def);
+    }
+    if (g_cameraMaxDistance <= g_cameraMinDistance) g_cameraMaxDistance = g_cameraMinDistance + 1;
+    if (g_focusMaxDistance <= g_focusMinDistance) g_focusMaxDistance = g_focusMinDistance + 1;
+    if (g_cameraMaxPitch <= g_cameraMinPitch) g_cameraMaxPitch = g_cameraMinPitch + 1;
+    g_proportionalZoom = GetPrivateProfileIntA("Camera", "ProportionalZoom", 1, path) != 0;
+    GetPrivateProfileStringA("Camera", "ResponseSeconds", "0.12", buf, sizeof(buf), path);
+    g_cameraResponse = (float)atof(buf);
+    if (!(g_cameraResponse >= 0.03f && g_cameraResponse <= 0.5f)) g_cameraResponse = 0.12f;
+    GetPrivateProfileStringA("Camera", "DragPanSensitivity", "0.0015", buf, sizeof(buf), path);
+    g_dragPanSensitivity = (float)atof(buf);
+    if (!(g_dragPanSensitivity > 0 && g_dragPanSensitivity <= 0.02f)) g_dragPanSensitivity = 0.0015f;
+    GetPrivateProfileStringA("Camera", "DragRotateSensitivity", "0.0018", buf, sizeof(buf), path);
+    g_dragRotateSensitivity = (float)atof(buf);
+    if (!(g_dragRotateSensitivity > 0 && g_dragRotateSensitivity <= 0.02f)) g_dragRotateSensitivity = 0.0018f;
 }
 
 static void ApplyPatches()
 {
+    if (g_modernCamera) {
+        HMODULE exe = GetModuleHandleA(nullptr);
+        g_getCameraManager = (CameraManager_t)GetProcAddress(exe, "?GetCameraManager@ACameraManager@@SGPAV1@XZ");
+        g_getActiveCamera = (ActiveCamera_t)GetProcAddress(exe, "?GetActiveCamera@ACameraManager@@QBEPAVACamera@@XZ");
+        g_getCameraDistance = (CameraDistance_t)GetProcAddress(exe, "?GetDistance@ACamera@@QBEMXZ");
+        g_cameraInputMap = (BYTE**)GetProcAddress(exe, "?ms_pSingleton@AInputMap@@1PAV1@A");
+        g_worldCameraVtable = (void*)GetProcAddress(exe, "??_7AWorldCamera@@6B@");
+        g_cameraPanRight = (CameraInput_t)GetProcAddress(exe, "?InputPushRight@AWorldCamera@@UAEXM@Z");
+        g_cameraPanForward = (CameraInput_t)GetProcAddress(exe, "?InputPushForwards@AWorldCamera@@UAEXM@Z");
+        g_cameraRotateRight = (CameraInput_t)GetProcAddress(exe, "?InputRotateRight@AWorldCamera@@UAEXM@Z");
+        g_cameraRotateDown = (CameraInput_t)GetProcAddress(exe, "?InputRotateDown@AWorldCamera@@UAEXM@Z");
+        BYTE* update = (BYTE*)GetProcAddress(exe, "?OnUpdate@AScrollingState@@UAE_NM@Z");
+        const unsigned char signature[] = { 0x57, 0x56, 0x55, 0x53, 0x83, 0xec, 0x14 };
+        if (g_getCameraManager && g_getActiveCamera && g_getCameraDistance && g_worldCameraVtable && g_cameraInputMap &&
+            g_cameraPanRight && g_cameraPanForward && g_cameraRotateRight && g_cameraRotateDown &&
+            update && BytesMatch(update, signature, sizeof(signature))) {
+            BYTE* trampoline = (BYTE*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+            if (trampoline) {
+                memcpy(trampoline, update, sizeof(signature));
+                trampoline[7] = 0xe9;
+                *(int*)(trampoline + 8) = (int)((update + 7) - (trampoline + 12));
+                g_scrollingUpdateTramp = trampoline;
+                WriteRel(update, (void*)&ScrollingUpdate_Hook, 0xe9, 7);
+                if (*update != 0xe9) { g_scrollingUpdateTramp = nullptr; VirtualFree(trampoline, 0, MEM_RELEASE); }
+            }
+        }
+        OutputDebugStringA(g_scrollingUpdateTramp ? "JPOG: modern park camera installed\n" : "JPOG: camera input hook unavailable\n");
+        if (g_scrollingUpdateTramp && g_independentCamera) {
+            g_baseCameraUpdate = (CameraUpdate_t)GetProcAddress(exe, "?OnUpdate@ACamera@@UAE_NM@Z");
+            g_setCameraPitch = (CameraSetFloat_t)GetProcAddress(exe, "?SetPitch@ACamera@@QAEXM_N@Z");
+            g_setCameraDistance = (CameraSetFloat_t)GetProcAddress(exe, "?SetDistance@ACamera@@QAEXM_N@Z");
+            g_setCameraRotation = (CameraSetRotation_t)GetProcAddress(exe, "?SetRotation@ACamera@@QAEXM_N0@Z");
+            g_getCameraPitch = (CameraDistance_t)GetProcAddress(exe, "?GetPitch@ACamera@@QAEMXZ");
+            g_getCameraRotation = (CameraDistance_t)GetProcAddress(exe, "?GetRotation@ACamera@@QAEMXZ");
+            g_moveCameraForward = (CameraInput_t)GetProcAddress(exe, "?MoveForwardsHorizontal@ACamera@@IAEXM@Z");
+            g_moveCameraRight = (CameraInput_t)GetProcAddress(exe, "?MoveRightHorizontal@ACamera@@IAEXM@Z");
+            g_moveCameraUp = (CameraInput_t)GetProcAddress(exe, "?MoveUp@ACamera@@IAEXM@Z");
+            g_setCameraFovDegrees = (CameraInput_t)GetProcAddress(exe, "?SetFieldOfViewDegrees@ACamera@@QAEXM@Z");
+            BYTE* worldUpdate = (BYTE*)GetProcAddress(exe, "?OnUpdate@AWorldCamera@@UAE_NM@Z");
+            BYTE* minDistance = (BYTE*)GetProcAddress(exe, "?ConstMinDistance@AWorldCamera@@UBEMXZ");
+            const unsigned char worldSignature[] = { 0x57, 0x55, 0x83, 0xec, 0x3c, 0x8b, 0xe9 };
+            const unsigned char minSignature[] = { 0x57, 0x83, 0xec, 0x10, 0x8b, 0xf9 };
+            if (g_baseCameraUpdate && g_setCameraPitch && g_setCameraDistance && g_setCameraRotation &&
+                g_getCameraPitch && g_getCameraRotation && g_moveCameraForward && g_moveCameraRight &&
+                g_moveCameraUp && g_setCameraFovDegrees && worldUpdate && minDistance &&
+                BytesMatch(worldUpdate, worldSignature, sizeof(worldSignature)) &&
+                BytesMatch(minDistance, minSignature, sizeof(minSignature))) {
+                BYTE* wt = (BYTE*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                BYTE* mt = (BYTE*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                if (wt && mt) {
+                    memcpy(wt, worldUpdate, 7); wt[7] = 0xe9;
+                    *(int*)(wt + 8) = (int)((worldUpdate + 7) - (wt + 12));
+                    memcpy(mt, minDistance, 6); mt[6] = 0xe9;
+                    *(int*)(mt + 7) = (int)((minDistance + 6) - (mt + 11));
+                    g_worldUpdateTramp = wt; g_worldMinDistanceTramp = mt;
+                    WriteRel(minDistance, (void*)&WorldMinDistance_Hook, 0xe9, 6);
+                    WriteRel(worldUpdate, (void*)&WorldCameraUpdate_Hook, 0xe9, 7);
+                    if (*worldUpdate != 0xe9 || *minDistance != 0xe9) {
+                        PatchBytes(worldUpdate, worldSignature, sizeof(worldSignature));
+                        PatchBytes(minDistance, minSignature, sizeof(minSignature));
+                        g_worldUpdateTramp = g_worldMinDistanceTramp = nullptr;
+                        VirtualFree(wt, 0, MEM_RELEASE); VirtualFree(mt, 0, MEM_RELEASE);
+                    }
+                } else {
+                    if (wt) VirtualFree(wt, 0, MEM_RELEASE);
+                    if (mt) VirtualFree(mt, 0, MEM_RELEASE);
+                }
+            }
+            OutputDebugStringA(g_worldUpdateTramp ? "JPOG: independent camera controller installed\n" : "JPOG: independent camera unavailable; previous controls retained\n");
+            if (g_worldUpdateTramp) {
+                g_cameraLimitsReady = InstallCameraLimits(exe, g_worldCameraVtable, "AWorldCamera", g_worldLimits);
+                g_followCameraVtable = (void*)GetProcAddress(exe, "??_7AFollowCamera@@6B@");
+                if (g_cameraLimitsReady)
+                    g_followLimitsReady = InstallCameraLimits(exe, g_followCameraVtable, "AFollowCamera", g_followLimits);
+                OutputDebugStringA(g_cameraLimitsReady ? "JPOG: constant camera limits installed\n" : "JPOG: limit bridge failed; original controller retained\n");
+            }
+        }
+    }
+    // Install as one group: do not resize if the native paint/position hooks
+    // cannot be installed. Export + whole-instruction signatures gate this build.
+    if (g_minimapEnhanced) {
+        HMODULE exe = GetModuleHandleA(nullptr);
+        BYTE* ctor = (BYTE*)GetProcAddress(exe, "??0AMinimap@@QAE@XZ");
+        BYTE* paint = (BYTE*)GetProcAddress(exe, "?OnGUIPaint@AMinimap@@CG_NPAV1@PAVTGUIScreen@Toshi@@PAVTGUIScreenPaintEvent@3@@Z");
+        BYTE* pos = (BYTE*)GetProcAddress(exe, "?SetPosition@AMinimap@@UAEXHH@Z");
+        const unsigned char ctorSig[] = { 0x56, 0x83, 0xec, 0x28, 0x8b, 0xf1 };
+        const unsigned char paintSig[] = { 0x57, 0x56, 0x55, 0x53, 0x83, 0xec, 0x44 };
+        const unsigned char posSig[] = { 0x8b, 0x44, 0x24, 0x04, 0x8b, 0x54, 0x24, 0x08 };
+        if (ctor && paint && pos && BytesMatch(ctor, ctorSig, sizeof(ctorSig)) &&
+            BytesMatch(paint, paintSig, sizeof(paintSig)) && BytesMatch(pos, posSig, sizeof(posSig))) {
+            BYTE* ct = (BYTE*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+            BYTE* pt = (BYTE*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+            if (ct && pt) {
+                memcpy(ct, ctor, sizeof(ctorSig));
+                ct[6] = 0xe9;
+                *(int*)(ct + 7) = (int)((ctor + 6) - (ct + 11));
+                memcpy(pt, paint, sizeof(paintSig));
+                pt[7] = 0xe9;
+                *(int*)(pt + 8) = (int)((paint + 7) - (pt + 12));
+                g_minimapCtorTramp = ct;
+                g_minimapPaintTramp = pt;
+                WriteRel(paint, (void*)&MinimapPaint_Hook, 0xe9, 7);
+                WriteRel(pos, (void*)&MinimapPosition_Hook, 0xe9, 8);
+                WriteRel(ctor, (void*)&MinimapCtor_Hook, 0xe9, 6);
+                g_minimapHooksReady = *paint == 0xe9 && *pos == 0xe9 && *ctor == 0xe9;
+                if (!g_minimapHooksReady) {
+                    PatchBytes(paint, paintSig, sizeof(paintSig));
+                    PatchBytes(pos, posSig, sizeof(posSig));
+                    PatchBytes(ctor, ctorSig, sizeof(ctorSig));
+                }
+            } else {
+                if (ct) VirtualFree(ct, 0, MEM_RELEASE);
+                if (pt) VirtualFree(pt, 0, MEM_RELEASE);
+            }
+        }
+        OutputDebugStringA(g_minimapHooksReady ? "JPOG: native enhanced minimap installed\n" : "JPOG: minimap signatures/allocation failed; native map unchanged\n");
+    }
     // --- Cursor: TGuiInterface.dll ---
     HMODULE gui = GetModuleHandleA("TGuiInterface.dll");
     if (gui) {

@@ -28,6 +28,11 @@ struct Config {
     int forceAnisotropy = 16;   // [Renderer] Anisotropy (0/1 = use game setting)
     bool applyGamma = true;     // [Renderer] ApplyGammaRamp
     int msaa = 8;               // [Renderer] MSAA: 0/1 off, 2, 4, 8 samples (3D scene and HUD)
+    // Baseline mode overrides runtime values only; saved preferences stay intact.
+    int EffectiveMsaa() const { return effectsEnabled ? msaa : 0; }
+    int EffectiveFpsLimit() const { return effectsEnabled ? fpsLimit : 0; }
+    int EffectiveVSync() const { return effectsEnabled ? syncInterval : 0; }
+    int EffectiveAnisotropy() const { return effectsEnabled ? forceAnisotropy : 0; }
     bool alphaToCoverage = false; // [Renderer] AlphaToCoverage: smooth alpha-tested foliage under MSAA
     bool debugLayer = false;    // [Debug] D3D11DebugLayer
     bool dumpShaders = false;   // [Debug] DumpShaders (writes generated HLSL to d3d8to11_shaders\)

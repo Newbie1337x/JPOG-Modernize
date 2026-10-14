@@ -37,7 +37,7 @@ const UINT kLightMemoryFrames = 900; // a light whose object is not drawn stays 
 
 void Device::CaptureEmitters(DWORD type, UINT baseVertex, UINT startIndex, UINT primCount, bool indexed)
 {
-    if (!g_config.pointLights || !g_config.replaceLighting || m_worldKind != 1 || !ActiveEmissive()) return;
+    if (!g_config.effectsEnabled || !g_config.pointLights || !g_config.replaceLighting || m_worldKind != 1 || !ActiveEmissive()) return;
     Texture* tex = static_cast<Texture*>(static_cast<ID8Texture*>(m_textures[0]));
     if (!tex->m_emissiveMask) return;
     const size_t idx = m_vsHandle >> 1;
@@ -168,7 +168,7 @@ void Device::BuildPointLights()
 {
     m_pointLights = {};
     m_pointLightsShown = 0;
-    if (!g_config.pointLights || !m_tod.active) { m_worldLights.clear(); return; }
+    if (!g_config.effectsEnabled || !g_config.pointLights || !m_tod.active) { m_worldLights.clear(); return; }
     if (m_emitterCache.size() > 8192) m_emitterCache.clear();
     const UINT now = (UINT)(m_frame + 1);
     for (auto it = m_worldLights.begin(); it != m_worldLights.end();)
@@ -247,5 +247,5 @@ void Device::BindPointLights()
         }
         m_pointLightsDirty = false;
     }
-    m_ctx->PSSetConstantBuffers(5, 1, m_pointLightCB.GetAddressOf());
+    BindPSCB(5, 1, m_pointLightCB.GetAddressOf());
 }

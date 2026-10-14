@@ -60,6 +60,6 @@ void Device::BindTerrainHeights()
     // Bound on every eligible draw: other passes (FSR) clear the whole SRV range.
     if (!m_worldDraw || !g_config.replaceLighting || (m_worldKind != 2 && m_worldKind != 3) || !TerrainHeightsActive()) return;
     ID3D11ShaderResourceView* srv = m_terrainHeightSRV.Get();
-    m_ctx->PSSetShaderResources(15, 1, &srv);
-    m_ctx->PSSetSamplers(11, 1, m_terrainSampler.GetAddressOf());
+    BindPSSrv(15, 1, &srv);
+    BindPSSamplers(11, 1, m_terrainSampler.GetAddressOf());
 }

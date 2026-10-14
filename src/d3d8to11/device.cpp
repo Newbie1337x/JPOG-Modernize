@@ -1,7 +1,9 @@
 // device.cpp - IDirect3DDevice8 on D3D11: state tracking, draws, clears and presentation.
 #include "device.h"
+#include "constant_update.h"
 #include <math.h>
 #include <d3d11sdklayers.h>
+#include <dxgi1_5.h>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -247,6 +249,15 @@ bool Device::CreateSwapChainAndBackBuffer()
         sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
         sd.Scaling = DXGI_SCALING_STRETCH;
         sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+        // Without tearing support a windowed flip-model swap chain is held to the monitor's
+        // refresh rate by the compositor even with VSync off.
+        ComPtr<IDXGIFactory5> factory5;
+        BOOL tearing = FALSE;
+        if (SUCCEEDED(factory.As(&factory5)) &&
+            SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tearing, sizeof(tearing))) && tearing)
+            sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        m_swapFlags = sd.Flags;
+        Log("Swap chain: tearing %s", tearing ? "supported (uncapped with VSync off)" : "not supported");
         HRESULT hr = factory->CreateSwapChainForHwnd(m_device.Get(), m_window, &sd, nullptr, nullptr, &m_swap);
         if (FAILED(hr)) { Log("CreateSwapChainForHwnd failed 0x%08lx", hr); return false; }
         factory->MakeWindowAssociation(m_window, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
@@ -256,7 +267,7 @@ bool Device::CreateSwapChainAndBackBuffer()
 
     if (m_backBuffer) { m_backBuffer->m_holdsDeviceRef = false; m_backBuffer->Release(); m_backBuffer = nullptr; }
     if (m_autoDepth) { m_autoDepth->m_holdsDeviceRef = false; m_autoDepth->Release(); m_autoDepth = nullptr; }
-    m_msaaApplied = SupportedSamples(g_config.msaa);
+    m_msaaApplied = SupportedSamples(g_config.EffectiveMsaa());
     m_taaValid=false;ReleaseFsr31();
     m_waterSnapshotReady = false;
     m_waterInteraction.Clear();
@@ -326,6 +337,8 @@ HRESULT Device::GetCreationParameters(void* params)
 
 HRESULT Device::Reset(D3D8PresentParameters* pp)
 {
+    InvalidateBindings();
+    m_tessCache.clear();m_tessCacheBytes=0;
     if (!pp) return D8ERR_INVALIDCALL;
     m_pp = *pp;
     if (pp->hDeviceWindow) m_window = pp->hDeviceWindow;
@@ -511,7 +524,7 @@ UINT Device::SupportedSamples(int requested)
 // [Renderer] MSAA changed (overlay): rebuild the back buffer and depth behind the same Surfaces.
 void Device::ApplyMsaa()
 {
-    const UINT want = SupportedSamples(g_config.msaa);
+    const UINT want = SupportedSamples(g_config.EffectiveMsaa());
     if (want == m_msaaApplied || !m_backBuffer) return;
     m_ctx->OMSetRenderTargets(0, nullptr, nullptr);
     m_backBuffer->m_samples = want;
@@ -541,7 +554,7 @@ void Device::ApplyRenderTargets()
     // A texture bound for sampling cannot also be a render target: drop all texture bindings
     // so PrepareDraw rebinds them.
     ID3D11ShaderResourceView* nulls[kMaxStages] = {};
-    m_ctx->PSSetShaderResources(0, kMaxStages, nulls);
+    BindPSSrv(0, kMaxStages, nulls);
     m_ctx->OMSetRenderTargets(1, &rtv, dsv);
     m_rtDirty = false;
 }
@@ -564,6 +577,7 @@ HRESULT Device::Clear(DWORD count, const D3D8Rect* rects, DWORD flags, DWORD col
         // JPOG draws the world in more than one depth segment per frame, each with its own
         // camera. Finish this one; the next terrain draw starts a new one.
         ResolveSun("clear");
+        InvalidateBindings();
         m_sunStarted = m_sunResolved = false;
     }
     ApplyRenderTargets();
@@ -631,6 +645,7 @@ void Device::ClearWithQuad(DWORD count, const D3D8Rect* rects, DWORD flags, DWOR
         m_ctx->Draw(3, 0);
     }
     // Force PrepareDraw to rebind everything we touched.
+    InvalidateBindings();
     m_viewportDirty = true;
     m_vsConstDirty = m_psConstDirty = true;
     m_lastVS = nullptr; m_lastPS = nullptr; m_lastLayout = nullptr;
@@ -700,6 +715,7 @@ HRESULT Device::SetRenderState(DWORD state, DWORD value)
 {
     if (state >= RS_COUNT) return D8ERR_INVALIDCALL;
     if (m_recordingStateBlock) return S_OK;
+    if (m_rs[state] == value) { ++m_perf.redundantRenderStates; return S_OK; }
     m_rs[state] = value;
     switch (state) {
     case RS_TEXTUREFACTOR: ColorToFloat4(value, m_psConst.textureFactor); m_psConstDirty = true; break;
@@ -771,6 +787,7 @@ HRESULT Device::SetTextureStageState(DWORD stage, DWORD type, DWORD value)
 {
     if (stage >= kMaxStages || type >= TSS_COUNT) return D8ERR_INVALIDCALL;
     if (m_recordingStateBlock) return S_OK;
+    if (m_tss[stage][type] == value) { ++m_perf.redundantTextureStates; return S_OK; }
     m_tss[stage][type] = value;
     switch (type) {
     case TSS_BUMPENVMAT00: m_psConst.bumpMat[stage][0] = AsFloat(value); m_psConstDirty = true; break;
@@ -791,6 +808,7 @@ HRESULT Device::CreateVertexShader(const DWORD* decl, const DWORD* func, DWORD* 
     if (!decl || !handle) return D8ERR_INVALIDCALL;
     VertexShader8* vs = new VertexShader8();
     size_t n = ParseVSDecl(decl, vs->parsed);
+    vs->worldKind=WorldShaderKind(vs->parsed);
     vs->decl.assign(decl, decl + n);
     if (func) vs->func.assign(func, func + ShaderTokenCount(func));
     m_vertexShaders.push_back(vs);
@@ -834,8 +852,10 @@ HRESULT Device::SetVertexShader(DWORD handle)
             // D3D8 loads the constants embedded in the declaration when the shader is set.
             for (auto& c : m_vertexShaders[idx]->parsed.constants) {
                 UINT count = (UINT)c.second.size() / 4;
-                if (c.first + count <= kMaxVSConst) memcpy(m_vsConst[c.first], c.second.data(), count * 16);
-                m_vsConstDirty = true;
+                if (c.first + count <= kMaxVSConst &&
+                    CopyConstantsIfChanged(m_vsConst[c.first], c.second.data(), count * 16))
+                    m_vsConstDirty = true;
+                if (c.first + count <= kMaxVSConst && c.first + count > m_vsConstUsed) { m_vsConstUsed = c.first + count; m_vsConstDirty = true; }
             }
         }
     }
@@ -854,8 +874,9 @@ HRESULT Device::DeleteVertexShader(DWORD handle)
 HRESULT Device::SetVertexShaderConstant(DWORD reg, const void* data, DWORD count)
 {
     if (!data || reg + count > kMaxVSConst) return D8ERR_INVALIDCALL;
-    memcpy(m_vsConst[reg], data, count * 16);
-    m_vsConstDirty = true;
+    if (CopyConstantsIfChanged(m_vsConst[reg], data, count * 16)) m_vsConstDirty = true;
+    else ++m_perf.duplicateConstants;
+    if (reg + count > m_vsConstUsed) { m_vsConstUsed = reg + count; m_vsConstDirty = true; }
     if (reg < m_vsWriteLo) m_vsWriteLo = reg;
     if (reg + count > m_vsWriteHi) m_vsWriteHi = reg + count;
     return S_OK;
@@ -896,6 +917,7 @@ HRESULT Device::CreatePixelShader(const DWORD* func, DWORD* handle)
     PixelShader8* ps = new PixelShader8();
     ps->func.assign(func, func + ShaderTokenCount(func));
     ps->samplesStage1=PixelShaderSamplesStage(func,1);
+    ps->water=IsWaterPixelShader(func);
     m_pixelShaders.push_back(ps);
     *handle = (DWORD)m_pixelShaders.size();
     return S_OK;
@@ -919,8 +941,8 @@ HRESULT Device::DeletePixelShader(DWORD handle)
 HRESULT Device::SetPixelShaderConstant(DWORD reg, const void* data, DWORD count)
 {
     if (!data || reg + count > kMaxPSConst) return D8ERR_INVALIDCALL;
-    memcpy(m_psConst.c[reg], data, count * 16);
-    m_psConstDirty = true;
+    if (CopyConstantsIfChanged(m_psConst.c[reg], data, count * 16)) m_psConstDirty = true;
+    else ++m_perf.duplicateConstants;
     return S_OK;
 }
 
@@ -1059,12 +1081,15 @@ ID3D11SamplerState* Device::GetSampler(int stage)
     const DWORD* t = m_tss[stage];
     DWORD mag = t[TSS_MAGFILTER], min = t[TSS_MINFILTER], mip = t[TSS_MIPFILTER];
     DWORD aniso = t[TSS_MAXANISOTROPY];
-    if (g_config.forceAnisotropy > 1 && min >= 2 && mip >= 1) { min = 3; aniso = (DWORD)g_config.forceAnisotropy; }
+    if (g_config.EffectiveAnisotropy() > 1 && min >= 2 && mip >= 1) { min = 3; aniso = (DWORD)g_config.EffectiveAnisotropy(); }
     DWORD key[10] = { t[TSS_ADDRESSU], t[TSS_ADDRESSV], t[TSS_ADDRESSW], mag, min, mip, t[TSS_MIPMAPLODBIAS],
                       t[TSS_MAXMIPLEVEL], aniso, t[TSS_BORDERCOLOR] };
+    auto& selected = m_samplerSelections[stage];
+    if (selected.Matches(key)) { ++m_perf.samplerSelectionHits; return selected.state; }
+    ++m_perf.samplerSelectionLookups;
     std::string k((const char*)key, sizeof(key));
     auto it = m_samplers.find(k);
-    if (it != m_samplers.end()) return it->second.Get();
+    if (it != m_samplers.end()) { selected.Remember(key,it->second.Get()); return it->second.Get(); }
     D3D11_SAMPLER_DESC sd = {};
     if (mag == 3 || min == 3) {
         sd.Filter = D3D11_FILTER_ANISOTROPIC;
@@ -1085,6 +1110,7 @@ ID3D11SamplerState* Device::GetSampler(int stage)
     ComPtr<ID3D11SamplerState> st;
     m_device->CreateSamplerState(&sd, &st);
     m_samplers[k] = st;
+    selected.Remember(key,st.Get()); // lifetime is owned by m_samplers, including across Reset
     return st.Get();
 }
 
@@ -1116,7 +1142,7 @@ ID3D11PixelShader* Device::GetPixelShader()
         v.emissive = ActiveEmissive() ? 1 : 0;
         v.roughMap = ActiveRoughness() ? 1 : 0;
         v.waterSamples = m_waterDraw && m_waterSamples>1 ? (BYTE)m_waterSamples : 0;
-        if (v.normalMap) LogOnce(std::string("nm-draw-") + std::to_string(m_vsHandle) + "-" + std::to_string(m_psHandle),
+        if (v.normalMap && m_drawDiagnostics.First(m_vsHandle,m_psHandle,DrawDiagnostics::NormalMap)) Log(
                                  "normal map draw: VS 0x%lx PS 0x%lx kind %d", m_vsHandle, m_psHandle, m_worldKind);
         for (auto& e : ps->variants) if (e.first == v) return e.second.Get();
         std::string error;
@@ -1168,15 +1194,42 @@ ID3D11PixelShader* Device::GetPixelShader()
     return shader.Get();
 }
 
+namespace {
+// True when the slots already hold these objects; otherwise records them.
+template<class T> bool SameBinding(T** cache, UINT capacity, UINT slot, UINT n, T* const* v)
+{
+    if (slot + n > capacity) return false;
+    if (!memcmp(cache + slot, v, n * sizeof(T*))) return true;
+    memcpy(cache + slot, v, n * sizeof(T*));
+    return false;
+}
+}
+void Device::InvalidateBindings() { memset(&m_bind, 0xFF, sizeof(m_bind)); }
+void Device::BindPSSrv(UINT s, UINT n, ID3D11ShaderResourceView* const* v)
+{ if (SameBinding(m_bind.psSrv, BindingCache::Srv, s, n, v)) ++m_perf.redundantBinds; else m_ctx->PSSetShaderResources(s, n, v); }
+void Device::BindVSSrv(UINT s, UINT n, ID3D11ShaderResourceView* const* v)
+{ if (SameBinding(m_bind.vsSrv, BindingCache::Srv, s, n, v)) ++m_perf.redundantBinds; else m_ctx->VSSetShaderResources(s, n, v); }
+void Device::BindPSSamplers(UINT s, UINT n, ID3D11SamplerState* const* v)
+{ if (SameBinding(m_bind.psSamp, BindingCache::Samp, s, n, v)) ++m_perf.redundantBinds; else m_ctx->PSSetSamplers(s, n, v); }
+void Device::BindVSSamplers(UINT s, UINT n, ID3D11SamplerState* const* v)
+{ if (SameBinding(m_bind.vsSamp, BindingCache::Samp, s, n, v)) ++m_perf.redundantBinds; else m_ctx->VSSetSamplers(s, n, v); }
+void Device::BindVSCB(UINT s, UINT n, ID3D11Buffer* const* v)
+{ if (SameBinding(m_bind.vsCb, BindingCache::Cb, s, n, v)) ++m_perf.redundantBinds; else m_ctx->VSSetConstantBuffers(s, n, v); }
+void Device::BindPSCB(UINT s, UINT n, ID3D11Buffer* const* v)
+{ if (SameBinding(m_bind.psCb, BindingCache::Cb, s, n, v)) ++m_perf.redundantBinds; else m_ctx->PSSetConstantBuffers(s, n, v); }
+
 bool Device::PrepareDraw()
 {
+    m_perf.enabled=g_config.performanceGPU;
+    CpuPerformanceScope cpu(m_perf,0);
+    CpuPerformanceScope detail(m_perf,Performance::CpuSetup);
     if(m_materialStatsFrame!=m_frame){m_materialStatsFrame=m_frame;memset(m_materialDraws,0,sizeof(m_materialDraws));}
     m_perf.enabled=g_config.performanceGPU;
     m_perf.Begin(m_device.Get(),m_ctx.Get());
     ++m_perfDraws;
     // The first depth-less draw to the back buffer after the world is the HUD: apply the
     // sun shadows before it so they never darken the interface.
-    if (m_sunStarted && !m_sunResolved && m_rt == m_backBuffer && !m_rs[RS_ZENABLE]) ResolveSun("hud");
+    if (m_sunStarted && !m_sunResolved && m_rt == m_backBuffer && !m_rs[RS_ZENABLE]) { ResolveSun("hud"); InvalidateBindings(); }
     ApplyRenderTargets();
     if (!m_rt) return false;
 
@@ -1196,6 +1249,7 @@ bool Device::PrepareDraw()
         m_viewportDirty = false;
     }
 
+    detail.Next(Performance::CpuScene);
     // Vertex shader + input layout + streams
     if (!(m_vsHandle & 1)) {
         LogOnce(std::string("fvf") + std::to_string(m_vsHandle), "draw with FVF 0x%lx (fixed-function T&L) skipped", m_vsHandle);
@@ -1207,9 +1261,9 @@ bool Device::PrepareDraw()
         return false;
     }
     VertexShader8* vs = m_vertexShaders[idx];
-    m_worldKind = WorldShaderKind(vs->parsed);
+    m_worldKind = vs->worldKind;
     bool waterShader=m_psHandle>0 && m_psHandle<=m_pixelShaders.size() && m_pixelShaders[m_psHandle-1] &&
-        IsWaterPixelShader(m_pixelShaders[m_psHandle-1]->func.data());
+        m_pixelShaders[m_psHandle-1]->water;
     m_waterShaderDraw = waterShader;
     // The sky dome: the first depth-writing kind-0 draw to the back buffer before the terrain.
     // With the procedural sky it is not drawn; the shadow resolve paints sky pixels (depth 1).
@@ -1226,19 +1280,29 @@ bool Device::PrepareDraw()
         m_viewport.Width == m_backBuffer->m_width && m_viewport.Height == m_backBuffer->m_height;
     m_worldCaster = g_config.sunLighting && m_worldDraw && m_rs[RS_ZWRITEENABLE] && (m_worldKind != 4 || g_config.grassShadows) &&
         (m_worldKind != 2 || g_config.terrainShadows);
-    if (SceneFx() && m_rt == m_backBuffer && m_worldKind != 0) {
-        LogOnce(std::string("sun-material-") + std::to_string(m_vsHandle) + "-" + std::to_string(m_psHandle),
+    if (SceneFx() && m_rt == m_backBuffer && m_worldKind != 0 &&
+        m_drawDiagnostics.First(m_vsHandle,m_psHandle,DrawDiagnostics::SunMaterial)) {
+        Log(
             "Sun material VS %lx PS %lx kind %d receiver %d caster %d z %lu write %lu blend %lu alpha %lu",
             m_vsHandle,m_psHandle,m_worldKind,m_worldDraw,m_worldCaster,m_rs[RS_ZENABLE],
             m_rs[RS_ZWRITEENABLE],m_rs[RS_ALPHABLENDENABLE],m_rs[RS_ALPHATESTENABLE]);
     }
-    TrackSkinTexture();
+    if (g_config.effectsEnabled) TrackSkinTexture();
     CollectDumpTextures();
     m_tessCandidate = TessellationCandidate();
     UpdateSun(false);
-    PrepareWaterDraw();
+    if (g_config.effectsEnabled) PrepareWaterDraw();
+    else {
+        m_waterDraw = false; m_reliefActive = false;
+        // Water displacement is in every translated VS. A null CB reads zero,
+        // preventing stale swell constants without uploading WaterConstants per draw.
+        ID3D11Buffer* off = nullptr;
+        BindVSCB(4, 1, &off);
+        BindPSCB(2, 1, &off);
+    }
     if(m_waterDraw)++m_perfWaterDraws;
-    if (m_trace) {
+    detail.Next(Performance::CpuDiagnostics);
+    if (m_trace && g_config.effectsEnabled) {
         DWORD cam = 0;
         if (m_worldKind == 2) for (int i = 0; i < 16; i++) cam = cam * 31 + *(const DWORD*)&m_vsConst[i / 4][i % 4];
         TraceSun("Draw kind %d world %d caster %d z %lu zwrite %lu blend %lu atest %lu rt %s vp %ux%u terrain-cam %08lx",
@@ -1246,11 +1310,12 @@ bool Device::PrepareDraw()
                  m_rs[RS_ZWRITEENABLE], m_rs[RS_ALPHABLENDENABLE], m_rs[RS_ALPHATESTENABLE],
                  m_rt == m_backBuffer ? "back" : "other", m_viewport.Width, m_viewport.Height, cam);
     }
-    std::string drawKey = std::string("draw-path-") + std::to_string(m_vsHandle) + "-" + std::to_string(m_psHandle);
-    LogOnce(drawKey, "draw path: VS 0x%lx PS 0x%lx streams s0=%p/%u s1=%p/%u tex0=%u tex1=%u tex2=%u viewport=%ux%u",
+    if(m_drawDiagnostics.First(m_vsHandle,m_psHandle,DrawDiagnostics::Path))
+    Log("draw path: VS 0x%lx PS 0x%lx streams s0=%p/%u s1=%p/%u tex0=%u tex1=%u tex2=%u viewport=%ux%u",
             m_vsHandle, m_psHandle, (void*)m_streams[0].vb, m_streams[0].stride,
             (void*)m_streams[1].vb, m_streams[1].stride, TextureDim(m_textures[0]),
             TextureDim(m_textures[1]), TextureDim(m_textures[2]), m_viewport.Width, m_viewport.Height);
+    detail.Next(Performance::CpuVertex);
     if (m_lastVS != vs->vs.Get()) { m_ctx->VSSetShader(vs->vs.Get(), nullptr, 0); m_lastVS = vs->vs.Get(); }
     if (m_lastLayout != vs->layout.Get()) { m_ctx->IASetInputLayout(vs->layout.Get()); m_lastLayout = vs->layout.Get(); }
     for (int s = 0; s < kMaxStreams; s++) {
@@ -1264,12 +1329,17 @@ bool Device::PrepareDraw()
         }
     }
 
+    detail.Next(Performance::CpuConstants);
     // Constants
     if (m_vsConstDirty) {
         D3D11_MAPPED_SUBRESOURCE map;
         if (SUCCEEDED(m_ctx->Map(m_vsCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
-            memcpy(map.pData, m_vsConst, sizeof(m_vsConst));
+            // Registers never written are not read by the game's shaders (zero in m_vsConst).
+            const size_t bytes = (size_t)(m_vsConstUsed ? m_vsConstUsed : kMaxVSConst) * 16;
+            memcpy(map.pData, m_vsConst, bytes);
+            m_perf.constantBytes += bytes;
             m_ctx->Unmap(m_vsCB.Get(), 0);
+            ++m_perf.vsUploads;
         }
         m_vsConstDirty = false;
     }
@@ -1278,13 +1348,15 @@ bool Device::PrepareDraw()
         if (SUCCEEDED(m_ctx->Map(m_psCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
             memcpy(map.pData, &m_psConst, sizeof(m_psConst));
             m_ctx->Unmap(m_psCB.Get(), 0);
+            ++m_perf.psUploads;
         }
         m_psConstDirty = false;
     }
     ID3D11Buffer* vcbs[2] = { m_vsCB.Get(), m_vsExtraCB.Get() };
-    m_ctx->VSSetConstantBuffers(0, 2, vcbs);
-    m_ctx->PSSetConstantBuffers(0, 1, m_psCB.GetAddressOf());
+    BindVSCB(0, 2, vcbs);
+    BindPSCB(0, 1, m_psCB.GetAddressOf());
 
+    detail.Next(Performance::CpuResources);
     // Textures and samplers
     ID3D11ShaderResourceView* srvs[kMaxStages] = {};
     ID3D11SamplerState* samplers[kMaxStages] = {};
@@ -1300,19 +1372,20 @@ bool Device::PrepareDraw()
         }
         samplers[s] = GetSampler(s);
     }
-    m_ctx->PSSetShaderResources(0, kMaxStages, srvs);
-    ID3D11ShaderResourceView* normalMap = ActiveNormalMap();
-    m_ctx->PSSetShaderResources(9, 1, &normalMap);
-    ID3D11ShaderResourceView* emissive = ActiveEmissive();
-    m_ctx->PSSetShaderResources(8, 1, &emissive);
+    BindPSSrv(0, kMaxStages, srvs);
+    ID3D11ShaderResourceView* extra[2] = { ActiveEmissive(), ActiveNormalMap() }; // t8, t9
+    BindPSSrv(8, 2, extra);
     ID3D11ShaderResourceView* rough = ActiveRoughness();
-    m_ctx->PSSetShaderResources(16, 1, &rough);
-    BindPointLights();
-    if(!PrepareMaterial())return false;
-    PrepareRelief();
-    BindTerrainHeights();
-    m_ctx->PSSetSamplers(0, kMaxStages, samplers);
+    BindPSSrv(16, 1, &rough);
+    if (g_config.effectsEnabled) {
+        BindPointLights();
+        if(!PrepareMaterial())return false;
+        PrepareRelief();
+        BindTerrainHeights();
+    }
+    BindPSSamplers(0, kMaxStages, samplers);
 
+    detail.Next(Performance::CpuPipeline);
     ID3D11PixelShader* ps = GetPixelShader();
     if (!ps) {
         LogOnce(std::string("ps-null-") + std::to_string(m_psHandle) + "-vs-" + std::to_string(m_vsHandle),
@@ -1355,6 +1428,7 @@ bool Device::DrawWithTopology(DWORD type, UINT primCount, UINT& count, D3D11_PRI
 
 void Device::UploadDynamicIndices(const void* data, UINT bytes, DXGI_FORMAT fmt)
 {
+    CpuPerformanceScope cpu(m_perf,Performance::CpuGeometryUpload);
     if (bytes > m_dynIBSize) {
         m_dynIB.Reset();
         m_dynIBSize = max(bytes, 65536u);
@@ -1365,6 +1439,7 @@ void Device::UploadDynamicIndices(const void* data, UINT bytes, DXGI_FORMAT fmt)
     if (SUCCEEDED(m_ctx->Map(m_dynIB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
         memcpy(map.pData, data, bytes);
         m_ctx->Unmap(m_dynIB.Get(), 0);
+        ++m_perf.geometryUploads; m_perf.geometryUploadBytes+=bytes;
     }
     m_ctx->IASetIndexBuffer(m_dynIB.Get(), fmt, 0);
     m_lastIB = m_dynIB.Get();
@@ -1372,6 +1447,7 @@ void Device::UploadDynamicIndices(const void* data, UINT bytes, DXGI_FORMAT fmt)
 
 void Device::UploadDynamicVertices(const void* data, UINT bytes, UINT stride)
 {
+    CpuPerformanceScope cpu(m_perf,Performance::CpuGeometryUpload);
     if (bytes > m_dynVBSize) {
         m_dynVB.Reset();
         m_dynVBSize = max(bytes, 262144u);
@@ -1382,6 +1458,7 @@ void Device::UploadDynamicVertices(const void* data, UINT bytes, UINT stride)
     if (SUCCEEDED(m_ctx->Map(m_dynVB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
         memcpy(map.pData, data, bytes);
         m_ctx->Unmap(m_dynVB.Get(), 0);
+        ++m_perf.geometryUploads; m_perf.geometryUploadBytes+=bytes;
     }
     UINT offset = 0;
     ID3D11Buffer* buf = m_dynVB.Get();
@@ -1566,15 +1643,16 @@ void Device::UpdateSwapChainSize()
     if (!w || !h || (w == m_swapW && h == m_swapH)) return;
     m_swapRTV.Reset();
     m_ctx->OMSetRenderTargets(0, nullptr, nullptr);
-    HRESULT hr = m_swap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
+    HRESULT hr = m_swap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, m_swapFlags);
     if (SUCCEEDED(hr)) { m_swapW = w; m_swapH = h; Log("swap chain resized to %ux%u", w, h); }
     m_rtDirty = true;
 }
 
 void Device::LimitFrameRate()
 {
-    if (g_config.fpsLimit <= 0) return;
-    const LONGLONG frameTicks = m_qpcFreq.QuadPart / g_config.fpsLimit;
+    const int limit = g_config.EffectiveFpsLimit();
+    if (limit <= 0) return;
+    const LONGLONG frameTicks = m_qpcFreq.QuadPart / limit;
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     LONGLONG target = m_lastFrame.QuadPart + frameTicks;
@@ -1674,7 +1752,8 @@ HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
         m_ctx->PSSetShaderResources(0,2,srvs);m_ctx->PSSetSamplers(0,2,smp);m_ctx->Draw(3,0);
         m_ctx->PSSetShaderResources(0,2,nulls);ReplayOverlay();
     }
-    HRESULT hr = m_swap->Present(g_config.syncInterval, 0);
+    const UINT sync = g_config.EffectiveVSync();
+    HRESULT hr = m_swap->Present(sync, !sync && (m_swapFlags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) ? DXGI_PRESENT_ALLOW_TEARING : 0);
     QueryPerformanceCounter(&perfEnd);
     m_perf.presentMs=(perfEnd.QuadPart-perfStart.QuadPart)*1000.0/m_qpcFreq.QuadPart;
     if (FAILED(hr)) LogOnce("presentfail", "Present failed 0x%08lx", hr);
@@ -1691,6 +1770,7 @@ HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
     m_pointLightsDirty = true;
 
     // Everything bound above has to be rebound by the next draw.
+    InvalidateBindings();
     m_rtDirty = m_viewportDirty = true;
     m_vsConstDirty = m_psConstDirty = true;
     m_lastVS = nullptr; m_lastPS = nullptr; m_lastLayout = nullptr;

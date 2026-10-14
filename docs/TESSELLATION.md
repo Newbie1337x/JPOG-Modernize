@@ -50,3 +50,23 @@ shadow-map redraw, which keeps the original flat geometry.
 - Higher-resolution models still work: dense meshes produce short edges, so they get few or no
   subdivisions automatically.
 - `FlipWinding=1` if tessellated models look inside out on some GPU/driver.
+# Bounded topology cache
+
+Repeated tessellated draws reuse immutable GPU index buffers. The key includes
+vertex-buffer unique identity/content revision, base vertex, stream stride,
+position offset, effective welding mode and the complete expanded index list.
+Shader subdivision, animation, normals and silhouette calculations are unchanged.
+Only exact keys hit; unknown/modified topology rebuilds the original patch list.
+Vertex/index writes invalidate matching source entries (READONLY locks do not).
+Buffer destruction and device reset release cached entries. CPU index lists plus
+GPU index bytes are capped at 32 MiB and 128 entries per device. Oversized or
+failed allocations use the old dynamic-upload path. A full cache is cleared
+before inserting a new entry. This trades possible cold misses for bounded x86
+memory usage; cache counters in Rendimiento make thrashing visible.
+
+CPU preparation, tessellation and shadow submission are sampled every 30 frames
+with QPC when performance measurement is enabled. They include driver calls and
+possible waits, not total game simulation CPU time. GUI shows the last sample;
+CSV appends sample averages/count plus cumulative cache hit/miss totals, entries
+and retained MiB. Missing CPU samples are NA. This does not claim a measured FPS
+gain until an in-game before/after comparison is available.

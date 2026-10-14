@@ -39,7 +39,7 @@ bool Device::EnsureWaterSnapshot()
     if(!m_waterSnapshotReady) {
         PerformanceScope perf(m_perf,m_device.Get(),m_ctx.Get(),Performance::WaterCopy);
         ID3D11ShaderResourceView* nulls[2]={};
-        m_ctx->PSSetShaderResources(10,2,nulls);
+        BindPSSrv(10,2,nulls);
         m_ctx->OMSetRenderTargets(0,nullptr,nullptr);
         m_ctx->CopyResource(m_waterDepthCopy.Get(),m_autoDepth->m_tex.Get());
         if(m_backBuffer->m_samples>1)
@@ -62,7 +62,7 @@ void Device::PrepareWaterDraw()
         m_viewport.X==0 && m_viewport.Y==0 &&
         m_viewport.Width==m_backBuffer->m_width && m_viewport.Height==m_backBuffer->m_height &&
         m_psHandle>0 && m_psHandle<=m_pixelShaders.size() &&
-        m_pixelShaders[m_psHandle-1] && IsWaterPixelShader(m_pixelShaders[m_psHandle-1]->func.data());
+        m_pixelShaders[m_psHandle-1] && m_pixelShaders[m_psHandle-1]->water;
     if(candidate && EnsureWaterSnapshot()) {
         m_waterDraw=true;
         UpdateWaterRegions();
@@ -108,17 +108,17 @@ void Device::PrepareWaterDraw()
     if(SUCCEEDED(m_ctx->Map(m_waterCB.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped))) {
         memcpy(mapped.pData,&c,sizeof(c)); m_ctx->Unmap(m_waterCB.Get(),0);
     } else m_waterDraw=false;
-    m_ctx->VSSetConstantBuffers(4,1,m_waterCB.GetAddressOf());
-    m_ctx->PSSetConstantBuffers(2,1,m_waterCB.GetAddressOf());
+    BindVSCB(4,1,m_waterCB.GetAddressOf());
+    BindPSCB(2,1,m_waterCB.GetAddressOf());
     ID3D11ShaderResourceView* views[2]={m_waterDraw ? m_waterDepthSRV.Get():nullptr,m_waterDraw ? m_waterColorSRV.Get():nullptr};
-    m_ctx->PSSetShaderResources(10,2,views);
+    BindPSSrv(10,2,views);
     ID3D11ShaderResourceView* regionViews[3]={m_waterDraw && m_waterRegionReady ? m_waterRegionSRV.Get():nullptr,
         m_waterDraw && m_waterRegionReady ? m_waterTerrainSRV.Get():nullptr,
         m_waterDraw && m_waterRegionReady ? m_waterShoreSRV.Get():nullptr};
-    m_ctx->PSSetShaderResources(12,3,regionViews);
-    m_ctx->VSSetShaderResources(12,3,regionViews);
-    m_ctx->VSSetSamplers(10,1,m_waterSampler.GetAddressOf());
-    m_ctx->PSSetSamplers(10,1,m_waterSampler.GetAddressOf());
+    BindPSSrv(12,3,regionViews);
+    BindVSSrv(12,3,regionViews);
+    BindVSSamplers(10,1,m_waterSampler.GetAddressOf());
+    BindPSSamplers(10,1,m_waterSampler.GetAddressOf());
 }
 
 float Device::WaterTime() const {
