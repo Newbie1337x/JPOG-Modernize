@@ -286,6 +286,7 @@ void Device::DrawOverlay()
             ImGui::SliderFloat("Moon rim", &g_config.moonRim, 0, 8, "%.2f");
             ImGui::SliderFloat("Moon rim glow", &g_config.moonRimGlow, 0, 2, "%.2f");
             ImGui::SetItemTooltip("Bright moon outline added on top, even on dark skin.");
+            ImGui::SliderFloat("Moon rim width", &g_config.moonRimWidth, 0.05f, 1, "%.2f");
             ImGui::SliderFloat("Moon sheen", &g_config.moonSheen, 0, 4, "%.2f");
             ImGui::SliderFloat("Moon on grass", &g_config.grassMoon, 0, 4, "%.2f");
             ImGui::SliderFloat("Moon on flat surfaces", &g_config.nightSurface, 0, 1, "%.2f");

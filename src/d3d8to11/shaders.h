@@ -115,7 +115,7 @@ struct SunConstants {
     float rimColor[4];      // rim light colour (sun or moon)
     float fogTint[4];       // time of day: multiplier on the game's haze colour
     float grassGrade[4];    // grass with replacement lighting: saturation, brightness, rim glow, w = on
-    float specParams[4];    // replacement specular: roughness, F0, -, -
+    float specParams[4];    // replacement specular: roughness, F0; rim: moon thin-line weight, line width
 };
 
 struct WaterConstants {

@@ -711,6 +711,7 @@ void Device::UpdateSun(bool shadowPass)
     for (int k = 0; k < 3; k++) m_sun.rimColor[k] = m_tod.active ? m_tod.light[k] : warmWhite[k];
     m_sun.todSun[3] = m_tod.active ? m_tod.sheen : g_config.specular;
     m_sun.specParams[0] = g_config.specRoughness; m_sun.specParams[1] = 0.04f;
+    m_sun.specParams[2] = m_tod.active ? m_tod.moon : 0.0f; m_sun.specParams[3] = g_config.moonRimWidth;
     m_sun.rimColor[3] = m_tod.active ? g_config.grassMoon * m_tod.moon : 0.0f;
     m_sun.grassGrade[0] = g_config.grassSaturation; m_sun.grassGrade[1] = g_config.grassBrightness;
     m_sun.grassGrade[2] = 0.08f + (m_tod.active ? g_config.moonRimGlow * m_tod.moon : 0.0f);

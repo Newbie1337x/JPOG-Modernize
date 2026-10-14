@@ -63,9 +63,12 @@ float3 RimLight(float3 N, float3 world) {
   float3 V = sunCamera.xyz - world; float vl = dot(V, V); if (vl < 1e-8) return 0;
   V *= rsqrt(vl); if (dot(N, V) < 0) N = -N;
   float3 L = normalize(sunDirection.xyz);
-  float edge = pow(1 - saturate(dot(N, V)), 3);
-  float facing = saturate(dot(N, L) * 0.7 + 0.3), back = saturate(dot(-V, L) * 0.5 + 0.5);
-  return rimColor.rgb * edge * facing * lerp(0.5, 1.5, back) * todAmbient.w; }
+  float nv = saturate(dot(N, V)), nl = dot(N, L);
+  float edge = pow(1 - nv, 3);
+  float facing = saturate(nl * 0.7 + 0.3), back = saturate(dot(-V, L) * 0.5 + 0.5);
+  float soft = edge * facing * lerp(0.5, 1.5, back);
+  float thin = smoothstep(1 - specParams.w, 1, 1 - nv) * saturate(nl * 2.5) * lerp(0.4, 2, back);
+  return rimColor.rgb * lerp(soft, thin, specParams.z) * todAmbient.w; }
 float4 RelightSurface(float4 color, VSOut i) {
   if (sunFlags.x < 0.5 || sunFlags.y > 0.5 || sunControl.x < 0.5) return color;
   bool grass = sunFlags.w == 4 && sunFlags.z > 0.5;
