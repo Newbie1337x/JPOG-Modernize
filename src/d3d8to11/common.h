@@ -43,6 +43,10 @@ struct Config {
     float horizonShadows = 1.0f;    // [Lighting] HorizonShadows: hills shade the terrain behind them, 0..1
     bool emissive = true;           // [Lighting] Emissive: night emission masks (mods\emissive)
     float emissiveIntensity = 1.0f; // [Lighting] EmissiveIntensity
+    bool bloom = true;              // [Lighting] Bloom: glow around bright pixels
+    float bloomStrength = 0.6f;     // [Lighting] BloomStrength (at night)
+    float bloomThreshold = 0.75f;   // [Lighting] BloomThreshold (picture brightness 0-1)
+    float bloomDay = 0.25f;         // [Lighting] BloomDay: fraction of the strength by day
     bool relightGrass = true;       // [Lighting] RelightGrass: grass follows the replacement lighting
     float specular = 0.0f;          // [Lighting] Specular: GGX highlight by day (the moon uses MoonSheen)
     float specRoughness = 0.6f;     // [Lighting] SpecularRoughness

@@ -355,6 +355,18 @@ private:
     UINT m_sceneCopyW = 0, m_sceneCopyH = 0;
     bool EnsureSceneCopy();
     void CopySceneColor();
+    // bloom.cpp
+    ComPtr<ID3D11PixelShader> m_bloomBright, m_bloomBlur, m_bloomComposite;
+    ComPtr<ID3D11Buffer> m_bloomCB;
+    ComPtr<ID3D11SamplerState> m_bloomSampler;
+    ComPtr<ID3D11BlendState> m_bloomAdd;
+    ComPtr<ID3D11Texture2D> m_bloomTex[2];
+    ComPtr<ID3D11RenderTargetView> m_bloomRTV[2];
+    ComPtr<ID3D11ShaderResourceView> m_bloomSRV[2];
+    UINT m_bloomW = 0, m_bloomH = 0;
+    bool m_bloomFailed = false;
+    bool EnsureBloom();
+    void ApplyBloom();
     ComPtr<ID3D11BlendState> m_multiplyBlend;
     SunConstants m_sun = {};
     SunConstants m_sunUploaded = {};

@@ -537,6 +537,10 @@ void Device::DrawOverlay()
             ImGui::Checkbox("Relight grass", &g_config.relightGrass);
             ImGui::Checkbox("Night lights (emission masks)", &g_config.emissive);
             ImGui::SliderFloat("Night lights intensity", &g_config.emissiveIntensity, 0, 8, "%.2f");
+            ImGui::Checkbox("Bloom", &g_config.bloom);
+            ImGui::SliderFloat("Bloom strength", &g_config.bloomStrength, 0, 4, "%.2f");
+            ImGui::SliderFloat("Bloom threshold", &g_config.bloomThreshold, 0, 1, "%.2f");
+            ImGui::SliderFloat("Bloom by day", &g_config.bloomDay, 0, 1, "%.2f");
             ImGui::SliderFloat("Specular (day)", &g_config.specular, 0, 4, "%.2f");
             ImGui::SliderFloat("Specular roughness", &g_config.specRoughness, 0.1f, 1, "%.2f");
             ImGui::Checkbox("Filmic tonemap (ACES)", &g_config.filmic);

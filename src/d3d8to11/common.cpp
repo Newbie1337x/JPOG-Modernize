@@ -99,6 +99,10 @@ void LoadConfig()
     g_config.relightGrass = GetPrivateProfileIntA("Lighting", "RelightGrass", 1, ini.c_str()) != 0;
     g_config.emissive = GetPrivateProfileIntA("Lighting", "Emissive", 1, ini.c_str()) != 0;
     g_config.emissiveIntensity = readFloat("EmissiveIntensity", 1.0f, 0, 8);
+    g_config.bloom = GetPrivateProfileIntA("Lighting", "Bloom", 1, ini.c_str()) != 0;
+    g_config.bloomStrength = readFloat("BloomStrength", 0.6f, 0, 4);
+    g_config.bloomThreshold = readFloat("BloomThreshold", 0.75f, 0, 1);
+    g_config.bloomDay = readFloat("BloomDay", 0.25f, 0, 1);
     g_config.specular = readFloat("Specular", 0.0f, 0, 4);
     g_config.specRoughness = readFloat("SpecularRoughness", 0.6f, 0.1f, 1);
     g_config.filmic = GetPrivateProfileIntA("Lighting", "Filmic", 0, ini.c_str()) != 0;
@@ -310,6 +314,10 @@ void SaveConfig()
     putInt("Lighting", "RelightGrass", g_config.relightGrass);
     putInt("Lighting", "Emissive", g_config.emissive);
     putFloat("Lighting", "EmissiveIntensity", g_config.emissiveIntensity);
+    putInt("Lighting", "Bloom", g_config.bloom);
+    putFloat("Lighting", "BloomStrength", g_config.bloomStrength);
+    putFloat("Lighting", "BloomThreshold", g_config.bloomThreshold);
+    putFloat("Lighting", "BloomDay", g_config.bloomDay);
     putFloat("Lighting", "Specular", g_config.specular);
     putFloat("Lighting", "SpecularRoughness", g_config.specRoughness);
     putInt("Lighting", "Filmic", g_config.filmic);
