@@ -22,7 +22,7 @@ struct VSOut {
   float fog : FOG;
   float3 world : TEXCOORD8; float3 normal : TEXCOORD9;
 };
-cbuffer Sun : register(b1) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera; float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; };
+cbuffer Sun : register(b1) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera; float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; float4 specParams; };
 float3 ToLinear(float3 c) { return pow(max(c, 0), 2.2); }
 float3 Shoulder(float3 c) {
   const float start = 0.8; float peak = max(c.r, max(c.g, c.b));
@@ -68,7 +68,8 @@ float3 RimLight(float3 N, float3 world) {
   return rimColor.rgb * edge * facing * lerp(0.5, 1.5, back) * todAmbient.w; }
 float4 RelightSurface(float4 color, VSOut i) {
   if (sunFlags.x < 0.5 || sunFlags.y > 0.5 || sunControl.x < 0.5) return color;
-  bool rigid = sunFlags.w == 3 && sunFlags.z > 0.5;
+  bool grass = sunFlags.w == 4 && sunFlags.z > 0.5;
+  bool rigid = (sunFlags.w == 3 && sunFlags.z > 0.5) || grass;
   if (sunFlags.w != 1 && sunFlags.w != 2 && !rigid) return color;
   if (sunControl.y == 1) return color;
   float3 rawN = cross(ddy(i.world), ddx(i.world));
@@ -78,6 +79,7 @@ float4 RelightSurface(float4 color, VSOut i) {
   if (sunFlags.w != 1 && N.y > 0) N = -N;
   bool field = sunFlags.w != 1 && terrainMap.x > 0.5 && TerrainInside(i.world.xz);
   if (field) N = TerrainNormal(i.world.xz);
+  else if (grass) N = float3(0, -1, 0);
   if (sunControl.y == 2) return float4(N*0.5+0.5,color.a);
   float fieldNdl = 1, fieldShadow = 1;
   if (field) {
@@ -91,8 +93,9 @@ float4 RelightSurface(float4 color, VSOut i) {
     float f = saturate((dot(baked, luma) - dot(A, luma)) / max(dot(S, luma), 1e-3));
     float3 tint = clamp(baked / max(saturate(A + S * f), 1e-3), 0, 2);
     float sunF = f;
-    if (field) sunF = fieldNdl * min(fieldShadow, lerp(1, fieldNdl > 0.05 ? saturate(f / fieldNdl) : 1, sunControl.w));
+    if (field) sunF = grass ? fieldNdl * fieldShadow : fieldNdl * min(fieldShadow, lerp(1, fieldNdl > 0.05 ? saturate(f / fieldNdl) : 1, sunControl.w));
     float3 light = GameAmbient(N) + GameSun() * sunF;
+    if (grass) light += GameSun() * saturate(i.t7.x * 1.5) * (rimColor.w + 0.25 * (1 - sunF));
     return float4(LinearToOutput(ToLinear(color.rgb * tint) * light), color.a);
   }
   float ndl = saturate(dot(N, sunDirection.xyz));
@@ -106,10 +109,17 @@ float4 RelightSurface(float4 color, VSOut i) {
   float3 sheen = 0;
   if (sunFlags.w == 1 && todSun.w > 0) {
     float3 V = normalize(sunCamera.xyz - i.world), Ns = dot(N, V) < 0 ? -N : N;
-    sheen = rimColor.rgb * pow(saturate(dot(Ns, normalize(V + normalize(sunDirection.xyz)))), 24) * todSun.w;
+    float3 L = normalize(sunDirection.xyz), H = normalize(V + L);
+    float nl = saturate(dot(Ns, L)), nv = max(saturate(dot(Ns, V)), 1e-3), nh = saturate(dot(Ns, H)), vh = saturate(dot(V, H));
+    float a = specParams.x * specParams.x, a2 = a * a, dd = nh * nh * (a2 - 1) + 1;
+    float D = a2 / (3.14159265 * max(dd * dd, 1e-6));
+    float k = (specParams.x + 1) * (specParams.x + 1) / 8;
+    float G = nv / (nv * (1 - k) + k) * nl / max(nl * (1 - k) + k, 1e-3);
+    float F = specParams.y + (1 - specParams.y) * pow(1 - vh, 5);
+    sheen = GameSun() * (D * G * F / max(4 * nv, 1e-3)) * 3.14159265 * todSun.w;
   }
   if (sunFlags.w == 2) light = lerp(light, 1, saturate(i.d1.w));
-  return float4(LinearToOutput(ToLinear(color.rgb) * light + rim * grassGrade.z + sheen * 0.5), color.a);
+  return float4(LinearToOutput(ToLinear(color.rgb) * light + rim * grassGrade.z + sheen), color.a);
 }
 float4 ApplySun(float4 color, VSOut i) {
   if (sunControl.y == 13 && sunFlags.y < 0.5) {
@@ -117,7 +127,7 @@ float4 ApplySun(float4 color, VSOut i) {
     float3 c = k == 1 ? float3(1, 0.2, 0.2) : k == 2 ? float3(0.2, 1, 0.2) : k == 3 ? float3(0.2, 0.4, 1) : k == 4 ? float3(1, 1, 0.2) : k == 0 ? float3(1, 0.3, 1) : float3(0.5, 0.5, 0.5);
     return float4(lerp(color.rgb, c, 0.7), color.a); }
   bool relit = sunFlags.x > 0.5 && sunFlags.y < 0.5 && sunControl.x > 0.5 &&
-    (sunFlags.w == 1 || sunFlags.w == 2 || (sunFlags.w == 3 && sunFlags.z > 0.5));
+    (sunFlags.w == 1 || sunFlags.w == 2 || ((sunFlags.w == 3 || sunFlags.w == 4) && sunFlags.z > 0.5));
   float4 lit = RelightSurface(color, i);
   if (!relit && todNight.w > 0.5) {
     lit.rgb *= todNight.rgb;

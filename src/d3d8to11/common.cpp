@@ -96,6 +96,11 @@ void LoadConfig()
     g_config.horizonShadows = readFloat("HorizonShadows", 1, 0, 1);
     g_config.rimLight = readFloat("RimLight", 0.5f, 0, 2);
     g_config.grassSaturation = readFloat("GrassSaturation", 0.8f, 0, 2);
+    g_config.relightGrass = GetPrivateProfileIntA("Lighting", "RelightGrass", 1, ini.c_str()) != 0;
+    g_config.specular = readFloat("Specular", 0.0f, 0, 4);
+    g_config.specRoughness = readFloat("SpecularRoughness", 0.6f, 0.1f, 1);
+    g_config.filmic = GetPrivateProfileIntA("Lighting", "Filmic", 0, ini.c_str()) != 0;
+    g_config.filmicExposure = readFloat("FilmicExposure", 1.6f, 0.2f, 4);
     g_config.grassBrightness = readFloat("GrassBrightness", 0.92f, 0, 2);
     auto readColor = [&](const char* key, float* c) {
         char value[96];
@@ -299,6 +304,11 @@ void SaveConfig()
     putFloat("Lighting", "HorizonShadows", g_config.horizonShadows);
     putFloat("Lighting", "RimLight", g_config.rimLight);
     putFloat("Lighting", "GrassSaturation", g_config.grassSaturation);
+    putInt("Lighting", "RelightGrass", g_config.relightGrass);
+    putFloat("Lighting", "Specular", g_config.specular);
+    putFloat("Lighting", "SpecularRoughness", g_config.specRoughness);
+    putInt("Lighting", "Filmic", g_config.filmic);
+    putFloat("Lighting", "FilmicExposure", g_config.filmicExposure);
     putFloat("Lighting", "GrassBrightness", g_config.grassBrightness);
     auto putColor = [&](const char* key, const float* c) {
         char b[96]; sprintf_s(b, "%.3f,%.3f,%.3f", c[0], c[1], c[2]); put("TimeOfDay", key, b);

@@ -352,7 +352,7 @@ std::string WaterPixelCode(int samples) {
 }
 std::string SunBlock(int slot) {
     return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera;"
-               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; };\n", slot);
+               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; float4 specParams; };\n", slot);
 }
 // Normal maps (stage 0, t9): relief relative to the sun on top of the game's own lighting. No
 // tangents in JPOG's meshes, so the frame comes from screen-space derivatives of the world position
@@ -551,7 +551,8 @@ std::string SunPixelCode() {
         "  return rimColor.rgb * edge * facing * lerp(0.5, 1.5, back) * todAmbient.w; }\n"
         "float4 RelightSurface(float4 color, VSOut i) {\n"
         "  if (sunFlags.x < 0.5 || sunFlags.y > 0.5 || sunControl.x < 0.5) return color;\n"
-        "  bool rigid = sunFlags.w == 3 && sunFlags.z > 0.5;\n" // paths, relit with the terrain's light
+        "  bool grass = sunFlags.w == 4 && sunFlags.z > 0.5;\n"
+        "  bool rigid = (sunFlags.w == 3 && sunFlags.z > 0.5) || grass;\n" // paths and grass, relit with the terrain's light
         "  if (sunFlags.w != 1 && sunFlags.w != 2 && !rigid) return color;\n" // grass keeps its baked light
         "  if (sunControl.y == 1) return color;\n"
         "  float3 rawN = cross(ddy(i.world), ddx(i.world));\n"
@@ -561,6 +562,7 @@ std::string SunPixelCode() {
         "  if (sunFlags.w != 1 && N.y > 0) N = -N;\n" // terrain and paths face up (-Y)
         "  bool field = sunFlags.w != 1 && terrainMap.x > 0.5 && TerrainInside(i.world.xz);\n"
         "  if (field) N = TerrainNormal(i.world.xz);\n"
+        "  else if (grass) N = float3(0, -1, 0);\n" // blades have no useful normal
         "  if (sunControl.y == 2) return float4(N*0.5+0.5,color.a);\n"
         // The game's baked factor also holds painted darkening (under trees, hollows): its ratio
         // to what the field normal gives under the same sun is kept as occlusion (sunControl.w),
@@ -579,8 +581,10 @@ std::string SunPixelCode() {
         "    float f = saturate((dot(baked, luma) - dot(A, luma)) / max(dot(S, luma), 1e-3));\n"
         "    float3 tint = clamp(baked / max(saturate(A + S * f), 1e-3), 0, 2);\n"
         "    float sunF = f;\n"
-        "    if (field) sunF = fieldNdl * min(fieldShadow, lerp(1, fieldNdl > 0.05 ? saturate(f / fieldNdl) : 1, sunControl.w));\n"
+        "    if (field) sunF = grass ? fieldNdl * fieldShadow : fieldNdl * min(fieldShadow, lerp(1, fieldNdl > 0.05 ? saturate(f / fieldNdl) : 1, sunControl.w));\n"
         "    float3 light = GameAmbient(N) + GameSun() * sunF;\n"
+        // Grass (t7.x = blade height): the tips catch the moon (rimColor.w) and some low sun.
+        "    if (grass) light += GameSun() * saturate(i.t7.x * 1.5) * (rimColor.w + 0.25 * (1 - sunF));\n"
         "    return float4(LinearToOutput(ToLinear(color.rgb * tint) * light), color.a);\n"
         "  }\n"
         // Terrain: the game's per-vertex sun factor (v0.w, passed in t7.x) keeps its smooth slopes.
@@ -592,15 +596,23 @@ std::string SunPixelCode() {
         "  float3 light = GameAmbient(N) + GameSun() * ndl;\n"
         "  float3 rim = sunFlags.w == 1 ? RimLight(N, i.world) : 0;\n"
         "  light += rim;\n"
-        // Moon sheen (todSun.w): leaves and skin catch a broad silver highlight.
+        // Specular (strength todSun.w, roughness and F0 specParams): GGX on a rough skin/leaf
+        // surface, lit by the sun or the moon. Broad and dim at high roughness, not plastic.
         "  float3 sheen = 0;\n"
         "  if (sunFlags.w == 1 && todSun.w > 0) {\n"
         "    float3 V = normalize(sunCamera.xyz - i.world), Ns = dot(N, V) < 0 ? -N : N;\n"
-        "    sheen = rimColor.rgb * pow(saturate(dot(Ns, normalize(V + normalize(sunDirection.xyz)))), 24) * todSun.w;\n"
+        "    float3 L = normalize(sunDirection.xyz), H = normalize(V + L);\n"
+        "    float nl = saturate(dot(Ns, L)), nv = max(saturate(dot(Ns, V)), 1e-3), nh = saturate(dot(Ns, H)), vh = saturate(dot(V, H));\n"
+        "    float a = specParams.x * specParams.x, a2 = a * a, dd = nh * nh * (a2 - 1) + 1;\n"
+        "    float D = a2 / (3.14159265 * max(dd * dd, 1e-6));\n"
+        "    float k = (specParams.x + 1) * (specParams.x + 1) / 8;\n"
+        "    float G = nv / (nv * (1 - k) + k) * nl / max(nl * (1 - k) + k, 1e-3);\n"
+        "    float F = specParams.y + (1 - specParams.y) * pow(1 - vh, 5);\n"
+        "    sheen = GameSun() * (D * G * F / max(4 * nv, 1e-3)) * 3.14159265 * todSun.w;\n"
         "  }\n"
         // The terrain shader fades its lighting out under distant haze; keep that.
         "  if (sunFlags.w == 2) light = lerp(light, 1, saturate(i.d1.w));\n"
-        "  return float4(LinearToOutput(ToLinear(color.rgb) * light + rim * grassGrade.z + sheen * 0.5), color.a);\n"
+        "  return float4(LinearToOutput(ToLinear(color.rgb) * light + rim * grassGrade.z + sheen), color.a);\n"
         "}\n"
         "float4 ApplySun(float4 color, VSOut i) {\n"
         "  if (sunControl.y == 13 && sunFlags.y < 0.5) {\n"
@@ -608,14 +620,14 @@ std::string SunPixelCode() {
         "    float3 c = k == 1 ? float3(1, 0.2, 0.2) : k == 2 ? float3(0.2, 1, 0.2) : k == 3 ? float3(0.2, 0.4, 1) : k == 4 ? float3(1, 1, 0.2) : k == 0 ? float3(1, 0.3, 1) : float3(0.5, 0.5, 0.5);\n"
         "    return float4(lerp(color.rgb, c, 0.7), color.a); }\n"
         "  bool relit = sunFlags.x > 0.5 && sunFlags.y < 0.5 && sunControl.x > 0.5 &&\n"
-        "    (sunFlags.w == 1 || sunFlags.w == 2 || (sunFlags.w == 3 && sunFlags.z > 0.5));\n"
+        "    (sunFlags.w == 1 || sunFlags.w == 2 || ((sunFlags.w == 3 || sunFlags.w == 4) && sunFlags.z > 0.5));\n"
         // Called unconditionally (it returns the colour unchanged when not relit): fxc overflows
         // its stack on this function inlined inside a branch.
         "  float4 lit = RelightSurface(color, i);\n"
         "  if (!relit && todNight.w > 0.5) {\n" // grass, water, other world surfaces
         "    lit.rgb *= todNight.rgb;\n"
         // Grass (t7.x = blade height from the VS): moonlight catches the blade tips.
-        "    if (sunFlags.w == 4) lit.rgb += color.rgb * rimColor.rgb * saturate(i.t7.x * 1.5) * rimColor.w;\n"
+        "    if (sunFlags.w == 4) lit.rgb += color.rgb * rimColor.rgb * saturate(i.t7.x * 1.5) * rimColor.w;\n" // grass not relit
         "  }\n"
         // Grass: the game's grass is a much more saturated green than its terrain.
         "  if (sunFlags.w == 4 && sunFlags.y < 0.5 && grassGrade.w > 0.5)\n"
@@ -1014,7 +1026,7 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
                      AsFloat(in.p[2]), AsFloat(in.p[3]), AsFloat(in.p[4]));
     s += "  float4 v0 = i.d0, v1 = i.d1;\n";
     s += v.material ? "  bool relight = sunControl.x > 0.5 && sunFlags.x > 0.5 && sunFlags.y < 0.5;\n"
-                    : "  bool relight = sunControl.x > 0.5 && sunFlags.x > 0.5 && sunFlags.y < 0.5 && (sunFlags.w == 1 || sunFlags.w == 2 || (sunFlags.w == 3 && sunFlags.z > 0.5));\n";
+                    : "  bool relight = sunControl.x > 0.5 && sunFlags.x > 0.5 && sunFlags.y < 0.5 && (sunFlags.w == 1 || sunFlags.w == 2 || ((sunFlags.w == 3 || sunFlags.w == 4) && sunFlags.z > 0.5));\n";
     s += "  if (relight) { v0.rgb = 1; v1.rgb = 0; }\n";
     s += "  float4 r0 = 0, r1 = 0, t0 = 0, t1 = 0, t2 = 0, t3 = 0;\n";
     s += "  float m0 = 0, m1 = 0;\n";

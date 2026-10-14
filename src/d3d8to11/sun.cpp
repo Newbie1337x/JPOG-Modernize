@@ -33,7 +33,7 @@ struct ResolveConstants {
     float tod2[4];   // true sun direction (renderer Y-down), w = procedural sky weight
     float tod3[4];   // moon visibility, shadow tint rgb
     float tod4[4];   // night sky brightness, stars, day weight, night desaturation
-    float tod5[4];   // night tint
+    float tod5[4];   // night tint, w = filmic exposure (0 = off)
 };
 
 const char* kResolveVS =
@@ -229,6 +229,10 @@ const char* kResolveMain =
     "    c *= tod.rgb;\n"
     "    if (tod2.w > 0.001) c = lerp(c, ProceduralSky(normalize(Unproject(pos.xy, 0.99999) - Unproject(pos.xy, 0))), tod2.w);\n"
     "  }\n"
+    "  if (tod5.w > 0) {\n" // filmic curve (ACES fit) over the whole picture
+    "    float3 x = pow(max(c, 0), 2.2) * tod5.w * 0.6;\n"
+    "    c = pow(saturate((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)), 1 / 2.2);\n"
+    "  }\n"
     "  if (grade1.z > 0.5) {\n"
     // Sunlight: warm lift where the sun reaches (everything outside the shadow), cool shadows.
     "    float lit = sky ? 0 : 1 - shadow;\n"
@@ -398,7 +402,7 @@ void Device::EvaluateTimeOfDay()
     for (int k = 0; k < 3; k++) m_tod.sunDir[k] = sun[k];
     m_tod.procSky = 1 - dayW; // the game's sky texture only by day
     m_tod.dayW = dayW;
-    m_tod.sheen = g_config.moonSheen * moonUp;
+    m_tod.sheen = g_config.moonSheen * moonUp + g_config.specular * up;
     m_tod.moon = moonUp;
     m_tod.rim = g_config.moonRim * moonUp + g_config.rimLight * up * (1.0f + 0.8f * (1 - warm)); // moon, then the sun (stronger when low)
     m_tod.active = true;
@@ -666,7 +670,8 @@ void Device::UpdateSun(bool shadowPass)
     m_sun.flags[1] = shadowPass ? 1.0f : 0.0f;
     // Rigid pre-lit meshes (paths: vs_002, oD0 = vertex colour * c4) carry the terrain's baked
     // light; they are relit with the light colours of the last terrain draw.
-    m_sun.flags[2] = m_worldKind == 3 && m_terrainLightValid ? 1.0f : 0.0f;
+    // Grass (vs_010, oD0 = c5) is relit the same way, over the height field's normal.
+    m_sun.flags[2] = m_terrainLightValid && (m_worldKind == 3 || (m_worldKind == 4 && g_config.relightGrass)) ? 1.0f : 0.0f;
     m_sun.flags[3] = (float)m_worldKind;
     m_sun.control[0] = g_config.replaceLighting || ActiveMaterial() ? 1.0f : 0.0f;
     m_sun.control[1] = (float)g_config.lightingDebug;
@@ -680,7 +685,7 @@ void Device::UpdateSun(bool shadowPass)
         else if (m_worldKind == 2) {
             amb = m_vsConst[6][k]; sun = m_vsConst[7][k];
             if (m_worldDraw && !shadowPass) { m_terrainLight[0][k] = amb; m_terrainLight[1][k] = sun; m_terrainLightValid = true; }
-        } else if (m_worldKind == 3 && m_terrainLightValid) { amb = m_terrainLight[0][k]; sun = m_terrainLight[1][k]; }
+        } else if ((m_worldKind == 3 || m_worldKind == 4) && m_terrainLightValid) { amb = m_terrainLight[0][k]; sun = m_terrainLight[1][k]; }
         m_sun.gameAmbient[k] = amb; m_sun.gameSun[k] = sun;
     }
     m_sun.gameAmbient[3] = g_config.relightTonemap ? 1.0f : 0.0f;
@@ -704,7 +709,8 @@ void Device::UpdateSun(bool shadowPass)
     m_sun.todAmbient[3] = m_tod.active ? m_tod.rim : g_config.rimLight;
     static const float warmWhite[3] = { 1.0f, 0.93f, 0.80f };
     for (int k = 0; k < 3; k++) m_sun.rimColor[k] = m_tod.active ? m_tod.light[k] : warmWhite[k];
-    m_sun.todSun[3] = m_tod.active ? m_tod.sheen : 0.0f;
+    m_sun.todSun[3] = m_tod.active ? m_tod.sheen : g_config.specular;
+    m_sun.specParams[0] = g_config.specRoughness; m_sun.specParams[1] = 0.04f;
     m_sun.rimColor[3] = m_tod.active ? g_config.grassMoon * m_tod.moon : 0.0f;
     m_sun.grassGrade[0] = g_config.grassSaturation; m_sun.grassGrade[1] = g_config.grassBrightness;
     m_sun.grassGrade[2] = 0.08f + (m_tod.active ? g_config.moonRimGlow * m_tod.moon : 0.0f);
@@ -800,6 +806,7 @@ void Device::ResolveSun(const char* reason)
     rc.tod4[0] = g_config.nightSky; rc.tod4[1] = g_config.stars;
     rc.tod4[3] = m_tod.active ? g_config.nightDesaturate * m_tod.moon : 0.0f;
     for (int k = 0; k < 3; k++) rc.tod5[k] = g_config.nightTint[k];
+    rc.tod5[3] = g_config.filmic && g_config.replaceLighting ? g_config.filmicExposure : 0.0f;
     D3D11_MAPPED_SUBRESOURCE map;
     if (FAILED(m_ctx->Map(m_resolveCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
     memcpy(map.pData, &rc, sizeof(rc));

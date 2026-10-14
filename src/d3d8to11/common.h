@@ -41,6 +41,11 @@ struct Config {
     bool heightfieldLighting = true; // [Lighting] HeightfieldLighting: terrain normals from the native height field
     float bakedTerrainDetail = 1.0f; // [Lighting] BakedTerrainDetail: keep the game's painted terrain darkening, 0..1
     float horizonShadows = 1.0f;    // [Lighting] HorizonShadows: hills shade the terrain behind them, 0..1
+    bool relightGrass = true;       // [Lighting] RelightGrass: grass follows the replacement lighting
+    float specular = 0.0f;          // [Lighting] Specular: GGX highlight by day (the moon uses MoonSheen)
+    float specRoughness = 0.6f;     // [Lighting] SpecularRoughness
+    bool filmic = false;            // [Lighting] Filmic: ACES-like curve over the picture
+    float filmicExposure = 1.6f;    // [Lighting] FilmicExposure
     float grassSaturation = 0.8f;   // [Lighting] GrassSaturation (replacement lighting)
     float grassBrightness = 0.92f;  // [Lighting] GrassBrightness (replacement lighting)
     float rimLight = 0.5f;          // [Lighting] RimLight: sunlit silhouettes (replacement lighting), 0..2

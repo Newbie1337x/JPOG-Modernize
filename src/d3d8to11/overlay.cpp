@@ -533,6 +533,11 @@ void Device::DrawOverlay()
             ImGui::SetItemTooltip("Smooth terrain normals from the game's height field instead of its baked light.");
             ImGui::SliderFloat("Hill shadows", &g_config.horizonShadows, 0, 1, "%.2f");
             ImGui::SliderFloat("Rim light", &g_config.rimLight, 0, 2, "%.2f");
+            ImGui::Checkbox("Relight grass", &g_config.relightGrass);
+            ImGui::SliderFloat("Specular (day)", &g_config.specular, 0, 4, "%.2f");
+            ImGui::SliderFloat("Specular roughness", &g_config.specRoughness, 0.1f, 1, "%.2f");
+            ImGui::Checkbox("Filmic tonemap (ACES)", &g_config.filmic);
+            ImGui::SliderFloat("Filmic exposure", &g_config.filmicExposure, 0.2f, 4, "%.2f");
             ImGui::SliderFloat("Grass saturation", &g_config.grassSaturation, 0, 2, "%.2f");
             ImGui::SliderFloat("Grass brightness", &g_config.grassBrightness, 0, 2, "%.2f");
             ImGui::SetItemTooltip("The sun outlines silhouettes, mostly against the light. The moon's rim is separate.");
