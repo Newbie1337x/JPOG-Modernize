@@ -87,6 +87,11 @@ void LoadConfig()
     g_config.shadowDistance = readFloat("ShadowDistance", 250, 32, 16384);
     g_config.sunAmbient = readFloat("Ambient", 0.60f, 0.1f, 2);
     g_config.sunDirect = readFloat("SunIntensity", 0.55f, 0, 2);
+    g_config.relightSun = readFloat("RelightSun", 1.35f, 0, 4);
+    g_config.relightAmbient = readFloat("RelightAmbient", .85f, 0, 4);
+    g_config.relightSkyTint = readFloat("RelightSkyTint", .65f, 0, 1);
+    g_config.relightExposure = readFloat("RelightExposure", .95f, 0.25f, 4);
+    g_config.relightTonemap = GetPrivateProfileIntA("Lighting", "RelightTonemap", 1, ini.c_str()) != 0;
     g_config.shadowStrength = readFloat("ShadowStrength", 0.25f, 0, 1);
     g_config.sunMinElevation = readFloat("SunMinHeight", 0.35f, 0.05f, 1);
     g_config.sunDirection[0] = readFloat("SunX", -0.35f, -1, 1);
@@ -248,6 +253,11 @@ void SaveConfig()
     putInt("Lighting", "TerrainShadows", g_config.terrainShadows);
     putInt("Lighting", "DebugView", g_config.lightingDebug);
     putInt("Lighting", "ReplaceOriginal", g_config.replaceLighting);
+    putFloat("Lighting", "RelightSun", g_config.relightSun);
+    putFloat("Lighting", "RelightAmbient", g_config.relightAmbient);
+    putFloat("Lighting", "RelightSkyTint", g_config.relightSkyTint);
+    putFloat("Lighting", "RelightExposure", g_config.relightExposure);
+    putInt("Lighting", "RelightTonemap", g_config.relightTonemap);
     putFloat("Lighting", "Ambient", g_config.sunAmbient);
     putFloat("Lighting", "SunIntensity", g_config.sunDirect);
     putInt("Post", "Enabled", g_config.postEnabled);

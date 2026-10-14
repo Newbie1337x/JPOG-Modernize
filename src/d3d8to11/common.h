@@ -33,6 +33,11 @@ struct Config {
     bool dumpShaders = false;   // [Debug] DumpShaders (writes generated HLSL to d3d8to11_shaders\)
     bool sunLighting = true;        // [Lighting] Enabled: sun shadows
     bool replaceLighting = false;   // [Lighting] ReplaceOriginal: experimental per-pixel relighting
+    float relightSun = 1.35f;       // [Lighting] RelightSun: scale of the game's own sun colour
+    float relightAmbient = 0.85f;   // [Lighting] RelightAmbient: scale of the game's own ambient colour
+    float relightSkyTint = 0.65f;   // [Lighting] RelightSkyTint: blue sky above, warm bounce below
+    float relightExposure = 0.95f;  // [Lighting] RelightExposure
+    bool relightTonemap = true;     // [Lighting] RelightTonemap: soft shoulder for values above 0.8
     bool sunFromGame = true;        // [Lighting] SunSource=game (else SunX/Y/Z)
     bool grassShadows = false;      // [Lighting] GrassShadows
     bool terrainShadows = false;    // [Lighting] TerrainShadows (hills shadowing the ground; acne-prone)

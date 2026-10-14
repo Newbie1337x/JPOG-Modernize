@@ -54,7 +54,8 @@ void AnglesFromSun(float x, float yUp, float z)
 const char* kDebugViews[] = { "Off", "Albedo (replacement)", "Normals (replacement)", "Shadow mask",
                               "Depth normals", "Mask + shadow map", "World grid", "Raw visibility",
                               "Dump one frame", "Ambient occlusion only", "Light shafts only", "Normal maps (world normals)",
-                              "Skin relief self-shadow" };
+                              "Skin relief self-shadow",
+                              "Draw kinds (red skinned, green terrain, blue rigid, yellow grass, grey other)" };
 
 } // namespace
 
@@ -486,11 +487,18 @@ void Device::DrawOverlay()
 
         if (ImGui::CollapsingHeader("Experimental")) {
             ImGui::Checkbox("Replace the game's lighting", &g_config.replaceLighting);
-            ImGui::SetItemTooltip("Per-pixel relighting instead of the game's baked light. Research path.");
+            ImGui::SetItemTooltip("Per-pixel relighting of models and terrain from the game's own light colours.");
             ImGui::BeginDisabled(!g_config.replaceLighting);
-            ImGui::SliderFloat("Ambient", &g_config.sunAmbient, 0.1f, 2.0f, "%.2f");
-            ImGui::SliderFloat("Sun intensity", &g_config.sunDirect, 0.0f, 2.0f, "%.2f");
+            ImGui::SliderFloat("Sun", &g_config.relightSun, 0, 3, "x%.2f");
+            ImGui::SliderFloat("Ambient##relight", &g_config.relightAmbient, 0, 3, "x%.2f");
+            ImGui::SliderFloat("Sky tint", &g_config.relightSkyTint, 0, 1, "%.2f");
+            ImGui::SetItemTooltip("Blue sky light on faces looking up, warm ground bounce on faces looking down.");
+            ImGui::SliderFloat("Exposure##relight", &g_config.relightExposure, 0.25f, 4, "%.2f");
+            ImGui::Checkbox("Soft highlights (tonemap)", &g_config.relightTonemap);
             ImGui::EndDisabled();
+            ImGui::SliderFloat("Pilot ambient", &g_config.sunAmbient, 0.1f, 2.0f, "%.2f");
+            ImGui::SetItemTooltip("Material pilot light when the replacement is off.");
+            ImGui::SliderFloat("Pilot sun", &g_config.sunDirect, 0.0f, 2.0f, "%.2f");
             ImGui::Combo("Debug view", &g_config.lightingDebug, kDebugViews, IM_ARRAYSIZE(kDebugViews));
         }
 

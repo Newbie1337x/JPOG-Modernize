@@ -351,7 +351,8 @@ std::string WaterPixelCode(int samples) {
     return s;
 }
 std::string SunBlock(int slot) {
-    return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera; };\n", slot);
+    return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera;"
+               " float4 gameAmbient; float4 gameSun; float4 relightParams; };\n", slot);
 }
 // Normal maps (stage 0, t9): relief relative to the sun on top of the game's own lighting. No
 // tangents in JPOG's meshes, so the frame comes from screen-space derivatives of the world position
@@ -474,15 +475,18 @@ std::string MaterialCode(bool normalMap, int stage){
         " float3 F0=materialOptics.x.xxx,F=F0+(1-F0)*pow(1-vh,5);\n"
         " float3 albedo=pow(max(color.rgb,0),2.2);\n"
         " float3 spec=D*G*F/max(4*nv*nl,.001)*materialSurface.y;\n"
-        " float3 direct=((1-F)*albedo/3.14159265+spec)*nl*sunSettings.y*3.14159265*float3(1,.95,.84);\n"
+        " bool game=gameSun.w>.5;\n"
+        " float3 sunRad=game?GameSun()*3.14159265:sunSettings.y*3.14159265*float3(1,.95,.84);\n"
+        " float3 direct=((1-F)*albedo/3.14159265+spec)*nl*sunRad;\n"
         " float sky=saturate(-N.y*.5+.5);\n"
-        " float3 ambient=albedo*sunSettings.x*lerp(float3(.38,.34,.27),float3(.78,.88,1),sky);\n"
+        " float3 ambient=game?albedo*GameAmbient(N):albedo*sunSettings.x*lerp(float3(.38,.34,.27),float3(.78,.88,1),sky);\n"
         // Analytic environment approximation: no cubemap probes or GI claim.
         " float3 R=reflect(-V,N);float horizon=saturate(-R.y*.5+.5);\n"
         " float3 environment=lerp(float3(.10,.07,.04),float3(.24,.34,.50),horizon);\n"
         " float3 envF=F0+(max((1-rough).xxx,F0)-F0)*pow(1-nv,5);\n"
         " float3 indirectSpec=environment*envF*materialSurface.z*(1-.5*rough);\n"
-        " return float4(pow(max(ambient+direct+indirectSpec,0),1/2.2),color.a);}\n";
+        " float3 lit=ambient+direct+indirectSpec;\n"
+        " return float4(game?LinearToOutput(lit):pow(max(lit,0),1/2.2),color.a);}\n";
     if(stage==1){size_t p=0;while((p=s.find("i.t0.xy",p))!=std::string::npos){s.replace(p,7,"i.t1.xy");p+=7;}}
     return s;
 }
@@ -490,22 +494,49 @@ std::string SunPixelCode() {
     return SunBlock(1) +
         // Shadows are applied after the world pass (sun.cpp resolve). In-pass work is only the
         // optional replacement lighting ([Lighting] ReplaceOriginal=1); otherwise colour is untouched.
+        // Replacement starts from the game's own light colours (gameAmbient/gameSun, read per draw
+        // from the vertex shader constants: docs/LIGHTING_REPLACEMENT.md) and evaluates them in linear
+        // light: full sun and full shade reproduce the original colours exactly, the rest is
+        // physically summed and gets a sky/ground tinted ambient. Output goes through exposure and
+        // a highlight-only shoulder so values the game kept below 1 are not changed.
+        "float3 ToLinear(float3 c) { return pow(max(c, 0), 2.2); }\n"
+        "float3 Shoulder(float3 c) {\n"
+        "  const float start = 0.8; float peak = max(c.r, max(c.g, c.b));\n"
+        "  if (peak <= start) return c;\n"
+        "  const float d = 1 - start; float np = 1 - d * d / (peak + d - start);\n"
+        "  c *= np / peak;\n"
+        "  float g = 1 - 1 / (0.15 * (peak - np) + 1);\n"
+        "  return lerp(c, np.xxx, g); }\n"
+        "float3 LinearToOutput(float3 c) {\n"
+        "  c *= relightParams.w;\n"
+        "  if (gameAmbient.w > 0.5) c = Shoulder(c);\n"
+        "  return pow(saturate(c), 1 / 2.2); }\n"
+        "float3 GameAmbient(float3 N) {\n"
+        "  float up = saturate(-N.y * 0.5 + 0.5);\n" // JPOG is Y-down
+        "  float3 tint = lerp(float3(0.95, 0.85, 0.65), float3(0.92, 1.02, 1.25), up);\n"
+        "  return ToLinear(saturate(gameAmbient.rgb)) * relightParams.y * lerp(1, tint, relightParams.z); }\n"
+        // The game's vertex colour output is clamped to 1: its full-sun light is saturate(A + S).
+        "float3 GameSun() { return max(ToLinear(saturate(gameAmbient.rgb + gameSun.rgb)) - ToLinear(saturate(gameAmbient.rgb)), 0) * relightParams.x; }\n"
         "float4 ApplySun(float4 color, VSOut i) {\n"
+        "  if (sunControl.y == 13 && sunFlags.y < 0.5) {\n"
+        "    float k = sunFlags.x > 0.5 ? sunFlags.w : -1;\n"
+        "    float3 c = k == 1 ? float3(1, 0.2, 0.2) : k == 2 ? float3(0.2, 1, 0.2) : k == 3 ? float3(0.2, 0.4, 1) : k == 4 ? float3(1, 1, 0.2) : k == 0 ? float3(1, 0.3, 1) : float3(0.5, 0.5, 0.5);\n"
+        "    return float4(lerp(color.rgb, c, 0.7), color.a); }\n"
         "  if (sunFlags.x < 0.5 || sunFlags.y > 0.5 || sunControl.x < 0.5) return color;\n"
+        "  if (sunFlags.w != 1 && sunFlags.w != 2) return color;\n" // rigid and grass keep their baked light
         "  if (sunControl.y == 1) return color;\n"
         "  float3 rawN = cross(ddy(i.world), ddx(i.world));\n"
-        "  if (dot(i.normal,i.normal) > 1e-8) rawN = i.normal;\n"
+        "  if (sunFlags.w == 1 && dot(i.normal,i.normal) > 1e-8) rawN = i.normal;\n"
         "  float nlen = dot(rawN, rawN); if (nlen < 1e-12) return color;\n"
         "  float3 N = rawN * rsqrt(nlen);\n"
-        "  if (sunFlags.w == 2 && N.y > 0) N = -N;\n" // JPOG is Y-down: terrain normals point to -Y
+        "  if (sunFlags.w == 2 && N.y > 0) N = -N;\n" // terrain normals point to -Y
         "  if (sunControl.y == 2) return float4(N*0.5+0.5,color.a);\n"
-        "  float ndl = saturate(dot(N, sunDirection.xyz));\n"
-        "  if (sunFlags.w == 4) ndl = abs(dot(N,sunDirection.xyz));\n"
-        "  float sky = saturate(-N.y*0.5+0.5);\n"
-        "  float3 ambient = sunSettings.x * lerp(float3(0.38,0.34,0.27),float3(0.78,0.88,1.0),sky);\n"
-        "  float3 light = ambient + sunSettings.y*ndl*float3(1.0,0.95,0.84);\n"
-        "  float3 linearColor = pow(max(color.rgb,0),2.2);\n"
-        "  return float4(pow(max(linearColor*light,0),1.0/2.2),color.a);\n"
+        // Terrain: the game's per-vertex sun factor (v0.w, passed in t7.x) keeps its smooth slopes.
+        "  float ndl = sunFlags.w == 2 ? saturate(i.t7.x) : saturate(dot(N, sunDirection.xyz));\n"
+        "  float3 light = GameAmbient(N) + GameSun() * ndl;\n"
+        // The terrain shader fades its lighting out under distant haze; keep that.
+        "  if (sunFlags.w == 2) light = lerp(light, 1, saturate(i.d1.w));\n"
+        "  return float4(LinearToOutput(ToLinear(color.rgb) * light), color.a);\n"
         "}\n";
 }
 }
@@ -762,6 +793,8 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
     s += "  if(sunFlags.y<0.5 && (sunFlags.x>0.5 || waterParams.x>0.5)) o.pos.xy+=pixelOffset.zw*oPos.w;\n";
     s += "  o.d0 = saturate(od0);\n  o.d1 = saturate(od1);\n";
     s += "  o.t0 = ot0; o.t1 = ot1; o.t2 = ot2; o.t3 = ot3; o.t4 = ot4; o.t5 = ot5; o.t6 = ot6; o.t7 = ot7;\n";
+    // Terrain: r9 = v0.w * c7 + c6 is the game's light; v0.w is its baked sun factor (relighting).
+    if (WorldShaderKind(decl) == 2) s += "  o.t7 = float4(v0.w, 0, 0, 1);\n";
     s += "  o.fog = oFog.x;\n";
     s += "  return o;\n}\n";
     return s;
@@ -895,7 +928,8 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
             s += Fmt("  cp[%d] = float4(%.9g, %.9g, %.9g, %.9g);\n", RegNumOf(in.p[0]), AsFloat(in.p[1]),
                      AsFloat(in.p[2]), AsFloat(in.p[3]), AsFloat(in.p[4]));
     s += "  float4 v0 = i.d0, v1 = i.d1;\n";
-    s += "  bool relight = sunControl.x > 0.5 && sunFlags.x > 0.5 && sunFlags.y < 0.5;\n";
+    s += v.material ? "  bool relight = sunControl.x > 0.5 && sunFlags.x > 0.5 && sunFlags.y < 0.5;\n"
+                    : "  bool relight = sunControl.x > 0.5 && sunFlags.x > 0.5 && sunFlags.y < 0.5 && (sunFlags.w == 1 || sunFlags.w == 2);\n";
     s += "  if (relight) { v0.rgb = 1; v1.rgb = 0; }\n";
     s += "  float4 r0 = 0, r1 = 0, t0 = 0, t1 = 0, t2 = 0, t3 = 0;\n";
     s += "  float m0 = 0, m1 = 0;\n";

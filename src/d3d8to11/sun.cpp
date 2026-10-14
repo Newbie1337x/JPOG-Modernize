@@ -566,6 +566,20 @@ void Device::UpdateSun(bool shadowPass)
     m_sun.control[1] = (float)g_config.lightingDebug;
     m_sun.control[2] = m_tessCandidate && !shadowPass ? 1.0f : 0.0f; // VS emits normals for the hull shader
     m_sun.camera[3] = g_config.normalStrength * (g_config.normalFlipGreen ? -1.0f : 1.0f);
+    // The game's own light colours for this draw (vs_000/vs_001: oD0 = (N.-c89 * c91 + c90) * c88;
+    // terrain vs_005: v0.w * c7 + c6). Other kinds fall back to the configured pilot light.
+    for (int k = 0; k < 3; k++) {
+        float amb = g_config.sunAmbient * 0.75f, sun = g_config.sunDirect * (k == 0 ? 1.0f : k == 1 ? 0.95f : 0.84f);
+        if (m_worldKind == 1) { amb = m_vsConst[90][k] * m_vsConst[88][k]; sun = m_vsConst[91][k] * m_vsConst[88][k]; }
+        else if (m_worldKind == 2) { amb = m_vsConst[6][k]; sun = m_vsConst[7][k]; }
+        m_sun.gameAmbient[k] = amb; m_sun.gameSun[k] = sun;
+    }
+    m_sun.gameAmbient[3] = g_config.relightTonemap ? 1.0f : 0.0f;
+    m_sun.gameSun[3] = g_config.replaceLighting ? 1.0f : 0.0f;
+    m_sun.relightParams[0] = g_config.relightSun;
+    m_sun.relightParams[1] = g_config.relightAmbient;
+    m_sun.relightParams[2] = g_config.relightSkyTint;
+    m_sun.relightParams[3] = g_config.relightExposure;
     if (!m_sunUploadedValid || memcmp(&m_sunUploaded, &m_sun, sizeof(m_sun))) {
         D3D11_MAPPED_SUBRESOURCE map;
         if (SUCCEEDED(m_ctx->Map(m_sunCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {

@@ -1,4 +1,34 @@
-# Replacement lighting: experimental first stage
+# Replacement lighting
+
+## Calibrated relighting (current)
+
+The replacement now starts from the game's own light, read per draw from the vertex shader
+constants, instead of invented colours:
+
+| Kind | Game light (vs_1_1) | Replacement |
+| --- | --- | --- |
+| 1 skinned (dinosaurs, trees, buildings, props), vs_000/vs_001 | `oD0 = (max(N . -c89, 0) * c91 + c90) * c88` | ambient `c90*c88`, sun `c91*c88`, our N and sun direction |
+| 2 terrain, vs_005 | `r9 = v0.w * c7 + c6` (v0.w: baked per-vertex sun factor) | ambient `c6`, sun `c7`, factor `v0.w` (VS passes it in t7.x) |
+| 3 rigid, vs_002 | `oD0 = vertex colour * c4` (pre-lit) | unchanged |
+| 4 grass, vs_010 | terrain colour map in t1 | unchanged |
+
+Lighting is evaluated in linear light (gamma 2.2): ambient `A^2.2`, sun `sat(A+S)^2.2 - sat(A)^2.2`
+(the game's vertex colour output is clamped to 1, so its brightest light is `saturate(A+S)`; without
+that clamp the terrain came out far too bright). Full sun
+and full shade therefore reproduce the original colours exactly; intermediate angles are summed
+physically. The ambient gets a sky/ground tint (`RelightSkyTint`: bluish on faces looking up, warm
+bounce on faces looking down). The terrain keeps the game's distance fade of its lighting under
+haze (`oD1.w`). The result goes through `RelightExposure` and, with `RelightTonemap=1`, a
+highlight-only shoulder above 0.8 (the hue-preserving shoulder of Khronos PBR Neutral, without its
+toe) so everything the game kept below 1 is unchanged. The fog lerp is applied afterwards, as the
+game does. With the replacement on, the material pilot also uses these light colours and output.
+
+Known limits: the terrain keeps the game's baked sun factor, so it only follows a sun direction
+close to the game's (`SunSource=game`); a day/night cycle needs real terrain normals (planned: a
+top-down height map rendered from the terrain draws). Cast shadows still come from the shadow
+resolve multiplying the whole colour, not only the sun term.
+
+## Earlier experimental stage
 
 Grass correction: preserve its second texture RGB. That channel contains
 terrain material colour as well as legacy lighting; whitening it made blades

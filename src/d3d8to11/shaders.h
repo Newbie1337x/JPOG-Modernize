@@ -105,6 +105,9 @@ struct SunConstants {
     float flags[4];    // lighting enabled, shadow pass, previous map ready, normal kind
     float control[4];  // replace original, debug view, reserved, reserved
     float camera[4];   // camera world position, w = normal map strength
+    float gameAmbient[4]; // the draw's own ambient light colour (gamma), w = highlight shoulder on
+    float gameSun[4];     // the draw's own sun light colour (gamma), w = replacement lighting on
+    float relightParams[4]; // sun scale, ambient scale, sky tint, exposure
 };
 
 struct WaterConstants {
