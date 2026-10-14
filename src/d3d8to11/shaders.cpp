@@ -352,7 +352,7 @@ std::string WaterPixelCode(int samples) {
 }
 std::string SunBlock(int slot) {
     return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera;"
-               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 grassGrade; };\n", slot);
+               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; };\n", slot);
 }
 // Normal maps (stage 0, t9): relief relative to the sun on top of the game's own lighting. No
 // tangents in JPOG's meshes, so the frame comes from screen-space derivatives of the world position
@@ -1143,7 +1143,7 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
         if (relief) s += "  color.rgb *= reliefShadow;\n"
                          "  if (sunControl.y == 12) color.rgb = reliefShadow;\n";
         if (deferredFog)
-            s += "  if (relight && sunControl.y == 0) color.rgb = lerp(color.rgb,i.d1.rgb,saturate(i.d1.w));\n";
+            s += "  if (relight && sunControl.y == 0) color.rgb = lerp(color.rgb,i.d1.rgb*fogTint.rgb,saturate(i.d1.w));\n";
         s += "  return color;\n}\n";
     }
     return s;

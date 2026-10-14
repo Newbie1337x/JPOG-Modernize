@@ -371,6 +371,9 @@ void Device::EvaluateTimeOfDay()
     float a[3], s[3];
     mix(dusk, day, dayW, a); mix(a, night, nightW, m_tod.ambient);
     mix(skyDusk, day, dayW, s); mix(s, skyNight, nightW, m_tod.sky);
+    // Distant haze: the game's daytime haze colour toward the night horizon.
+    const float fogNight[3] = { 0.24f, 0.30f, 0.38f };
+    mix(s, fogNight, nightW, m_tod.fog);
     auto lum = [](const float* c) { return 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2]; };
     // Eye adaptation: flat ground under a low sun or the moon receives little light; raise the
     // exposure toward the noon level (at most 2.2x) so dawn and night are not just dark.
@@ -706,6 +709,7 @@ void Device::UpdateSun(bool shadowPass)
     m_sun.grassGrade[0] = g_config.grassSaturation; m_sun.grassGrade[1] = g_config.grassBrightness;
     m_sun.grassGrade[2] = 0.08f + (m_tod.active ? g_config.moonRimGlow * m_tod.moon : 0.0f);
     m_sun.grassGrade[3] = g_config.replaceLighting ? 1.0f : 0.0f;
+    for (int k = 0; k < 3; k++) m_sun.fogTint[k] = m_tod.active ? m_tod.fog[k] : 1.0f;
     m_sun.todNight[3] = m_tod.active && !shadowPass && (m_worldDraw || (m_waterShaderDraw && m_rt == m_backBuffer)) ? 1.0f : 0.0f;
     if (!m_sunUploadedValid || memcmp(&m_sunUploaded, &m_sun, sizeof(m_sun))) {
         D3D11_MAPPED_SUBRESOURCE map;
