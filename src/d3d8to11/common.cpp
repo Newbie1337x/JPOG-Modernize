@@ -95,6 +95,8 @@ void LoadConfig()
     g_config.heightfieldLighting = GetPrivateProfileIntA("Lighting", "HeightfieldLighting", 1, ini.c_str()) != 0;
     g_config.horizonShadows = readFloat("HorizonShadows", 1, 0, 1);
     g_config.rimLight = readFloat("RimLight", 0.5f, 0, 2);
+    g_config.grassSaturation = readFloat("GrassSaturation", 0.8f, 0, 2);
+    g_config.grassBrightness = readFloat("GrassBrightness", 0.92f, 0, 2);
     auto readColor = [&](const char* key, float* c) {
         char value[96];
         GetPrivateProfileStringA("TimeOfDay", key, "", value, sizeof(value), ini.c_str());
@@ -118,6 +120,7 @@ void LoadConfig()
     g_config.stars = readTod("Stars", g_config.stars, 0, 4);
     g_config.moonSheen = readTod("MoonSheen", g_config.moonSheen, 0, 4);
     g_config.grassMoon = readTod("GrassMoon", g_config.grassMoon, 0, 4);
+    g_config.nightSurface = readTod("NightSurface", g_config.nightSurface, 0, 1);
     g_config.proceduralSky = GetPrivateProfileIntA("Lighting", "ProceduralSky", 1, ini.c_str()) != 0;
     g_config.timeOfDay = GetPrivateProfileIntA("TimeOfDay", "Preview", g_config.timeOfDay ? 1 : 0, ini.c_str()) != 0;
     g_config.timeOfDayHour = readTod("Hour", g_config.timeOfDayHour, 0, 24);
@@ -291,6 +294,8 @@ void SaveConfig()
     putInt("Lighting", "HeightfieldLighting", g_config.heightfieldLighting);
     putFloat("Lighting", "HorizonShadows", g_config.horizonShadows);
     putFloat("Lighting", "RimLight", g_config.rimLight);
+    putFloat("Lighting", "GrassSaturation", g_config.grassSaturation);
+    putFloat("Lighting", "GrassBrightness", g_config.grassBrightness);
     auto putColor = [&](const char* key, const float* c) {
         char b[96]; sprintf_s(b, "%.3f,%.3f,%.3f", c[0], c[1], c[2]); put("TimeOfDay", key, b);
     };
@@ -305,6 +310,7 @@ void SaveConfig()
     putFloat("TimeOfDay", "Stars", g_config.stars);
     putFloat("TimeOfDay", "MoonSheen", g_config.moonSheen);
     putFloat("TimeOfDay", "GrassMoon", g_config.grassMoon);
+    putFloat("TimeOfDay", "NightSurface", g_config.nightSurface);
     putInt("Lighting", "ProceduralSky", g_config.proceduralSky);
     putInt("TimeOfDay", "Preview", g_config.timeOfDay);
     putFloat("TimeOfDay", "Hour", g_config.timeOfDayHour);

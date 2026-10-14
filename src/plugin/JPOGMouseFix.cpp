@@ -596,6 +596,7 @@ typedef HRESULT(WINAPI* Reset_t)(void*, D3DPP8*);
 static bool g_forceWindowed = true;
 static bool g_profileD3D8 = false;
 static bool g_altF4 = true;
+static bool g_runInBackground = false;
 static Direct3DCreate8_t g_origCreate8 = nullptr;
 static CreateDevice_t g_origCreateDevice = nullptr;
 static Reset_t g_origReset = nullptr;
@@ -625,6 +626,9 @@ static LRESULT CALLBACK GameWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (g_altF4 && msg == WM_SYSKEYDOWN && wp == VK_F4)
         TerminateProcess(GetCurrentProcess(), 0);
+    // The game stops rendering when it is deactivated; hide that from it.
+    if (g_runInBackground && ((msg == WM_ACTIVATEAPP && !wp) || (msg == WM_ACTIVATE && LOWORD(wp) == WA_INACTIVE)))
+        return 0;
     return IsWindowUnicode(hwnd) ? CallWindowProcW(g_origWndProc, hwnd, msg, wp, lp)
                                  : CallWindowProcA(g_origWndProc, hwnd, msg, wp, lp);
 }
@@ -1169,6 +1173,7 @@ static void LoadConfig(HMODULE self)
     g_borderless = GetPrivateProfileIntA("Display", "Borderless", 1, path) != 0;
     g_forceWindowed = g_borderless; // borderless = forced windowed + no borders
     g_altF4 = GetPrivateProfileIntA("Display", "AltF4Quit", 1, path) != 0;
+    g_runInBackground = GetPrivateProfileIntA("Display", "RunInBackground", 0, path) != 0;
     g_freeKeyboard = GetPrivateProfileIntA("Display", "FreeKeyboard", 1, path) != 0;
 
     GetPrivateProfileStringA("Camera", "EdgeScrollVertical", "1.5", buf, sizeof(buf), path);

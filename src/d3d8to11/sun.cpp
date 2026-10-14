@@ -154,9 +154,11 @@ const char* kResolveMain =
     "float3 ProceduralSky(float3 dir) {\n"
     "  float el = -dir.y, sunEl = -tod2.y;\n"
     "  float3 night = lerp(float3(0.10, 0.16, 0.34), float3(0.03, 0.06, 0.17), saturate(el * 1.6)) * tod4.x;\n"
-    "  float2 cell = floor(float2(atan2(dir.z, dir.x) * 420, asin(saturate(el)) * 420));\n"
+    "  float2 sc = float2(atan2(dir.z, dir.x), asin(saturate(el))) * 900, cell = floor(sc);\n"
     "  float h = Hash(cell);\n"
-    "  night += step(0.9965, h) * saturate(el * 5) * (0.35 + 0.65 * Hash(cell + 7.3)) * float3(0.9, 0.95, 1) * tod4.y;\n"
+    "  float2 at = float2(Hash(cell + 3.1), Hash(cell + 5.7)) * 0.6 + 0.2;\n"
+    "  float star = step(0.993, h) * saturate(1 - length(frac(sc) - at) * 3.2);\n"
+    "  night += star * star * saturate(el * 5) * (0.3 + 0.9 * Hash(cell + 7.3)) * float3(0.9, 0.95, 1) * tod4.y;\n"
     "  float3 moonDir = -tod2.xyz; float m = saturate(dot(dir, moonDir));\n"
     "  night += tod3.x * (smoothstep(0.99955, 0.9998, m) * float3(1.0, 1.0, 0.95) * 1.4\n"
     "    + pow(m, 600) * float3(0.55, 0.62, 0.8) * 0.6 + pow(m, 24) * float3(0.10, 0.13, 0.20));\n"
@@ -372,7 +374,9 @@ void Device::EvaluateTimeOfDay()
     m_tod.exposure = key > 1e-3f ? 0.75f / key : g_config.maxExposure;
     m_tod.exposure = m_tod.exposure < 1 ? 1 : m_tod.exposure > g_config.maxExposure ? g_config.maxExposure : m_tod.exposure;
     for (int k = 0; k < 3; k++) {
-        float t = (m_tod.ambient[k] * 0.45f + m_tod.light[k] * 0.55f) * m_tod.exposure;
+        // Surfaces without normals (grass, water): the moon mostly lights their tips and edges.
+        const float lw = 0.55f * (1 - moonUp) + g_config.nightSurface * moonUp;
+        float t = (m_tod.ambient[k] * 0.45f + m_tod.light[k] * lw) * m_tod.exposure;
         m_tod.surface[k] = t > 1.1f ? 1.1f : t;
     }
     m_tod.sunLight = lum(m_tod.light);
@@ -693,6 +697,8 @@ void Device::UpdateSun(bool shadowPass)
     for (int k = 0; k < 3; k++) m_sun.rimColor[k] = m_tod.active ? m_tod.light[k] : warmWhite[k];
     m_sun.todSun[3] = m_tod.active ? m_tod.sheen : 0.0f;
     m_sun.rimColor[3] = m_tod.active ? g_config.grassMoon * m_tod.moon : 0.0f;
+    m_sun.grassGrade[0] = g_config.grassSaturation; m_sun.grassGrade[1] = g_config.grassBrightness;
+    m_sun.grassGrade[3] = g_config.replaceLighting ? 1.0f : 0.0f;
     m_sun.todNight[3] = m_tod.active && !shadowPass && (m_worldDraw || (m_waterShaderDraw && m_rt == m_backBuffer)) ? 1.0f : 0.0f;
     if (!m_sunUploadedValid || memcmp(&m_sunUploaded, &m_sun, sizeof(m_sun))) {
         D3D11_MAPPED_SUBRESOURCE map;

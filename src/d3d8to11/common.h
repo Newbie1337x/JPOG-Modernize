@@ -41,6 +41,8 @@ struct Config {
     bool heightfieldLighting = true; // [Lighting] HeightfieldLighting: terrain normals from the native height field
     float bakedTerrainDetail = 1.0f; // [Lighting] BakedTerrainDetail: keep the game's painted terrain darkening, 0..1
     float horizonShadows = 1.0f;    // [Lighting] HorizonShadows: hills shade the terrain behind them, 0..1
+    float grassSaturation = 0.8f;   // [Lighting] GrassSaturation (replacement lighting)
+    float grassBrightness = 0.92f;  // [Lighting] GrassBrightness (replacement lighting)
     float rimLight = 0.5f;          // [Lighting] RimLight: sunlit silhouettes (replacement lighting), 0..2
     // [TimeOfDay] look of the time-of-day preview (Insert panel, "Time of day tuning")
     float moonColor[3] = { 0.70f, 0.80f, 1.0f };
@@ -48,6 +50,7 @@ struct Config {
     float moonRim = 2.5f;
     float moonSheen = 1.0f;         // silver highlight of the moon on leaves and skin
     float grassMoon = 1.0f;         // moonlight on grass blade tips
+    float nightSurface = 0.2f;      // share of the moon on surfaces without normals (grass, water)
     float nightAmbient[3] = { 0.08f, 0.12f, 0.24f };
     float duskAmbient[3] = { 0.62f, 0.68f, 0.88f };
     float lowSunColor[3] = { 1.0f, 0.55f, 0.24f };

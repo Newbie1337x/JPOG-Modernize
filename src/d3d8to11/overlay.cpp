@@ -286,6 +286,8 @@ void Device::DrawOverlay()
             ImGui::SliderFloat("Moon rim", &g_config.moonRim, 0, 4, "%.2f");
             ImGui::SliderFloat("Moon sheen", &g_config.moonSheen, 0, 4, "%.2f");
             ImGui::SliderFloat("Moon on grass", &g_config.grassMoon, 0, 4, "%.2f");
+            ImGui::SliderFloat("Moon on flat surfaces", &g_config.nightSurface, 0, 1, "%.2f");
+            ImGui::SetItemTooltip("How much the moon lights grass and water as a whole (their tips and edges catch it separately).");
             ImGui::ColorEdit3("Night ambient", g_config.nightAmbient, ImGuiColorEditFlags_Float);
             ImGui::SliderFloat("Night sky", &g_config.nightSky, 0, 4, "%.2f");
             ImGui::SliderFloat("Stars", &g_config.stars, 0, 4, "%.2f");
@@ -526,6 +528,8 @@ void Device::DrawOverlay()
             ImGui::SetItemTooltip("Smooth terrain normals from the game's height field instead of its baked light.");
             ImGui::SliderFloat("Hill shadows", &g_config.horizonShadows, 0, 1, "%.2f");
             ImGui::SliderFloat("Rim light", &g_config.rimLight, 0, 2, "%.2f");
+            ImGui::SliderFloat("Grass saturation", &g_config.grassSaturation, 0, 2, "%.2f");
+            ImGui::SliderFloat("Grass brightness", &g_config.grassBrightness, 0, 2, "%.2f");
             ImGui::SetItemTooltip("The sun outlines silhouettes, mostly against the light. The moon's rim is separate.");
             ImGui::SliderFloat("Baked detail", &g_config.bakedTerrainDetail, 0, 1, "%.2f");
             ImGui::SetItemTooltip("Keeps the shading the game painted into the terrain (under trees, hollows).");

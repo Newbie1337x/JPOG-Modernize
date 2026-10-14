@@ -352,7 +352,7 @@ std::string WaterPixelCode(int samples) {
 }
 std::string SunBlock(int slot) {
     return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera;"
-               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; };\n", slot);
+               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 grassGrade; };\n", slot);
 }
 // Normal maps (stage 0, t9): relief relative to the sun on top of the game's own lighting. No
 // tangents in JPOG's meshes, so the frame comes from screen-space derivatives of the world position
@@ -617,6 +617,9 @@ std::string SunPixelCode() {
         // Grass (t7.x = blade height from the VS): moonlight catches the blade tips.
         "    if (sunFlags.w == 4) lit.rgb += color.rgb * rimColor.rgb * saturate(i.t7.x * 1.5) * rimColor.w;\n"
         "  }\n"
+        // Grass: the game's grass is a much more saturated green than its terrain.
+        "  if (sunFlags.w == 4 && sunFlags.y < 0.5 && grassGrade.w > 0.5)\n"
+        "    lit.rgb = lerp(dot(lit.rgb, float3(0.2126, 0.7152, 0.0722)).xxx, lit.rgb, grassGrade.x) * grassGrade.y;\n"
         "  return lit; }\n";
 }
 }
