@@ -22,7 +22,7 @@ struct VSOut {
   float fog : FOG;
   float3 world : TEXCOORD8; float3 normal : TEXCOORD9;
 };
-cbuffer Sun : register(b1) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera; float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; float4 specParams; };
+cbuffer Sun : register(b1) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera; float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; float4 specParams; float4 gameSunDir; };
 float3 ToLinear(float3 c) { return pow(max(c, 0), 2.2); }
 float3 Shoulder(float3 c) {
   const float start = 0.8; float peak = max(c.r, max(c.g, c.b));
@@ -72,8 +72,8 @@ float3 RimLight(float3 N, float3 world) {
 float4 RelightSurface(float4 color, VSOut i) {
   if (sunFlags.x < 0.5 || sunFlags.y > 0.5 || sunControl.x < 0.5) return color;
   bool grass = sunFlags.w == 4 && sunFlags.z > 0.5;
-  bool rigid = (sunFlags.w == 3 && sunFlags.z > 0.5) || grass;
-  if (sunFlags.w != 1 && sunFlags.w != 2 && !rigid) return color;
+  bool rigid = sunFlags.w == 3 && sunFlags.z > 0.5;
+  if (sunFlags.w != 1 && sunFlags.w != 2 && !rigid && !grass) return color;
   if (sunControl.y == 1) return color;
   float3 rawN = cross(ddy(i.world), ddx(i.world));
   if (sunFlags.w == 1 && dot(i.normal,i.normal) > 1e-8) rawN = i.normal;
@@ -96,10 +96,17 @@ float4 RelightSurface(float4 color, VSOut i) {
     float f = saturate((dot(baked, luma) - dot(A, luma)) / max(dot(S, luma), 1e-3));
     float3 tint = clamp(baked / max(saturate(A + S * f), 1e-3), 0, 2);
     float sunF = f;
-    if (field) sunF = grass ? fieldNdl * fieldShadow : fieldNdl * min(fieldShadow, lerp(1, fieldNdl > 0.05 ? saturate(f / fieldNdl) : 1, sunControl.w));
+    if (field) sunF = fieldNdl * min(fieldShadow, lerp(1, fieldNdl > 0.05 ? saturate(f / fieldNdl) : 1, sunControl.w));
     float3 light = GameAmbient(N) + GameSun() * sunF;
-    if (grass) light += GameSun() * saturate(i.t7.x * 1.5) * (rimColor.w + 0.25 * (1 - sunF));
     return float4(LinearToOutput(ToLinear(color.rgb * tint) * light), color.a);
+  }
+  if (grass) {
+    float gameNdl = field ? saturate(dot(N, normalize(gameSunDir.xyz))) : 1;
+    float3 base = ToLinear(saturate(gameAmbient.rgb + gameSun.rgb * gameNdl));
+    float sunF = field ? fieldNdl * fieldShadow : 1;
+    float3 light = GameAmbient(N) + GameSun() * sunF;
+    light += GameSun() * saturate(i.t7.x * 1.5) * rimColor.w;
+    return float4(LinearToOutput(ToLinear(color.rgb) * light / max(base, 0.05)), color.a);
   }
   float ndl = saturate(dot(N, sunDirection.xyz));
   if (sunFlags.w == 2) {
@@ -209,11 +216,12 @@ float4 main(VSOut i) : SV_Target {
   float m0 = 0, m1 = 0;
   t0 = tex0.Sample(smp0, (i.t0).xy);
   t1 = tex1.Sample(smp1, (i.t1).xy);
-  float4 q0 = (t0 * t1);
-  r0 = q0;
-  float4 q1 = ((relight ? r0 : lerp(r0, v1, v1.wwww)));
+  if (any(i.t2.xyz < 0.0)) discard;
+  float4 q0 = (lerp(t1, t0, cp[1].wwww));
+  r1 = q0;
+  float4 q1 = ((relight ? r1 : lerp(r1, v1, v1.wwww)));
   r0.xyz = q1.xyz;
-  float4 q2 = (r0.wwww * v0.wwww);
+  float4 q2 = (t0.wwww * v0.wwww);
   r0.w = q2.w;
   float4 color = saturate(r0);
   color = ApplyMaterial(color,i);
