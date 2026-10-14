@@ -113,7 +113,7 @@ struct SunConstants {
     float todAmbient[4];    // time of day: ambient colour multiplier, w = rim light strength
     float todNight[4];      // time of day: tint for surfaces that are not relit, w = apply to this draw
     float rimColor[4];      // rim light colour (sun or moon)
-    float grassGrade[4];    // grass with replacement lighting: saturation, brightness, -, w = on
+    float grassGrade[4];    // grass with replacement lighting: saturation, brightness, rim glow, w = on
 };
 
 struct WaterConstants {

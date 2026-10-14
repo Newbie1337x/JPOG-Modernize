@@ -283,7 +283,9 @@ void Device::DrawOverlay()
             ImGui::TextDisabled("Night");
             ImGui::ColorEdit3("Moon colour", g_config.moonColor, ImGuiColorEditFlags_Float);
             ImGui::SliderFloat("Moon light", &g_config.moonIntensity, 0, 3, "%.2f");
-            ImGui::SliderFloat("Moon rim", &g_config.moonRim, 0, 4, "%.2f");
+            ImGui::SliderFloat("Moon rim", &g_config.moonRim, 0, 8, "%.2f");
+            ImGui::SliderFloat("Moon rim glow", &g_config.moonRimGlow, 0, 2, "%.2f");
+            ImGui::SetItemTooltip("Bright moon outline added on top, even on dark skin.");
             ImGui::SliderFloat("Moon sheen", &g_config.moonSheen, 0, 4, "%.2f");
             ImGui::SliderFloat("Moon on grass", &g_config.grassMoon, 0, 4, "%.2f");
             ImGui::SliderFloat("Moon on flat surfaces", &g_config.nightSurface, 0, 1, "%.2f");
@@ -292,6 +294,7 @@ void Device::DrawOverlay()
             ImGui::SliderFloat("Night sky", &g_config.nightSky, 0, 4, "%.2f");
             ImGui::SliderFloat("Night exposure", &g_config.nightExposure, 0.1f, 2, "%.2f");
             ImGui::SliderFloat("Night desaturation", &g_config.nightDesaturate, 0, 1, "%.2f");
+            ImGui::ColorEdit3("Night tint", g_config.nightTint, ImGuiColorEditFlags_Float);
             ImGui::SliderFloat("Stars", &g_config.stars, 0, 4, "%.2f");
             ImGui::TextDisabled("Dawn and dusk");
             ImGui::ColorEdit3("Low sun colour", g_config.lowSunColor, ImGuiColorEditFlags_Float);

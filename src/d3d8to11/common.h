@@ -57,6 +57,8 @@ struct Config {
     float maxExposure = 1.5f;
     float nightSky = 1.0f;          // brightness of the procedural night sky
     float nightDesaturate = 0.4f;
+    float nightTint[3] = { 0.75f, 1.07f, 1.09f }; // colour the faded night takes (teal grey)
+    float moonRimGlow = 0.3f;       // moon outline added regardless of the surface colour
     float nightExposure = 1.0f;     // exposure under the moon (after eye adaptation)   // colours fade under the moon
     float stars = 1.0f;
     bool timeOfDay = false;         // Insert panel preview: drive the sun from an hour of the day

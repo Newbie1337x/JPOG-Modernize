@@ -33,6 +33,7 @@ struct ResolveConstants {
     float tod2[4];   // true sun direction (renderer Y-down), w = procedural sky weight
     float tod3[4];   // moon visibility, shadow tint rgb
     float tod4[4];   // night sky brightness, stars, day weight, night desaturation
+    float tod5[4];   // night tint
 };
 
 const char* kResolveVS =
@@ -45,7 +46,7 @@ const char* kResolveVS =
 const char* kSceneCommon =
     "cbuffer Resolve : register(b0) { float4 clipToWorld[4]; float4 lightRows[4]; float4 sunDir;\n"
     "  float4 params; float4 screen; float4 misc; float4 grade0; float4 grade1; float4 fx0; float4 fx1; float4 tod;\n"
-    "  float4 tod2; float4 tod3; float4 tod4; };\n"
+    "  float4 tod2; float4 tod3; float4 tod4; float4 tod5; };\n"
     "#if MSAA\n"
     "Texture2DMS<float> sceneDepth : register(t0);\n"
     "float LoadDepth(int2 p) { return sceneDepth.Load(p, 0); }\n"
@@ -222,7 +223,7 @@ const char* kResolveMain =
     "  c += float3(1.0, 0.9, 0.72) * fx.y * fx0.w * tod.w;\n"
     "  if (!sky && tod4.w > 0) {\n" // moonlight: colours fade, toward a cool grey
     "    float l = dot(c, float3(0.2126, 0.7152, 0.0722));\n"
-    "    c = lerp(c, l * float3(0.80, 1.0, 1.06), tod4.w);\n"
+    "    c = lerp(c, l * tod5.rgb, tod4.w);\n"
     "  }\n"
     "  if (sky) {\n"
     "    c *= tod.rgb;\n"
@@ -703,6 +704,7 @@ void Device::UpdateSun(bool shadowPass)
     m_sun.todSun[3] = m_tod.active ? m_tod.sheen : 0.0f;
     m_sun.rimColor[3] = m_tod.active ? g_config.grassMoon * m_tod.moon : 0.0f;
     m_sun.grassGrade[0] = g_config.grassSaturation; m_sun.grassGrade[1] = g_config.grassBrightness;
+    m_sun.grassGrade[2] = 0.08f + (m_tod.active ? g_config.moonRimGlow * m_tod.moon : 0.0f);
     m_sun.grassGrade[3] = g_config.replaceLighting ? 1.0f : 0.0f;
     m_sun.todNight[3] = m_tod.active && !shadowPass && (m_worldDraw || (m_waterShaderDraw && m_rt == m_backBuffer)) ? 1.0f : 0.0f;
     if (!m_sunUploadedValid || memcmp(&m_sunUploaded, &m_sun, sizeof(m_sun))) {
@@ -793,6 +795,7 @@ void Device::ResolveSun(const char* reason)
     for (int k = 0; k < 3; k++) rc.tod3[k + 1] = m_tod.active ? m_tod.shadowTint[k] : defaultTint[k];
     rc.tod4[0] = g_config.nightSky; rc.tod4[1] = g_config.stars;
     rc.tod4[3] = m_tod.active ? g_config.nightDesaturate * m_tod.moon : 0.0f;
+    for (int k = 0; k < 3; k++) rc.tod5[k] = g_config.nightTint[k];
     D3D11_MAPPED_SUBRESOURCE map;
     if (FAILED(m_ctx->Map(m_resolveCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
     memcpy(map.pData, &rc, sizeof(rc));

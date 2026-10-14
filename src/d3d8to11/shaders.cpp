@@ -600,7 +600,7 @@ std::string SunPixelCode() {
         "  }\n"
         // The terrain shader fades its lighting out under distant haze; keep that.
         "  if (sunFlags.w == 2) light = lerp(light, 1, saturate(i.d1.w));\n"
-        "  return float4(LinearToOutput(ToLinear(color.rgb) * light + rim * 0.08 + sheen * 0.5), color.a);\n"
+        "  return float4(LinearToOutput(ToLinear(color.rgb) * light + rim * grassGrade.z + sheen * 0.5), color.a);\n"
         "}\n"
         "float4 ApplySun(float4 color, VSOut i) {\n"
         "  if (sunControl.y == 13 && sunFlags.y < 0.5) {\n"

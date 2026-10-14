@@ -113,8 +113,10 @@ void LoadConfig()
     readColor("NightAmbient", g_config.nightAmbient);
     readColor("DuskAmbient", g_config.duskAmbient);
     readColor("LowSunColor", g_config.lowSunColor);
+    readColor("NightTint", g_config.nightTint);
     g_config.moonIntensity = readTod("MoonIntensity", g_config.moonIntensity, 0, 3);
-    g_config.moonRim = readTod("MoonRim", g_config.moonRim, 0, 4);
+    g_config.moonRim = readTod("MoonRim", g_config.moonRim, 0, 8);
+    g_config.moonRimGlow = readTod("MoonRimGlow", g_config.moonRimGlow, 0, 2);
     g_config.maxExposure = readTod("MaxExposure", g_config.maxExposure, 1, 6);
     g_config.nightSky = readTod("NightSky", g_config.nightSky, 0, 4);
     g_config.nightExposure = readTod("NightExposure", g_config.nightExposure, 0.1f, 2);
@@ -305,8 +307,10 @@ void SaveConfig()
     putColor("NightAmbient", g_config.nightAmbient);
     putColor("DuskAmbient", g_config.duskAmbient);
     putColor("LowSunColor", g_config.lowSunColor);
+    putColor("NightTint", g_config.nightTint);
     putFloat("TimeOfDay", "MoonIntensity", g_config.moonIntensity);
     putFloat("TimeOfDay", "MoonRim", g_config.moonRim);
+    putFloat("TimeOfDay", "MoonRimGlow", g_config.moonRimGlow);
     putFloat("TimeOfDay", "MaxExposure", g_config.maxExposure);
     putFloat("TimeOfDay", "NightSky", g_config.nightSky);
     putFloat("TimeOfDay", "NightExposure", g_config.nightExposure);
