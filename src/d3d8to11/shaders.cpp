@@ -386,6 +386,64 @@ std::string NormalMapCode() {
         "  return float4(color.rgb * clamp(relief, 0.35, 1.7), color.a); }\n";
 }
 
+// Skin relief (stage 0): height from the colour texture's local luminance (bright = raised, the
+// same estimate as the normal maps and the tessellation displacement). ReliefApply runs first in
+// main: it shifts i.t0 by offset-limited parallax and marches the height field toward the sun for
+// self-shadowing. The tangent frame comes from screen derivatives like the normal maps; steps are
+// taken in texels of the mip being displayed so the result does not shimmer with distance.
+std::string ReliefCode() {
+    return
+        "cbuffer Relief : register(b4) { float4 reliefParams; };\n"
+        "float ReliefHeight(float2 uv, float lod) {\n"
+        "  const float3 luma = float3(0.299, 0.587, 0.114);\n"
+        "  float fine = dot(tex0.SampleLevel(smp0, uv, lod).rgb, luma);\n"
+        "  float coarse = dot(tex0.SampleLevel(smp0, uv, lod + 3).rgb, luma);\n"
+        "  return clamp((fine - coarse) * 3, -1, 1); }\n"
+        "float ReliefApply(inout VSOut i) {\n"
+        "  float3 dp1 = ddx(i.world), dp2 = ddy(i.world);\n"
+        "  float2 uv1 = ddx(i.t0.xy), uv2 = ddy(i.t0.xy);\n"
+        "  float3 N = cross(dp1, dp2); float gl = dot(N, N);\n"
+        "  if (gl < 1e-20 || sunFlags.y > 0.5) return 1;\n"
+        "  N *= rsqrt(gl);\n"
+        "  float3 eye = sunCamera.xyz - i.world;\n"
+        "  if (dot(N, eye) < 0) N = -N;\n"
+        "  float3 a = cross(dp2, N), b = cross(N, dp1);\n"
+        "  float3 T = a * uv1.x + b * uv2.x, B = a * uv1.y + b * uv2.y;\n"
+        "  if (dot(T, T) < 1e-20 || dot(B, B) < 1e-20) return 1;\n"
+        "  T = normalize(T); B = normalize(B);\n"
+        "  uint w, h; tex0.GetDimensions(w, h);\n"
+        "  float2 size = float2(max(w, 1), max(h, 1));\n"
+        // Displayed mip from the derivatives (CalculateLevelOfDetail needs ps_4_1).
+        "  float lod = max(0.5 * log2(max(dot(uv1 * size, uv1 * size), dot(uv2 * size, uv2 * size))), 0);\n"
+        "  float2 texel = exp2(lod) / size;\n"
+        "  float depth = reliefParams.x;\n" // texels per unit height, sign = invert
+        // Offset-limited parallax, three refinements: shift toward the viewer by the height.
+        "  if (reliefParams.y > 0) {\n"
+        "    float3 V = normalize(eye);\n"
+        "    float2 dir = float2(dot(V, T), dot(V, B)) / max(dot(V, N), 0.35);\n"
+        "    float2 uv = i.t0.xy;\n"
+        "    [unroll] for (int k = 0; k < 3; k++)\n"
+        "      uv = i.t0.xy + dir * (ReliefHeight(uv, lod) * depth * reliefParams.y * 0.5) * texel;\n"
+        "    i.t0.xy = uv;\n"
+        "  }\n"
+        // Self-shadowing: march toward the sun; occluded when the field rises above the ray.
+        "  if (reliefParams.z <= 0) return 1;\n"
+        "  float3 L = normalize(sunDirection.xyz);\n"
+        "  float3 Lt = float3(dot(L, T), dot(L, B), dot(L, N));\n"
+        "  if (Lt.z <= 0.02) return 1;\n" // facing away: the game's own shading already handles it
+        "  float horiz = length(Lt.xy);\n"
+        "  if (horiz < 1e-3) return 1;\n"
+        "  float2 dir = Lt.xy / horiz; float slope = Lt.z / horiz;\n"
+        "  float h0 = ReliefHeight(i.t0.xy, lod) * depth;\n"
+        "  float occl = 0;\n"
+        "  [unroll] for (int s = 1; s <= 8; s++) {\n"
+        "    float dist = s * 0.75;\n"
+        "    float hs = ReliefHeight(i.t0.xy + dir * dist * texel, lod) * depth;\n"
+        "    occl = max(occl, saturate((hs - (h0 + dist * slope)) / reliefParams.w) * (1 - s / 9.0));\n"
+        "  }\n"
+        "  return 1 - occl * reliefParams.z * saturate(Lt.z * 6); }\n";
+}
+
 std::string MaterialCode(bool normalMap, int stage){
     std::string s=
         "cbuffer Material:register(b3){float4 materialSurface;float4 materialOptics;};\n"
@@ -827,7 +885,10 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
     if (v.water) s += WaterPixelCode(v.waterSamples);
     if (v.normalMap && v.texDim[v.material?v.material-1:0] == 2) s += NormalMapCode();
     if(v.material)s+=MaterialCode(v.normalMap && v.texDim[v.material-1]==2,v.material-1);
+    const bool relief = v.relief && !v.shadowOnly && v.texDim[0] == 2;
+    if (relief) s += ReliefCode();
     s += v.shadowOnly ? "void main(VSOut i) {\n" : "float4 main(VSOut i) : SV_Target {\n";
+    s += relief ? "  float reliefShadow = ReliefApply(i);\n" : "";
     s += "  float4 cp[8] = c;\n";
     for (const Instr& in : code)
         if (in.op == OP_DEF)
@@ -960,6 +1021,8 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
             if (v.normalMap && v.texDim[0] == 2) s += "  color = ApplyNormalMap(color,i);\n";
             s += "  color = ApplySun(color,i);\n";
         }
+        if (relief) s += "  color.rgb *= reliefShadow;\n"
+                         "  if (sunControl.y == 12) color.rgb = reliefShadow;\n";
         if (deferredFog)
             s += "  if (relight && sunControl.y == 0) color.rgb = lerp(color.rgb,i.d1.rgb,saturate(i.d1.w));\n";
         s += "  return color;\n}\n";
@@ -1076,11 +1139,12 @@ std::string GenerateFFPS(const FFKey& k)
 
 namespace {
 const char* kTessCommon =
-    "cbuffer Tess : register(b5) { float4 tessViewProj[4]; float4 tessParams; float4 tessScreen; };\n"
+    "cbuffer Tess : register(b5) { float4 tessViewProj[4]; float4 tessParams; float4 tessScreen; float4 tessDisplace; };\n"
     "struct PatchConst {\n"
     "  float edges[3] : SV_TessFactor; float inside : SV_InsideTessFactor;\n"
     "  float3 b210 : B210; float3 b120 : B120; float3 b021 : B021;\n"
     "  float3 b012 : B012; float3 b102 : B102; float3 b201 : B201; float3 b111 : B111;\n"
+    "  float3 n110 : N110; float3 n011 : N011; float3 n101 : N101;\n"
     "};\n";
 }
 
@@ -1093,11 +1157,28 @@ std::string TessellationHS(bool flipWinding)
         // Control point near pi on edge pi-pj, projected onto the tangent plane at pi.
         "float3 EdgePoint(float3 pi, float3 pj, float3 ni) { return (2 * pi + pj - dot(pj - pi, ni) * tessParams.z * ni) / 3; }\n"
         "float2 ToPixels(float4 p) { return p.xy / p.w * tessScreen.xy * 0.5; }\n"
+        // Mid-edge normal of the quadratic normal patch, reflected across the edge's mid-plane.
+        "float3 EdgeNormal(float3 pi, float3 pj, float3 ni, float3 nj) {\n"
+        "  float3 d = pj - pi; float dd = dot(d, d);\n"
+        "  float k = dd > 1e-12 ? 2 * dot(d, ni + nj) / dd : 0;\n"
+        "  return SafeNormal(ni + nj - k * d); }\n"
         "float EdgeFactor(float4 a, float4 b) {\n"
         "  if (a.w <= 1e-4 || b.w <= 1e-4) return 1;\n"
         "  return clamp(length(ToPixels(a) - ToPixels(b)) / tessParams.y, 1, tessParams.x); }\n"
-        "PatchConst Constants(InputPatch<VSOut, 3> p) {\n"
+        // Patches carry 6 points: the triangle and, for each corner, the first vertex of the draw at
+        // the same bind-pose position (tessellation.cpp). Split vertices (UV seams, hard edges) then
+        // curve shared edges from the same data on both sides, so no cracks open between them.
+        "VSOut Weld(InputPatch<VSOut, 6> p, uint i) {\n"
+        "  VSOut v = p[i];\n"
+        "  float3 d = p[i + 3].world - v.world;\n"
+        "  if (tessDisplace.w > 0.5 && dot(d, d) < 1e-4) {\n"
+        "    v.world = p[i + 3].world; v.normal = p[i + 3].normal;\n"
+        "    v.pos += float4(dot(d, tessViewProj[0].xyz), dot(d, tessViewProj[1].xyz), dot(d, tessViewProj[2].xyz), dot(d, tessViewProj[3].xyz));\n"
+        "  }\n"
+        "  return v; }\n"
+        "PatchConst Constants(InputPatch<VSOut, 6> ip) {\n"
         "  PatchConst o;\n"
+        "  VSOut p[3] = { Weld(ip, 0), Weld(ip, 1), Weld(ip, 2) };\n"
         // Locals, not o.edges[], for the inside factor: reading the outputs back trips fxc.
         "  float e0 = EdgeFactor(p[1].pos, p[2].pos), e1 = EdgeFactor(p[2].pos, p[0].pos), e2 = EdgeFactor(p[0].pos, p[1].pos);\n"
         "  o.edges[0] = e0; o.edges[1] = e1; o.edges[2] = e2;\n"
@@ -1109,11 +1190,12 @@ std::string TessellationHS(bool flipWinding)
         "  o.b102 = EdgePoint(P2, P0, N2); o.b201 = EdgePoint(P0, P2, N0);\n"
         "  float3 E = (o.b210 + o.b120 + o.b021 + o.b012 + o.b102 + o.b201) / 6, V = (P0 + P1 + P2) / 3;\n"
         "  o.b111 = E + (E - V) / 2;\n"
+        "  o.n110 = EdgeNormal(P0, P1, N0, N1); o.n011 = EdgeNormal(P1, P2, N1, N2); o.n101 = EdgeNormal(P2, P0, N2, N0);\n"
         "  return o; }\n";
     s += std::string("[domain(\"tri\")] [partitioning(\"fractional_odd\")] [outputtopology(\"") +
          (flipWinding ? "triangle_ccw" : "triangle_cw") + "\")]\n";
     s += "[outputcontrolpoints(3)] [patchconstantfunc(\"Constants\")] [maxtessfactor(16.0)]\n"
-         "VSOut main(InputPatch<VSOut, 3> p, uint i : SV_OutputControlPointID) { return p[i]; }\n";
+         "VSOut main(InputPatch<VSOut, 6> p, uint i : SV_OutputControlPointID) { return Weld(p, i); }\n";
     return s;
 }
 
@@ -1122,6 +1204,8 @@ std::string TessellationDS()
     std::string s = kVSOutputStruct;
     s += kTessCommon;
     s +=
+        "Texture2D heightTex : register(t0); SamplerState heightSmp : register(s0);\n"
+        "float3 SafeNormalDS(float3 n) { float l = dot(n, n); return l > 1e-12 ? n * rsqrt(l) : 0; }\n"
         "[domain(\"tri\")]\n"
         "VSOut main(PatchConst c, float3 b : SV_DomainLocation, const OutputPatch<VSOut, 3> p) {\n"
         "  float u = b.x, v = b.y, w = b.z;\n"
@@ -1135,6 +1219,20 @@ std::string TessellationDS()
         "    + c.b210 * (3 * u * u * v) + c.b120 * (3 * u * v * v) + c.b201 * (3 * u * u * w)\n"
         "    + c.b021 * (3 * v * v * w) + c.b102 * (3 * u * w * w) + c.b012 * (3 * v * w * w)\n"
         "    + c.b111 * (6 * u * v * w);\n"
+        "  float3 n = SafeNormalDS(SafeNormalDS(p[0].normal) * u * u + SafeNormalDS(p[1].normal) * v * v + SafeNormalDS(p[2].normal) * w * w\n"
+        "    + c.n110 * u * v + c.n011 * v * w + c.n101 * u * w);\n"
+        "  if (dot(n, n) > 0) o.normal = n;\n"
+        // tessDisplace: x world height scale (signed, 0 = off), y detail mip, z seam fade.
+        "  if (tessDisplace.x != 0 && dot(n, n) > 0) {\n"
+        "    const float3 luma = float3(0.299, 0.587, 0.114);\n"
+        "    float fine = dot(heightTex.SampleLevel(heightSmp, o.t0.xy, tessDisplace.y).rgb, luma);\n"
+        "    float coarse = dot(heightTex.SampleLevel(heightSmp, o.t0.xy, tessDisplace.y + 4).rgb, luma);\n"
+        "    float h = clamp((fine - coarse) * 2, -1, 1);\n"
+        // Triangles meeting at a UV seam read different heights: keep the original edges on the
+        // PN surface so no cracks open there.
+        "    float seam = tessDisplace.z > 0.5 ? saturate(min(u, min(v, w)) * 6) : 1;\n"
+        "    pn += n * (h * tessDisplace.x * seam);\n"
+        "  }\n"
         "  float4 d = float4(pn - o.world, 0);\n"
         "  o.world = pn;\n"
         "  o.pos += float4(dot(d, tessViewProj[0]), dot(d, tessViewProj[1]), dot(d, tessViewProj[2]), dot(d, tessViewProj[3]));\n"

@@ -91,6 +91,17 @@ struct Config {
     float tessPixels = 10.0f;       // [Tessellation] PixelsPerEdge: target screen length of a sub-edge
     float tessCurvature = 1.0f;     // [Tessellation] Curvature: 0 flat .. 1 full PN curvature
     bool tessFlipWinding = false;   // [Tessellation] FlipWinding: if tessellated models look inside out
+    float tessDisplacement = 0.03f; // [Tessellation] Displacement: relief height in world units, 0 = off
+    float tessDetailMip = 0.0f;     // [Tessellation] DetailMip: texture mip the relief reads (higher = softer)
+    bool tessInvertRelief = false;  // [Tessellation] InvertRelief: dark raised instead of bright
+    bool reliefEnabled = true;      // [Relief] Enabled: parallax + self-shadowing on dinosaur skins
+    float reliefDepth = 3.0f;       // [Relief] Depth: height range in texels
+    float reliefParallax = 0.5f;    // [Relief] Parallax: 0 = shadows only .. 1 = full view-dependent shift
+    float reliefShadow = 0.6f;      // [Relief] SelfShadow: 0 off .. 1 full
+    float reliefSoftness = 1.0f;    // [Relief] Softness: penumbra width in texels
+    bool reliefInvert = false;      // [Relief] Invert: dark raised instead of bright
+    bool tessSeamSafe = true;
+    bool tessWeld = true;           // [Tessellation] WeldSeams: split vertices share one curve (no cracks)       // [Tessellation] SeamSafe: fade relief at the original edges (no cracks)
     // [Grass] creatures bend and flatten the grass around them
     bool grassPhysics = true;       // [Grass] Enabled
     float grassPush = 0.8f;         // [Grass] Push: sideways bend, in blade heights

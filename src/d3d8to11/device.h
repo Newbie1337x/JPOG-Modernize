@@ -257,14 +257,20 @@ private:
     int ActiveMaterial() const;
     int MaterialTextureStage() const;
     bool PrepareMaterial();
+    void PrepareRelief();           // relief.cpp: decides v.relief and binds cbuffer b4
+    bool m_reliefActive = false;
+    ComPtr<ID3D11Buffer> m_reliefCB;
+    UINT m_reliefDraws = 0, m_reliefDrawsShown = 0;
     // PN-triangle tessellation of eligible skinned draws (tessellation.cpp).
     bool TessellationCandidate() const;
     bool BeginTessellation(DWORD type, D3D11_PRIMITIVE_TOPOLOGY& topo);
     void EndTessellation();
+    void DrawTessellated(const std::vector<UINT>& list, INT baseVertex);
     bool m_tessCandidate=false, m_tessFailed=false, m_tessBuiltFlip=false;
     ComPtr<ID3D11HullShader> m_tessHS;
     ComPtr<ID3D11DomainShader> m_tessDS;
     ComPtr<ID3D11Buffer> m_tessCB;
+    ComPtr<ID3D11SamplerState> m_tessSampler;
     UINT m_tessDraws=0, m_tessDrawsShown=0;
     void TrackSkinTexture();
     // Skin picker (Insert panel): distinct stage-0 textures of skinned world draws, in draw order.

@@ -1111,6 +1111,7 @@ ID3D11PixelShader* Device::GetPixelShader()
         v.a2c = AlphaToCoverageActive() ? 1 : 0;
         v.normalMap = ActiveNormalMap() ? 1 : 0;
         v.material = ActiveMaterial() ? BYTE(MaterialTextureStage()+1):0;
+        v.relief = m_reliefActive ? 1 : 0;
         v.water = m_waterDraw ? 1 : 0;
         v.waterSamples = m_waterDraw && m_waterSamples>1 ? (BYTE)m_waterSamples : 0;
         if (v.normalMap) LogOnce(std::string("nm-draw-") + std::to_string(m_vsHandle) + "-" + std::to_string(m_psHandle),
@@ -1291,6 +1292,7 @@ bool Device::PrepareDraw()
     ID3D11ShaderResourceView* normalMap = ActiveNormalMap();
     m_ctx->PSSetShaderResources(9, 1, &normalMap);
     if(!PrepareMaterial())return false;
+    PrepareRelief();
     m_ctx->PSSetSamplers(0, kMaxStages, samplers);
 
     ID3D11PixelShader* ps = GetPixelShader();
@@ -1412,19 +1414,17 @@ HRESULT Device::DrawPrimitive(DWORD type, UINT start, UINT primCount)
         DrawSunShadow(true, count, 0, (INT)start);
         return S_OK;
     }
-    if (tess && type == D8PT_TRIANGLESTRIP) {
-        std::vector<UINT> strip(count);
-        for (UINT i = 0; i < count; i++) strip[i] = i;
-        std::vector<UINT> list = StripToList(strip);
-        UploadDynamicIndices(list.data(), (UINT)list.size() * 4, DXGI_FORMAT_R32_UINT);
-        m_ctx->DrawIndexed((UINT)list.size(), 0, (INT)start);
+    if (tess) {
+        // Patches are drawn from an index list (strips expanded, see DrawTessellated).
+        std::vector<UINT> seq(count);
+        for (UINT i = 0; i < count; i++) seq[i] = i;
+        DrawTessellated(type == D8PT_TRIANGLESTRIP ? StripToList(seq) : seq, (INT)start);
         EndTessellation();
-        m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        if (type == D8PT_TRIANGLESTRIP) m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         DrawSunShadow(false, count, start, 0);
         return S_OK;
     }
     m_ctx->Draw(count, start);
-    if (tess) EndTessellation();
     DrawSunShadow(false, count, start, 0);
     return S_OK;
 }
@@ -1452,22 +1452,18 @@ HRESULT Device::DrawIndexedPrimitive(DWORD type, UINT minIndex, UINT numVertices
         return S_OK;
     }
     ID3D11Buffer* ib = m_indices->m_impl.m_buf.Get();
-    if (tess && type == D8PT_TRIANGLESTRIP) {
-        // Patches need a list: expand the strip from the CPU copy of the index buffer.
+    if (tess) {
+        // Patches are drawn from an index list read from the CPU copy of the index buffer.
         const UINT isz = fmt == DXGI_FORMAT_R32_UINT ? 4 : 2;
-        std::vector<UINT> strip(primCount + 2);
+        std::vector<UINT> idx(count);
         const BYTE* src = m_indices->m_impl.m_shadow.data() + (size_t)startIndex * isz;
-        if (m_indices->m_impl.m_shadow.size() >= ((size_t)startIndex + strip.size()) * isz) {
-            for (UINT i = 0; i < strip.size(); i++) strip[i] = isz == 4 ? ((const UINT*)src)[i] : ((const WORD*)src)[i];
-            std::vector<UINT> list = StripToList(strip);
-            if (!list.empty()) {
-                UploadDynamicIndices(list.data(), (UINT)list.size() * 4, DXGI_FORMAT_R32_UINT);
-                m_ctx->DrawIndexed((UINT)list.size(), 0, (INT)m_baseVertex);
-            }
+        if (m_indices->m_impl.m_shadow.size() >= ((size_t)startIndex + idx.size()) * isz) {
+            for (UINT i = 0; i < idx.size(); i++) idx[i] = isz == 4 ? ((const UINT*)src)[i] : ((const WORD*)src)[i];
+            DrawTessellated(type == D8PT_TRIANGLESTRIP ? StripToList(idx) : idx, (INT)m_baseVertex);
         }
         EndTessellation();
-        // The shadow redraw uses the game's own strip.
-        m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        // The shadow redraw uses the game's own indices and topology.
+        if (type == D8PT_TRIANGLESTRIP) m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         m_ctx->IASetIndexBuffer(ib, fmt, 0);
         m_lastIB = ib;
         m_lastIBFormat = fmt;
@@ -1480,7 +1476,6 @@ HRESULT Device::DrawIndexedPrimitive(DWORD type, UINT minIndex, UINT numVertices
         m_lastIBFormat = fmt;
     }
     m_ctx->DrawIndexed(count, startIndex, (INT)m_baseVertex);
-    if (tess) EndTessellation();
     DrawSunShadow(true, count, startIndex, (INT)m_baseVertex);
     return S_OK;
 }
@@ -1667,7 +1662,8 @@ HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
     m_perf.limiterMs=(perfStart.QuadPart-perfEnd.QuadPart)*1000.0/m_qpcFreq.QuadPart;
     RecordPerformance();
     m_perfDraws=m_perfWaterDraws=m_perfShadowDraws=0;
-    m_tessDrawsShown=m_tessDraws;m_tessDraws=0;
+    m_tessDrawsShown=m_tessDraws; m_tessDraws=0;
+    m_reliefDrawsShown=m_reliefDraws; m_reliefDraws=0;
     ApplyMsaa(); // after the frame is shown: the rebuilt back buffer starts empty
     m_frame++;
 

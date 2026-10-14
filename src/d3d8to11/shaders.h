@@ -41,6 +41,7 @@ struct PSVariant {
     BYTE water = 0;
     BYTE waterSamples = 0; // copied scene depth: 0 single sample, otherwise 2/4/8
     BYTE material=0;
+    BYTE relief = 0;    // stage-0 skin parallax + self-shadowing (cbuffer b4)
     bool operator==(const PSVariant& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
 };
 std::string TranslatePS(const DWORD* func, const PSVariant& variant, std::string& error);
@@ -71,6 +72,7 @@ struct TessConstants {
     float viewProj[4][4]; // camera world -> clip rows (terrain c0..c3)
     float params[4];      // max factor, target pixels per sub-edge, curvature, unused
     float screen[4];      // viewport width, height
+    float displace[4];    // world relief scale (signed, 0 = off), detail mip, seam fade, weld split vertices
 };
 // optimize = false compiles with D3DCOMPILE_SKIP_OPTIMIZATION (see the tessellation hull shader).
 ComPtr<ID3DBlob> CompileHLSL(const std::string& source, const char* profile, const std::string& debugName, bool optimize = true);
@@ -84,6 +86,10 @@ struct PSConstants {
     float bumpLum[kMaxStages][4];   // scale, offset
     float fogColor[4];
     float fogParams[4];             // start, end, 1/(end-start), enabled
+};
+
+struct ReliefConstants {
+    float params[4];  // depth (texels, signed), parallax 0..1, self-shadow 0..1, softness (texels)
 };
 
 struct VSExtraConstants {

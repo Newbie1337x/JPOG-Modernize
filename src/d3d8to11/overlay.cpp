@@ -53,7 +53,8 @@ void AnglesFromSun(float x, float yUp, float z)
 
 const char* kDebugViews[] = { "Off", "Albedo (replacement)", "Normals (replacement)", "Shadow mask",
                               "Depth normals", "Mask + shadow map", "World grid", "Raw visibility",
-                              "Dump one frame", "Ambient occlusion only", "Light shafts only", "Normal maps (world normals)" };
+                              "Dump one frame", "Ambient occlusion only", "Light shafts only", "Normal maps (world normals)",
+                              "Skin relief self-shadow" };
 
 } // namespace
 
@@ -363,10 +364,32 @@ void Device::DrawOverlay()
             ImGui::SliderFloat("Pixels per edge", &g_config.tessPixels, 2, 64, "%.0f");
             ImGui::SetItemTooltip("Smaller = more triangles. Edges are split until a piece is about this long on screen.");
             ImGui::SliderFloat("Curvature", &g_config.tessCurvature, 0, 1.5f, "%.2f");
+            ImGui::Checkbox("Weld split vertices", &g_config.tessWeld);
+            ImGui::SetItemTooltip("Vertices duplicated at seams share one curve, so limbs do not crack open.");
             ImGui::Checkbox("Flip winding", &g_config.tessFlipWinding);
             ImGui::SetItemTooltip("Enable if tessellated models look inside out.");
+            ImGui::SliderFloat("Relief height", &g_config.tessDisplacement, 0, 0.2f, "%.3f");
+            ImGui::SetItemTooltip("Real displacement from the texture, in world units. 0 = off.");
+            ImGui::SliderFloat("Relief softness", &g_config.tessDetailMip, 0, 4, "%.1f");
+            ImGui::Checkbox("Invert relief", &g_config.tessInvertRelief);
+            ImGui::Checkbox("Seam-safe relief", &g_config.tessSeamSafe);
+            ImGui::SetItemTooltip("Fades the relief at the original triangle edges so texture seams cannot crack.");
             ImGui::Text("%u tessellated draws this frame", m_tessDrawsShown);
             if (m_tessFailed) ImGui::TextColored(ImVec4(1, .6f, .2f, 1), "Tessellation disabled after a failure: see the log.");
+        }
+        if (ImGui::CollapsingHeader("Skin relief (parallax)", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Parallax and self-shadowing on dinosaur skins", &g_config.reliefEnabled);
+            ImGui::BeginDisabled(!g_config.reliefEnabled);
+            ImGui::SliderFloat("Depth (texels)", &g_config.reliefDepth, 0.5f, 12, "%.1f");
+            ImGui::SetItemTooltip("Height of the brightest detail above the darkest, in texture pixels.");
+            ImGui::SliderFloat("Parallax", &g_config.reliefParallax, 0, 1, "%.2f");
+            ImGui::SetItemTooltip("How much the texture shifts with the view angle. 0 = only shadows.");
+            ImGui::SliderFloat("Self-shadow", &g_config.reliefShadow, 0, 1, "%.2f");
+            ImGui::SetItemTooltip("Scales and folds shade their neighbours away from the sun.");
+            ImGui::SliderFloat("Shadow softness", &g_config.reliefSoftness, 0.25f, 4, "%.2f");
+            ImGui::Checkbox("Invert height", &g_config.reliefInvert);
+            ImGui::EndDisabled();
+            ImGui::Text("%u relief draws this frame", m_reliefDrawsShown);
         }
         if (ImGui::CollapsingHeader("Interactive grass", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Creatures bend the grass", &g_config.grassPhysics);
