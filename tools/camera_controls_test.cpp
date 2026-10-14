@@ -34,6 +34,54 @@ static HRESULT STDMETHODCALLTYPE ReadData(void*, DWORD size, void* items, DWORD*
     *count = 6;
     return S_OK;
 }
+// Right button: the plugin hides the press; a release without a drag becomes a click.
+static DWORD rightActionUp = 2;
+static DWORD WINAPI RightButton(BOOL down) { return down ? 1 : rightActionUp; }
+static DWORD script[4][2]; static DWORD scriptCount = 0;
+static HRESULT STDMETHODCALLTYPE ReadScript(void*, DWORD size, void* items, DWORD* count, DWORD)
+{
+    assert(*count >= scriptCount);
+    for (DWORD i = 0; i < scriptCount; ++i) {
+        DWORD* item = (DWORD*)((BYTE*)items + i * size);
+        item[0] = script[i][0]; item[1] = script[i][1];
+    }
+    *count = scriptCount;
+    return S_OK;
+}
+static BOOL WINAPI NoDrag(LONG, LONG, LONG, DWORD) { return FALSE; }
+static void RightButtonChecks(int* mouse)
+{
+    g_origGetData = ReadScript;
+    g_cameraMouseInput = NoDrag;
+    g_cameraRightButton = RightButton;
+    DWORD items[6][4] = {}, count;
+    // Press: hidden. Release without drag: delivered as a press, the release on the next read.
+    script[0][0] = 13; script[0][1] = 0x80; scriptCount = 1; count = 6;
+    assert(SUCCEEDED(Hook_GetDeviceData(mouse, sizeof(items[0]), items, &count, 0)) && count == 0);
+    assert(g_rightHidden && (g_mouseButtons & 2));
+    script[0][1] = 0; count = 6;
+    assert(SUCCEEDED(Hook_GetDeviceData(mouse, sizeof(items[0]), items, &count, 0)));
+    assert(count == 1 && items[0][0] == 13 && items[0][1] == 0x80 && !g_rightHidden);
+    scriptCount = 0; count = 6;
+    assert(SUCCEEDED(Hook_GetDeviceData(mouse, sizeof(items[0]), items, &count, 0)));
+    assert(count == 1 && items[0][0] == 13 && items[0][1] == 0);
+    count = 6;
+    assert(SUCCEEDED(Hook_GetDeviceData(mouse, sizeof(items[0]), items, &count, 0)) && count == 0);
+    // Drag: neither the press nor the release reaches the game; other events stay in order.
+    rightActionUp = 1;
+    script[0][0] = 12; script[0][1] = 0x80; script[1][0] = 13; script[1][1] = 0x80; scriptCount = 2; count = 6;
+    assert(SUCCEEDED(Hook_GetDeviceData(mouse, sizeof(items[0]), items, &count, 0)));
+    assert(count == 1 && items[0][0] == 12);
+    BYTE state[20];
+    assert(SUCCEEDED(Hook_GetDeviceState(mouse, sizeof(state), state)) && state[13] == 0 && state[12] == 0x80);
+    script[0][0] = 13; script[0][1] = 0; scriptCount = 1; count = 6;
+    assert(SUCCEEDED(Hook_GetDeviceData(mouse, sizeof(items[0]), items, &count, 0)) && count == 0);
+    assert(!g_rightHidden && !(g_mouseButtons & 2));
+    // Peek reads are left alone.
+    script[0][1] = 0x80; count = 6;
+    assert(SUCCEEDED(Hook_GetDeviceData(mouse, sizeof(items[0]), items, &count, 1)) && count == 1);
+    puts("PASS: right click reaches the game as a click; a right drag is hidden from it");
+}
 int main()
 {
     int mouse = 0;
@@ -84,6 +132,7 @@ int main()
     float pitchOnly[6] = { 0, 0, 0, -100, 0, 0 };
     CameraMath::StepOrbit(orbit, pitchOnly, 1.0f/30, 0.12f, -1.48f, 1.48f, 2, 250, movement);
     assert(orbit.pitch == -1.48f && orbit.velocity[3] == 0);
+    RightButtonChecks(&mouse);
     puts("PASS: input preservation, response/integrated movement 30-240 FPS, braking and zoom bounds");
     puts("PASS: zoom/height do not change angles; pitch and distance stop at bounds");
 }

@@ -71,6 +71,13 @@ static DWORD g_mouseButtons = 0;
 static MouseInput_t g_mouseInput = nullptr;
 static InputBlocked_t g_inputBlocked = nullptr;
 static MouseInput_t g_cameraMouseInput = nullptr;
+typedef DWORD(WINAPI* RightButton_t)(BOOL);
+static RightButton_t g_cameraRightButton = nullptr;
+// A right click that did not become a camera drag: its press is delivered in place of the
+// release, and the release (this copy) on the next buffered read.
+static BYTE g_pendingRightUp[32];
+static DWORD g_pendingRightUpSize = 0;
+static bool g_rightHidden = false; // the game must not see the right button as held
 
 static void FindCameraInput()
 {
@@ -80,6 +87,9 @@ static void FindCameraInput()
         g_cameraMouseInput = (MouseInput_t)GetProcAddress(plugin, "JPOGCamera_MouseInput");
         if (!g_cameraMouseInput)
             g_cameraMouseInput = (MouseInput_t)GetProcAddress(plugin, "_JPOGCamera_MouseInput@16");
+        g_cameraRightButton = (RightButton_t)GetProcAddress(plugin, "JPOGCamera_RightButton");
+        if (!g_cameraRightButton)
+            g_cameraRightButton = (RightButton_t)GetProcAddress(plugin, "_JPOGCamera_RightButton@4");
     }
 }
 
@@ -122,9 +132,12 @@ static HRESULT STDMETHODCALLTYPE Hook_GetDeviceState(void* self, DWORD size, voi
         for (int i = 0; i < 3; i++) if (buttons[i] & 0x80) bits |= 1u << i;
         const bool blocked = g_mouseInput ? g_mouseInput(axes[0], axes[1], axes[2], bits) != FALSE : false;
         if (blocked) memset(data, 0, size);
-        else if (g_cameraMouseInput && g_cameraMouseInput(axes[0], axes[1], axes[2], bits)) {
-            ((LONG*)data)[0] = ((LONG*)data)[1] = 0;
-            ((BYTE*)data)[14] = 0; // middle only; preserve selection, right click and wheel
+        else {
+            if (g_cameraMouseInput && g_cameraMouseInput(axes[0], axes[1], axes[2], bits)) {
+                ((LONG*)data)[0] = ((LONG*)data)[1] = 0;
+                ((BYTE*)data)[14] = 0; // middle; selection and wheel are preserved
+            }
+            if (g_rightHidden) ((BYTE*)data)[13] = 0;
         }
     } else if (g_inputBlocked && g_inputBlocked()) {
         memset(data, 0, size);
@@ -132,12 +145,60 @@ static HRESULT STDMETHODCALLTYPE Hook_GetDeviceState(void* self, DWORD size, voi
     return hr;
 }
 
+// Right button events (DIMOFS_BUTTON1 = 13) by the plugin's click/drag decision. Returns the
+// new item count.
+static DWORD FilterRightButton(BYTE* items, DWORD objSize, DWORD count, DWORD capacity)
+{
+    DWORD kept = 0;
+    for (DWORD i = 0; i < count; ++i) {
+        BYTE* item = items + (size_t)i * objSize;
+        DWORD action = 0;
+        if (*(DWORD*)item == 13) {
+            const bool down = (((DWORD*)item)[1] & 0x80) != 0;
+            // Physical state for the camera, even when the event is hidden from the game.
+            g_mouseButtons = down ? (g_mouseButtons | 2u) : (g_mouseButtons & ~2u);
+            action = g_cameraRightButton(down);
+            if (down) g_rightHidden = action != 0;
+            else g_rightHidden = false;
+            if (action == 2 && objSize <= sizeof(g_pendingRightUp)) {
+                memcpy(g_pendingRightUp, item, objSize);
+                g_pendingRightUpSize = objSize;
+                ((DWORD*)item)[1] = 0x80; // the press, now
+            }
+        }
+        if (action == 1) continue;
+        if (kept != i) memmove(items + (size_t)kept * objSize, item, objSize);
+        ++kept;
+    }
+    (void)capacity;
+    return kept;
+}
+
 static HRESULT STDMETHODCALLTYPE Hook_GetDeviceData(void* self, DWORD objSize, void* items, DWORD* count, DWORD flags)
 {
+    const DWORD capacity = count ? *count : 0;
     HRESULT hr = g_origGetData(self, objSize, items, count, flags);
     if (FAILED(hr) || !count) return hr;
     FindOverlay();
     FindCameraInput();
+    if (IsMouse(self) && items && objSize >= 8 && !(flags & 1) && g_cameraRightButton) {
+        // The release of an earlier right click goes first: it happened before these events.
+        // Taken before filtering, which may hold back a new one.
+        BYTE pending[sizeof(g_pendingRightUp)];
+        const bool hasPending = g_pendingRightUpSize == objSize;
+        if (hasPending) { memcpy(pending, g_pendingRightUp, objSize); g_pendingRightUpSize = 0; }
+        *count = FilterRightButton((BYTE*)items, objSize, *count, capacity);
+        if (hasPending) {
+            if (*count < capacity) {
+                memmove((BYTE*)items + objSize, items, (size_t)*count * objSize);
+                memcpy(items, pending, objSize);
+                ++*count;
+            } else if (!g_pendingRightUpSize) {
+                memcpy(g_pendingRightUp, pending, objSize); // full batch: next read
+                g_pendingRightUpSize = objSize;
+            }
+        }
+    }
     if (IsMouse(self) && items && objSize >= 8) {
         // DIDEVICEOBJECTDATA: dwOfs, dwData, ... ; DIMOFS_X/Y/Z = 0/4/8, DIMOFS_BUTTON0.. = 12..
         LONG dx = 0, dy = 0, dz = 0;

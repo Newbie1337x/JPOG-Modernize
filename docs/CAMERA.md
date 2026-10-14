@@ -39,6 +39,27 @@ bridges against a mock native camera (no game/DLL loading). It covers repeated
 scrolling at maximum distance without pitch change, horizon clamping, terrain
 flag retention, selected-unit limits and finite/bounded live settings updates.
 
+## Stage 3: Jurassic World Evolution style controls
+
+- Middle drag orbits and tilts (Shift + middle pans, Alt + middle changes height).
+- Right drag pans. The proxy hides the right press from the game until the mouse
+  moves 6 raw counts (a drag) or the button is released (a click): a click is then
+  delivered as a press in place of the release, and the release on the next
+  buffered read, so right-click actions keep working. A drag never reaches the game.
+  `RightDragPan=0` disables it.
+- W/A/S/D call InputPushForwards/InputPushRight with the frame time, the same
+  impulse AScrollingState::ProcessInput gives the arrow keys (the camera scales it
+  by its height-dependent speed, vtable +0xf4). Shift multiplies by `KeyboardFast`
+  (2.5), Ctrl by `KeyboardSlow` (0.35); `KeyboardPanSpeed` scales both, `KeyboardPan=0`
+  disables them. Evidence: arrow handling
+  `ev_563d8b84fbef55e430c2af2d73714e84e82ef04ebaf40587b2f45f2ae7ba016f`, push setters
+  `ev_4a4de7216e62e240dc37855cd80f9dd9e1072142b29eb0dc2d0d1b648480b58d`.
+- The game reads mouse buttons only from buffered DirectInput events
+  (TInputDXDeviceMouse::ProcessEvents) and the axes from GetDeviceState
+  (TInputDXDeviceMouse::Update): `ev_1badb65dda2c3fad0640c89761862d76adefe3c73533dec456cee08459d31b31`.
+- Default pitch range -89 (top-down) to -10 degrees (low, near the horizon),
+  following reference screenshots from Jurassic World Evolution 3.
+
 ## Stage 2: independent behavior (default)
 
 `IndependentController=1` replaces the active park camera's AWorldCamera::OnUpdate

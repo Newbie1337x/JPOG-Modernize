@@ -41,6 +41,9 @@ static bool g_gameFastPaths = true;
 static float g_cameraResponse = 0.12f;
 static float g_dragPanSensitivity = 0.0015f;
 static float g_dragRotateSensitivity = 0.0018f;
+static bool g_rightDragPan = true;              // right button drag pans; a click without movement reaches the game
+static bool g_keyboardPan = true;               // W/A/S/D move the park camera like the arrow keys
+static float g_keyboardPanSpeed = 1.0f, g_keyboardFast = 2.5f, g_keyboardSlow = 0.35f;
 static bool g_proportionalZoom = true;
 static bool g_independentCamera = true;
 static float g_cameraMinDistance = 2.0f, g_cameraMaxDistance = 250.0f;
@@ -83,6 +86,10 @@ static void* g_worldCameraVtable = nullptr;
 static void* g_scrollingUpdateTramp = nullptr;
 static BYTE** g_cameraInputMap = nullptr;
 static volatile LONG g_dragDx = 0, g_dragDy = 0, g_dragMode = 0;
+// Right button: 0 idle, 1 pressed and hidden from the game until it moves or is released,
+// 2 dragging (the press and its release never reach the game).
+static volatile LONG g_rightState = 0, g_rightTravel = 0;
+const LONG kRightDragThreshold = 6; // raw mouse counts before a right press becomes a pan
 static volatile LONG g_cameraPanAllowed = 0, g_cameraRotateAllowed = 0;
 static DWORD g_cameraControlTick = 0;
 
@@ -170,16 +177,48 @@ static float __fastcall WorldMinDistance_Hook(BYTE* camera, void*)
     return ((CameraDistance_t)g_worldMinDistanceTramp)(camera);
 }
 
+static bool CameraGesturesReady()
+{
+    return g_modernCamera && g_scrollingUpdateTramp && !CameraControlsBlocked() &&
+        GetTickCount() - g_cameraControlTick <= 100 && ActiveWorldCamera();
+}
+
+// Right button events from the proxy's buffered read. Returns 0 to pass the event to the game,
+// 1 to drop it, 2 to deliver it as a click (the proxy turns the release into a press and sends
+// the release on the next read): a right click without movement keeps its game meaning.
+extern "C" __declspec(dllexport) DWORD WINAPI JPOGCamera_RightButton(BOOL down)
+{
+    if (down) {
+        if (g_rightDragPan && CameraGesturesReady() && g_cameraPanAllowed) {
+            InterlockedExchange(&g_rightTravel, 0);
+            InterlockedExchange(&g_rightState, 1);
+            return 1;
+        }
+        InterlockedExchange(&g_rightState, 0);
+        return 0;
+    }
+    const LONG state = InterlockedExchange(&g_rightState, 0);
+    return state == 2 ? 1 : state == 1 ? 2 : 0;
+}
+
 // Raw DirectInput feed from our proxy: no Windows cursor warping or edge clamp.
-// Return TRUE only for a camera drag; proxy removes axes/middle, not left/right.
+// Return TRUE only for a camera drag; the proxy then removes the axes and the middle button.
+// Middle drag orbits and tilts (Shift + middle pans, Alt + middle changes height); a right
+// drag pans.
 extern "C" __declspec(dllexport) BOOL WINAPI JPOGCamera_MouseInput(LONG dx, LONG dy, LONG /*wheel*/, DWORD buttons)
 {
-    const bool height = g_worldUpdateTramp && (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
-    const bool rotate = !height && (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    if (g_rightState == 1 && (buttons & 2)) {
+        const LONG travel = InterlockedExchangeAdd(&g_rightTravel, labs(dx) + labs(dy)) + labs(dx) + labs(dy);
+        if (travel >= kRightDragThreshold) InterlockedCompareExchange(&g_rightState, 2, 1);
+    }
+    const bool rightDrag = g_rightState == 2 && (buttons & 2);
+    const bool middle = (buttons & 4) != 0;
+    const bool height = middle && g_worldUpdateTramp && (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    const bool shiftPan = middle && !height && (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    const bool rotate = middle && !height && !shiftPan && !rightDrag;
     const LONG mode = height ? 3 : rotate ? 2 : 1;
-    if (!g_modernCamera || !g_scrollingUpdateTramp || CameraControlsBlocked() ||
-        GetTickCount() - g_cameraControlTick > 100 || !(buttons & 4) ||
-        !(rotate ? g_cameraRotateAllowed : g_cameraPanAllowed) || !ActiveWorldCamera()) {
+    if (!CameraGesturesReady() || !(middle || rightDrag) ||
+        !(rotate ? g_cameraRotateAllowed : g_cameraPanAllowed)) {
         InterlockedExchange(&g_dragMode, 0);
         InterlockedExchange(&g_dragDx, 0);
         InterlockedExchange(&g_dragDy, 0);
@@ -215,6 +254,21 @@ static bool __fastcall ScrollingUpdate_Hook(BYTE* state, void*, float dt)
     const bool result = ((bool(__thiscall*)(BYTE*, float))g_scrollingUpdateTramp)(state, dt);
     state[0x48] = translate;
     state[0x4a] = rotate;
+    // W/A/S/D: same impulse as the game's arrow keys (frame time, scaled by the camera's
+    // height-dependent speed); Shift faster, Ctrl slower. Alt is left to the game.
+    if (g_keyboardPan && allowed && g_cameraPanAllowed && !(dragging && mode != 2) &&
+        !(GetAsyncKeyState(VK_MENU) & 0x8000)) {
+        auto held = [](int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; };
+        const float forward = (held('W') ? 1.0f : 0.0f) - (held('S') ? 1.0f : 0.0f);
+        const float right = (held('D') ? 1.0f : 0.0f) - (held('A') ? 1.0f : 0.0f);
+        if (forward != 0 || right != 0) {
+            float speed = dt * g_keyboardPanSpeed;
+            if (held(VK_SHIFT)) speed *= g_keyboardFast;
+            else if (held(VK_CONTROL)) speed *= g_keyboardSlow;
+            if (forward != 0) g_cameraPanForward(camera, forward * speed);
+            if (right != 0) g_cameraPanRight(camera, right * speed);
+        }
+    }
     if (dragging) {
         // Native input methods generate displacement impulses. Mouse deltas are
         // already displacement, so NEVER multiply them by frame dt again.
@@ -1570,8 +1624,8 @@ static void LoadConfig(HMODULE self)
         { "MaxDistance", "250", &g_cameraMaxDistance, 2, 2000 },
         { "FocusMinDistance", "2", &g_focusMinDistance, 0.5f, 100 },
         { "FocusMaxDistance", "250", &g_focusMaxDistance, 2, 2000 },
-        { "MinPitch", "-85", &g_cameraMinPitch, -89, -5 },
-        { "MaxPitch", "0", &g_cameraMaxPitch, -10, 0 },
+        { "MinPitch", "-89", &g_cameraMinPitch, -89, -5 },
+        { "MaxPitch", "-10", &g_cameraMaxPitch, -10, 0 },
         { "FixedFOV", "50", &g_cameraFov, 25, 90 }
     };
     for (const auto& option : cameraOptions) {
@@ -1592,6 +1646,18 @@ static void LoadConfig(HMODULE self)
     GetPrivateProfileStringA("Camera", "DragRotateSensitivity", "0.0018", buf, sizeof(buf), path);
     g_dragRotateSensitivity = (float)atof(buf);
     if (!(g_dragRotateSensitivity > 0 && g_dragRotateSensitivity <= 0.02f)) g_dragRotateSensitivity = 0.0018f;
+    g_rightDragPan = GetPrivateProfileIntA("Camera", "RightDragPan", 1, path) != 0;
+    g_keyboardPan = GetPrivateProfileIntA("Camera", "KeyboardPan", 1, path) != 0;
+    const struct { const char* key; const char* def; float* value; float low, high; } keyOptions[] = {
+        { "KeyboardPanSpeed", "1.0", &g_keyboardPanSpeed, 0.1f, 10 },
+        { "KeyboardFast", "2.5", &g_keyboardFast, 1, 10 },
+        { "KeyboardSlow", "0.35", &g_keyboardSlow, 0.05f, 1 },
+    };
+    for (const auto& option : keyOptions) {
+        GetPrivateProfileStringA("Camera", option.key, option.def, buf, sizeof(buf), path);
+        *option.value = (float)atof(buf);
+        if (!(*option.value >= option.low && *option.value <= option.high)) *option.value = (float)atof(option.def);
+    }
 }
 
 static void ApplyPatches()
