@@ -15,7 +15,7 @@ bool FileTime(const std::string& path, FILETIME& t)
 
 void Device::PollAutomation()
 {
-    if (m_texDumpActive && m_frame > m_texDumpFrame) WriteTextureDump();
+    if (m_texDumpActive && m_frame > m_texDumpFrame + 30) WriteTextureDump(); // 30 frames: draws can be spread out
     if (m_frame % 15) return;
     const std::string ini = g_gameDir + "d3d8to11.ini";
     FILETIME t;
@@ -40,7 +40,7 @@ void Device::PollAutomation()
 
 void Device::CollectDumpTextures()
 {
-    if (!m_texDumpActive || m_frame != m_texDumpFrame || m_rt != m_backBuffer || m_sun.flags[1] > .5f) return;
+    if (!m_texDumpActive || m_frame < m_texDumpFrame || m_sun.flags[1] > .5f) return;
     for (int stage = 0; stage < 2; stage++) {
         if (!m_textures[stage] || m_textures[stage]->GetType() != D8RTYPE_TEXTURE) continue;
         Texture* t = static_cast<Texture*>(static_cast<ID8Texture*>(m_textures[stage]));
