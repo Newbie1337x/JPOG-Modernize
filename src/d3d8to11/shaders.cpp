@@ -301,6 +301,7 @@ std::string WaterPixelCode(int samples) {
         "  float3 eye=sunCamera.xyz-i.world;\n"
         "  float3 V=dot(eye,eye)>1e-8 ? normalize(eye) : float3(0,-1,0);\n"
         "  float4 sceneReflection=WaterSceneReflection(i,N,V);\n"
+        "  reflected*=fogTint.rgb;\n" // the game's sky texture, toward the night sky
         "  reflected=lerp(reflected,sceneReflection.rgb,sceneReflection.a);\n"
         "  float fresnel=0.02+0.98*pow(1-saturate(abs(dot(N,V))),5);\n"
         "  float2 uv=(pixel+0.5)*waterScreen.xy;\n"
@@ -312,6 +313,7 @@ std::string WaterPixelCode(int samples) {
         "  float3 transmission=exp(-amount*float3(1.6,0.65,0.40));\n"
         "  float3 deepTint=lerp(float3(.045,.145,.095),float3(.025,.11,.14),ocean);\n"
         "  float3 tint=lerp(float3(0.16,0.32,0.24),deepTint,saturate(amount));\n"
+        "  if(todNight.w>.5)tint*=todNight.rgb;\n"
         "  float clarity=lerp(1,waterOptical.y,saturate(amount*2));\n"
         "  float3 through=lerp(tint,behind,transmission*clarity);\n"
         "  float3 surface=lerp(through,reflected,saturate(fresnel*waterOptical.x));\n"
@@ -323,8 +325,11 @@ std::string WaterPixelCode(int samples) {
         "  float bodyLight=clamp(1+2.5*(ndl-flatNdl),.70,1.30);\n"
         "  surface*=lerp(1,bodyLight,ocean);\n"
         "  float3 halfVector=L+V;float3 H=halfVector/max(length(halfVector),.001);\n"
-        "  float glint=pow(saturate(dot(N,H)),96)*(.08+.24*fresnel)*waterOptical.x*ocean;\n"
-        "  surface+=glint*float3(1,.96,.86);\n"
+        "  float nh=saturate(dot(N,H)), moon=specParams.z;\n"
+        "  float glint=pow(nh,96)*(.08+.24*fresnel)*waterOptical.x*lerp(ocean,1,moon);\n"
+        "  surface+=glint*lerp(float3(1,.96,.86),rimColor.rgb,moon);\n"
+        // Moonlight on water: a sharp glitter on the wave facets plus a soft path toward the moon.
+        "  surface+=moon*rimColor.rgb*(pow(nh,600)*3.0+pow(nh,60)*0.18)*(.35+.65*fresnel)*waterOptical.x;\n"
         // Advancing/receding depth-space fronts plus drifting porous foam, no
         // permanent uniform white outline. Footprint waves remain independent.
         "  float phase=waterOptical.w*1.4+FoamNoise(i.world.xz*.09)*2;\n"
@@ -1164,6 +1169,7 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
     else {
         if (v.water) s += "  color = ApplyWater(color,i,t0,t2.rgb);\n";
         if(v.material)s+="  color = ApplyMaterial(color,i);\n";
+        else if (v.water) s += "  if (waterParams.x < 0.5) color = ApplySun(color,i);\n"; // enhanced water is lit in ApplyWater
         else{
             if (v.normalMap && v.texDim[0] == 2) s += "  color = ApplyNormalMap(color,i);\n";
             s += "  color = ApplySun(color,i);\n";

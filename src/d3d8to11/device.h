@@ -262,6 +262,12 @@ private:
     // terrain_light.cpp: native height field for terrain normals and horizon shadows
     // automation.cpp: ini hot reload and file-requested frame captures
     void PollAutomation();
+    // d3d8to11_texdump.req: the named textures of one frame's world draws go to d3d8to11_textures/
+    void CollectDumpTextures();
+    void WriteTextureDump();
+    bool m_texDumpActive = false;
+    UINT64 m_texDumpFrame = 0;
+    std::vector<std::pair<Texture*, int>> m_texDumpList;
     bool CaptureSwapChain(const std::string& path);
     FILETIME m_iniTime = {};
     bool m_iniTimeValid = false;

@@ -1231,6 +1231,7 @@ bool Device::PrepareDraw()
             m_rs[RS_ZWRITEENABLE],m_rs[RS_ALPHABLENDENABLE],m_rs[RS_ALPHATESTENABLE]);
     }
     TrackSkinTexture();
+    CollectDumpTextures();
     m_tessCandidate = TessellationCandidate();
     UpdateSun(false);
     PrepareWaterDraw();
