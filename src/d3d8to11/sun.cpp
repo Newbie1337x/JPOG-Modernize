@@ -564,9 +564,15 @@ void Device::CapturePusher(UINT firstVertex, UINT numVertices)
     }
     VertexBuffer* vb = m_streams[0].vb;
     const UINT stride = m_streams[0].stride;
-    if (!pos || !weights || !indices || !vb || !stride) return;
+    if (!pos || !weights || !indices || !vb || !stride || numVertices >= (1u << 24)) return;
     const std::vector<BYTE>& data = vb->m_impl.m_shadow;
     if ((size_t)(firstVertex + numVertices) * stride > data.size()) return;
+    const BufferImpl& impl = vb->m_impl;
+    if (m_boneCounts.empty()) m_boneCounts.resize(kBoneCounts);
+    BoneCount& known = m_boneCounts[(UINT)((impl.m_identity * 0x9E3779B1u) ^ (firstVertex * 0x85EBCA6Bu) ^ numVertices) % kBoneCounts];
+    const bool hit = known.identity == impl.m_identity && known.revision == impl.m_revision && known.first == firstVertex &&
+                     known.count == numVertices && known.vs == m_vsHandle && !memcmp(known.c4, m_vsConst[4], sizeof(known.c4));
+    if (hit && known.distinct < (UINT)g_config.grassMinBones && !m_trace) return;
 
     float c0[4][4];
     memcpy(c0, m_vsConst, sizeof(c0));
@@ -582,7 +588,7 @@ void Device::CapturePusher(UINT firstVertex, UINT numVertices)
     const UINT samples = numVertices < 48 ? numVertices : 48;
     // Bones first: trees, props and buildings use one or a few and stop here, without the skinning.
     for (UINT k = 0; k < samples; k++) {
-        const BYTE* v = data.data() + (size_t)(firstVertex + (UINT)((uint64_t)k * numVertices / samples)) * stride;
+        const BYTE* v = data.data() + (size_t)(firstVertex + k * numVertices / samples) * stride;
         const XMFLOAT4 w = color(v + weights->offset), i = color(v + indices->offset);
         const float wv[4] = { w.x, w.y, w.z, w.w }, iv[4] = { i.x, i.y, i.z, i.w };
         for (int j = 0; j < 4; j++) {
@@ -592,10 +598,12 @@ void Device::CapturePusher(UINT firstVertex, UINT numVertices)
             if (!used[a0 & 255]) { used[a0 & 255] = 1; distinct++; }
         }
     }
+    known = { impl.m_identity, impl.m_revision, firstVertex, numVertices, {}, m_vsHandle, distinct };
+    memcpy(known.c4, m_vsConst[4], sizeof(known.c4));
     if (distinct < (UINT)g_config.grassMinBones && !m_trace) return;
     XMVECTOR lo = XMVectorReplicate(1e30f), hi = XMVectorReplicate(-1e30f);
     for (UINT k = 0; k < samples; k++) {
-        const BYTE* v = data.data() + (size_t)(firstVertex + (UINT)((uint64_t)k * numVertices / samples)) * stride;
+        const BYTE* v = data.data() + (size_t)(firstVertex + k * numVertices / samples) * stride;
         float p[4];
         memcpy(p, v + pos->offset, 12);
         p[3] = 1;

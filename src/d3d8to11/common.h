@@ -133,6 +133,7 @@ struct Config {
     bool constantRing=true; // [Performance] ConstantRing: vertex constants through a no-overwrite ring (0 = one buffer, discard)
     bool terrainBatching=true; // [Performance] TerrainBatching: consecutive terrain sections in one instanced draw (terrain_batch.cpp)
     bool hitchSampler=false; int hitchThresholdMs=60; // [Performance] HitchSampler, HitchThresholdMs (hitch_sampler.h)
+    int hitchProfileSeconds=0; // [Performance] HitchProfileSeconds: sum the slow frames, one report per period
     bool asyncShaders=true, prewarmShaders=true; // [Performance] AsyncShaders, PrewarmShaders (shader_jobs.h)
     bool skinInstancing=true; // [Performance] SkinInstancing (skin_batch.cpp)
     bool taa=true, fsr1=true;

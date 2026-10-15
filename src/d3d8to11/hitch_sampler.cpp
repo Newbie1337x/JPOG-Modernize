@@ -110,13 +110,12 @@ std::string Top(const std::map<DWORD, UINT>& counts, UINT samples, size_t n)
     return s;
 }
 
-void Report(LONGLONG start, LONGLONG end, double ms)
+// The samples taken between start and end, added to where (instruction pointers) and callers.
+UINT Collect(LONGLONG start, LONGLONG end, std::map<DWORD, UINT>& where, std::map<DWORD, UINT>& callers)
 {
     const UINT written = g_written.load();
     const UINT first = written > kSamples ? written - kSamples : 0;
-    std::map<DWORD, UINT> where, callers;
     UINT samples = 0;
-    LoadModules();
     for (UINT i = first; i < written; i++) {
         const Sample& s = g_ring[i % kSamples];
         if (s.t < start || s.t > end) continue;
@@ -134,12 +133,63 @@ void Report(LONGLONG start, LONGLONG end, double ms)
             callers[a]++;
         }
     }
+    return samples;
+}
+
+void Report(LONGLONG start, LONGLONG end, double ms)
+{
+    std::map<DWORD, UINT> where, callers;
+    LoadModules();
+    const UINT samples = Collect(start, end, where, callers);
     if (!samples) { Log("Hitch %.0f ms: no samples", ms); return; }
     // Group the instruction pointers by 256-byte block: one function is usually one or two blocks.
     std::map<DWORD, UINT> blocks;
     for (auto& w : where) blocks[w.first & ~0xFFu] += w.second;
     Log("Hitch %.0f ms on the game thread, %u samples. Where (256-byte blocks):%s\n  Callers on the stack:%s",
         ms, samples, Top(blocks, samples, 12).c_str(), Top(callers, samples, 24).c_str());
+}
+
+// HitchProfileSeconds: the slow frames of a period, summed.
+std::map<DWORD, UINT> g_profWhere, g_profCallers;
+UINT g_profSamples = 0, g_profFrames = 0, g_profAllFrames = 0;
+double g_profMs = 0, g_profAllMs = 0;
+LONGLONG g_profStart = 0;
+
+void ProfileFrame(LONGLONG start, LONGLONG end, double ms)
+{
+    if (g_modules.empty()) LoadModules();
+    g_profAllFrames++;
+    g_profAllMs += ms;
+    if (ms >= g_config.hitchThresholdMs) {
+        g_profSamples += Collect(start, end, g_profWhere, g_profCallers);
+        g_profFrames++;
+        g_profMs += ms;
+    }
+    if ((end - g_profStart) < (LONGLONG)g_config.hitchProfileSeconds * g_freq) return;
+    if (g_profSamples) {
+        LoadModules();
+        std::map<std::string, UINT> modules;
+        for (auto& w : g_profWhere) { const Module* m = ModuleOf(w.first); modules[m ? m->name : "?"] += w.second; }
+        std::vector<std::pair<UINT, std::string>> mv;
+        for (auto& m : modules) mv.push_back({ m.second, m.first });
+        std::sort(mv.rbegin(), mv.rend());
+        std::string mods;
+        for (size_t i = 0; i < mv.size() && i < 10; i++) {
+            char item[200];
+            sprintf_s(item, "\n    %3.0f%% %s", 100.0 * mv[i].first / g_profSamples, mv[i].second.c_str());
+            mods += item;
+        }
+        std::map<DWORD, UINT> blocks;
+        for (auto& w : g_profWhere) blocks[w.first & ~0xFFu] += w.second;
+        Log("CPU profile: %u of %u frames over %d ms (avg %.1f ms, all frames %.1f ms), %u samples.\n  Modules:%s\n"
+            "  Where (256-byte blocks):%s\n  Callers on the stack:%s",
+            g_profFrames, g_profAllFrames, g_config.hitchThresholdMs, g_profMs / g_profFrames, g_profAllMs / g_profAllFrames,
+            g_profSamples, mods.c_str(), Top(blocks, g_profSamples, 40).c_str(), Top(g_profCallers, g_profSamples, 60).c_str());
+    }
+    g_profWhere.clear(); g_profCallers.clear();
+    g_profSamples = g_profFrames = g_profAllFrames = 0;
+    g_profMs = g_profAllMs = 0;
+    g_profStart = end;
 }
 }
 
@@ -161,11 +211,14 @@ void FramePresented()
         g_thread = CreateThread(nullptr, 0, Run, nullptr, 0, nullptr);
         SetThreadPriority(g_thread, THREAD_PRIORITY_TIME_CRITICAL);
         Log("Hitch sampler on: frames over %d ms of thread %lu are reported", g_config.hitchThresholdMs, GetCurrentThreadId());
-        g_frameStart = now.QuadPart;
+        g_frameStart = g_profStart = now.QuadPart;
         return;
     }
     const double ms = (now.QuadPart - g_frameStart) * 1000.0 / g_freq;
-    if (ms >= g_config.hitchThresholdMs && g_logged < 300) {
+    if (g_config.hitchProfileSeconds > 0) {
+        ProfileFrame(g_frameStart, now.QuadPart, ms);
+        QueryPerformanceCounter(&now);
+    } else if (ms >= g_config.hitchThresholdMs && g_logged < 300) {
         g_logged++;
         Report(g_frameStart, now.QuadPart, ms);
         QueryPerformanceCounter(&now); // the report is not part of the next frame

@@ -241,6 +241,8 @@ void LoadConfig()
     g_config.hitchSampler=GetPrivateProfileIntA("Performance","HitchSampler",0,ini.c_str())!=0;
     g_config.hitchThresholdMs=GetPrivateProfileIntA("Performance","HitchThresholdMs",60,ini.c_str());
     if(g_config.hitchThresholdMs<5)g_config.hitchThresholdMs=5;
+    g_config.hitchProfileSeconds=GetPrivateProfileIntA("Performance","HitchProfileSeconds",0,ini.c_str());
+    if(g_config.hitchProfileSeconds<0)g_config.hitchProfileSeconds=0;
     g_config.asyncShaders=GetPrivateProfileIntA("Performance","AsyncShaders",1,ini.c_str())!=0;
     g_config.prewarmShaders=GetPrivateProfileIntA("Performance","PrewarmShaders",1,ini.c_str())!=0;
     g_config.skinInstancing=GetPrivateProfileIntA("Performance","SkinInstancing",1,ini.c_str())!=0;
@@ -429,6 +431,7 @@ void SaveConfig()
     putInt("Performance","TerrainBatching",g_config.terrainBatching);
     putInt("Performance","HitchSampler",g_config.hitchSampler);
     putInt("Performance","HitchThresholdMs",g_config.hitchThresholdMs);
+    putInt("Performance","HitchProfileSeconds",g_config.hitchProfileSeconds);
     putInt("Performance","AsyncShaders",g_config.asyncShaders);
     putInt("Performance","PrewarmShaders",g_config.prewarmShaders);
     putInt("Performance","SkinInstancing",g_config.skinInstancing);

@@ -536,6 +536,11 @@ private:
     bool m_terrainBatchOpen = false; // any other state change draws it first (the setters call FlushBatches)
     // Skinned draws of one mesh in a row: one instanced draw (skin_batch.cpp). Between the draws
     // only the vertex constants c[m_skinLo, m_skinHi) change; each draw adds a copy of them.
+    // CapturePusher: distinct bones of a draw's sampled vertices, by vertex range. The vertex data
+    // and the bone scale c4 decide it, so most skinned draws (trees, props) skip the sampling.
+    struct BoneCount { UINT64 identity, revision; UINT first, count; float c4[4]; DWORD vs; UINT distinct; };
+    static const UINT kBoneCounts = 4096;
+    std::vector<BoneCount> m_boneCounts;
     bool m_skinBatchOpen = false, m_skinUnavailable = false;
     DWORD m_skinType = 0;
     UINT m_skinMinIndex = 0, m_skinNumVertices = 0, m_skinStart = 0, m_skinPrims = 0, m_skinCount = 0;
