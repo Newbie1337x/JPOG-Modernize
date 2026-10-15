@@ -867,7 +867,24 @@ UINT VSConstantRegisters(const DWORD* func)
     return used < 256 ? used : 256;
 }
 
-std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& error)
+// One input register of the batched terrain variant, fetched from the vertex pool.
+static std::string PulledInput(const VSInput& in)
+{
+    const std::string a = in.stream == 0 ? Fmt("sec.vertexBase + vtx * batchStreams.x + %u", in.offset)
+                                         : Fmt("batchStreams.y + vtx * batchStreams.z + %u", in.offset);
+    switch (in.type) {
+    case 0: return "float4(asfloat(batchVertices.Load(" + a + ")), 0, 0, 1)";
+    case 1: return "float4(asfloat(batchVertices.Load2(" + a + ")), 0, 1)";
+    case 2: return "float4(asfloat(batchVertices.Load3(" + a + ")), 1)";
+    case 3: return "asfloat(batchVertices.Load4(" + a + "))";
+    case 4: return "UnpackColor(batchVertices.Load(" + a + "))";   // B8G8R8A8_UNORM
+    case 5: return "UnpackUByte4(batchVertices.Load(" + a + "))";  // R8G8B8A8_UINT
+    case 6: return "float4(UnpackShort2(batchVertices.Load(" + a + ")), 0, 1)";
+    default: return "float4(UnpackShort2(batchVertices.Load(" + a + ")), UnpackShort2(batchVertices.Load(" + a + " + 4)))";
+    }
+}
+
+std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& error, bool pulled)
 {
     if ((func[0] & 0xFFFF0000) != 0xFFFE0000) { error = "not a vertex shader"; return ""; }
     std::vector<Instr> code;
@@ -901,18 +918,38 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
     s += "float4 C(int i) { return (i >= 0 && i < 256) ? c[i] : float4(0, 0, 0, 0); }\n";
     s += kHelpers;
     s += kVSOutputStruct;
-    s += "struct VSIn {\n";
-    static const char* inTypes[8] = { "float", "float2", "float3", "float4", "float4", "uint4", "int2", "int4" };
-    for (const VSInput& in : decl.inputs)
-        s += Fmt("  %s v%d : TEXCOORD%d;\n", inTypes[in.type & 7], in.reg, in.reg);
-    s += "};\n";
-    s += "VSOut main(VSIn i) {\n";
+    size_t bodyStart = 0;
+    if (pulled) {
+        s += "struct BatchSection { float4 r4; float4 r5; uint vertexBase; uint indexBase; uint indexCount; int baseVertex; };\n"
+             "StructuredBuffer<BatchSection> batchSections : register(t20);\n"
+             "ByteAddressBuffer batchIndices : register(t21);\n"
+             "ByteAddressBuffer batchVertices : register(t22);\n"
+             // x: stream 0 stride, y: stream 1 byte address, z: stream 1 stride; batchInfo.x: first section
+             "cbuffer Batch : register(b6) { uint4 batchStreams; uint4 batchInfo; };\n"
+             "float4 UnpackColor(uint u) { return float4((u >> 16) & 255, (u >> 8) & 255, u & 255, u >> 24) / 255.0; }\n"
+             "float4 UnpackUByte4(uint u) { return float4(u & 255, (u >> 8) & 255, (u >> 16) & 255, u >> 24); }\n"
+             "float2 UnpackShort2(uint u) { return float2((int)(u << 16) >> 16, (int)u >> 16); }\n";
+        s += "VSOut main(uint vid : SV_VertexID, uint iid : SV_InstanceID) {\n";
+        bodyStart = s.size();
+        s += "  BatchSection sec = batchSections[batchInfo.x + iid];\n";
+        // Sections are padded to the longest one: the extra vertices make empty triangles.
+        s += "  if (vid >= sec.indexCount) return (VSOut)0;\n";
+        s += "  uint vtx = (uint)((int)batchIndices.Load((sec.indexBase + vid) * 4) + sec.baseVertex);\n";
+    } else {
+        s += "struct VSIn {\n";
+        static const char* inTypes[8] = { "float", "float2", "float3", "float4", "float4", "uint4", "int2", "int4" };
+        for (const VSInput& in : decl.inputs)
+            s += Fmt("  %s v%d : TEXCOORD%d;\n", inTypes[in.type & 7], in.reg, in.reg);
+        s += "};\n";
+        s += "VSOut main(VSIn i) {\n";
+    }
     s += "  float4 worldPosition = 0;\n";
     for (int r = 0; r < 16; r++) {
         bool declared = false;
         for (const VSInput& in : decl.inputs) {
             if (in.reg != r) continue;
             declared = true;
+            if (pulled) { s += Fmt("  float4 v%d = ", r) + PulledInput(in) + ";\n"; continue; }
             switch (in.type) {
             case 0: s += Fmt("  float4 v%d = float4(i.v%d, 0, 0, 1);\n", r, r); break;
             case 1: s += Fmt("  float4 v%d = float4(i.v%d, 0, 1);\n", r, r); break;
@@ -1025,6 +1062,11 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
     if (WorldShaderKind(decl) == 4) s += "  o.t7 = float4(abs(v0.y), 0, 0, 1);\n";
     s += "  o.fog = oFog.x;\n";
     s += "  return o;\n}\n";
+    if (pulled) {
+        // The section registers: c4 and c5 (position offset and height scale of the terrain).
+        for (size_t at = s.find("c[4]", bodyStart); at != std::string::npos; at = s.find("c[4]", at)) s.replace(at, 4, "sec.r4");
+        for (size_t at = s.find("c[5]", bodyStart); at != std::string::npos; at = s.find("c[5]", at)) s.replace(at, 4, "sec.r5");
+    }
     return s;
 }
 

@@ -131,6 +131,7 @@ struct Config {
     bool performanceLog=true, performanceGPU=true;
     bool threaded=false;    // [Performance] Threaded: Direct3D 8 calls run on a render thread (csmt.h); needs a restart
     bool constantRing=true; // [Performance] ConstantRing: vertex constants through a no-overwrite ring (0 = one buffer, discard)
+    bool terrainBatching=true; // [Performance] TerrainBatching: consecutive terrain sections in one instanced draw (terrain_batch.cpp)
     bool taa=true, fsr1=true;
     bool fsr31=true; // experimental native-resolution temporal AA, not frame generation
     bool frameGeneration=false; // synchronous x2 prototype; requires native AA + VSync

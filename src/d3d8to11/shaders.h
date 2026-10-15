@@ -25,7 +25,9 @@ size_t ShaderTokenCount(const DWORD* func);
 // Common interpolator layout between every generated VS and PS.
 extern const char* kVSOutputStruct;
 
-std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& error);
+// pulled: the batched terrain variant (terrain_batch.cpp). Vertices are read from the batch pools
+// by SV_VertexID/SV_InstanceID instead of the input assembler, and c4/c5 come from the section.
+std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& error, bool pulled = false);
 // Constant registers c0..n-1 the translated shader can read: every directly addressed source
 // plus three more rows (matrix instructions read up to four consecutive registers), at least
 // c0..c3 (our clip-axis code reads them). 256 when the shader uses relative addressing.

@@ -8,6 +8,8 @@
 #include "descriptor_reuse.h"
 #include "water_regions.h"
 #include "csmt.h"
+#include <map>
+#include <tuple>
 
 struct VertexShader8 {
     std::vector<DWORD> decl, func;
@@ -17,6 +19,8 @@ struct VertexShader8 {
     ComPtr<ID3D11VertexShader> vs;
     ComPtr<ID3D11InputLayout> layout;
     bool failed = false;
+    ComPtr<ID3D11VertexShader> pulled; // batched terrain variant (terrain_batch.cpp), built on first use
+    int pulledState = 0;               // 0 not tried, 1 ready, -1 not batchable
 };
 
 struct PixelShader8 {
@@ -492,7 +496,34 @@ private:
     UINT m_shadowBatchesFrame = 0;
 public:
     void FlushShadowBatch(); // also before game buffers and textures are written (resources.cpp)
+    // Draws the recorded terrain sections (terrain_batch.cpp). Called before anything that reads
+    // or replaces the state they were recorded with: every other draw, clears, copies, uploads.
+    void FlushTerrainBatch() { if (m_terrainBatchOpen) DrawTerrainBatch(); }
 private:
+    // Terrain sections: the game draws each 8x8-unit quarter of every 16x16 section separately,
+    // with the same shader, textures and states; only stream 0, the index range and c4/c5 change.
+    // Those draws are recorded and drawn as one instanced draw of the pulled shader variant.
+    struct BatchSection { float r4[4], r5[4]; UINT vertexBase, indexBase, indexCount; INT baseVertex; };
+    struct PoolEntry { UINT64 revision; UINT offset, count; };
+    bool m_terrainBatchOpen = false; // any other state change draws it first (the setters call FlushTerrainBatch)
+    DWORD m_terrainType = 0;
+    UINT m_terrainStride0 = 0, m_terrainMaxIndices = 0, m_terrainStream1[2] = {};
+    VertexShader8* m_terrainVS = nullptr;
+    std::vector<BatchSection> m_terrainSections;
+    ComPtr<ID3D11Buffer> m_batchVertexPool, m_batchIndexPool, m_batchSectionBuf, m_batchCB;
+    ComPtr<ID3D11ShaderResourceView> m_batchVertexSRV, m_batchIndexSRV, m_batchSectionSRV;
+    UINT m_batchVertexUsed = 0, m_batchIndexUsed = 0, m_batchSectionCapacity = 0;
+    std::unordered_map<UINT64, PoolEntry> m_batchVertices;                    // by buffer identity
+    std::map<std::tuple<UINT64, UINT, UINT, DWORD>, PoolEntry> m_batchIndices; // identity, start, prims, type
+    bool m_batchUnavailable = false;
+    UINT m_batchDrawsLogged = 0, m_batchStatsFrame = 0, m_batchDraws = 0, m_batchSectionCount = 0, m_batchSingles = 0;
+    bool CreateBatchResources();
+    bool PoolVertices(VertexBuffer* vb, UINT& offset);
+    bool PoolIndices(DWORD type, UINT startIndex, UINT primCount, UINT& offset, UINT& count);
+    bool RecordTerrainSection(DWORD type, UINT startIndex, UINT primCount);
+    bool StartTerrainBatch(DWORD type, UINT startIndex, UINT primCount);
+    bool AppendTerrainBatch(DWORD type, UINT startIndex, UINT primCount);
+    void DrawTerrainBatch();
     // Screen tiles of kLightTile pixels, each with the lamps whose sphere can reach it (t17): the
     // pixel shader walks those instead of every lamp. count[2] = tiles per row, count[3] = 1 valid.
     static const int kLightTile = 32;

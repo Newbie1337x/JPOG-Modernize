@@ -36,6 +36,14 @@ int main(int argc, char** argv)
         printf("%-32s %s %s\n", func.c_str(), good ? "OK" : "FAIL", err.c_str());
         if (!outDir.empty() && !hlsl.empty()) std::ofstream(outDir + func + ".hlsl") << hlsl;
         (good ? ok : fail)++;
+        // The batched terrain variant (vertex pulling), for declarations it can take.
+        if ((parsed.streamMask & 1) && !(parsed.streamMask & ~3u) && VSConstantRegisters(code.data()) < 256) {
+            std::string perr, pulled = TranslateVS(code.data(), parsed, perr, true);
+            bool pgood = !pulled.empty() && CompileHLSL(pulled, "vs_5_0", func + "_batch");
+            printf("%-32s %s %s\n", (func + " batch").c_str(), pgood ? "OK" : "FAIL", perr.c_str());
+            if (!outDir.empty() && !pulled.empty()) std::ofstream(outDir + func + "_batch.hlsl") << pulled;
+            (pgood ? ok : fail)++;
+        }
     }
     if (h != INVALID_HANDLE_VALUE) FindClose(h);
 
