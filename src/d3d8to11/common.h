@@ -53,6 +53,7 @@ struct Config {
     float pointLightRadius = 8.0f;  // [Lighting] PointLightRadius (world units)
     float pointLightTint[3] = { 1.0f, 0.741f, 0.439f }; // [Lighting] PointLightTint (#FFBD70)
     float pointLightWarmth = 0.75f; // [Lighting] PointLightWarmth: 0 = the mask's colour, 1 = the tint
+    int pointLightDebug = 0;        // [Lighting] PointLightDebug: 1 = lamps per screen tile as colour, lamp centres as green columns; 2 = the same over every lamp, without tiles
     bool bloom = true;              // [Lighting] Bloom: glow around bright pixels
     float bloomStrength = 0.6f;     // [Lighting] BloomStrength (at night)
     float bloomThreshold = 0.75f;   // [Lighting] BloomThreshold (picture brightness 0-1)

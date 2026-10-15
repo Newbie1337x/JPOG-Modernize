@@ -69,11 +69,25 @@ void Device::UpdateWaterRegions()
     // restarting the scan; classify against the latest measured plane instead.
     m_waterRegionLevel=level;
     unsigned count=(std::min)(8192u,total-m_waterRegionNext);
-    if(!NativeHeightsSafe(bridge,info,m_waterRegionHeights.data(),m_waterRegionNext,count)){
+    // Rescans read into a scratch chunk: the map (flood fill, shore distances, three texture
+    // uploads; about 17 ms) is rebuilt only when the terrain or the water height changed.
+    float* dst=m_waterRegionHeights.data()+m_waterRegionNext;
+    if(m_waterRegionReady){m_waterRegionScan.resize(count);dst=m_waterRegionScan.data();}
+    if(!NativeHeightsSafe(bridge,info,dst,m_waterRegionNext,count)){
         m_waterNativeFault=true;m_waterRegionReady=false;
         Log("Native water region scan stopped: invalid terrain read; no engine state modified");return;
     }
+    if(m_waterRegionReady){
+        float* old=m_waterRegionHeights.data()+m_waterRegionNext;
+        if(memcmp(old,dst,count*sizeof(float))){memcpy(old,dst,count*sizeof(float));m_waterRegionChanged=true;}
+    }
     m_waterRegionNext+=count;
+    if(m_waterRegionNext==total && m_waterRegionReady && !m_waterRegionChanged && std::fabs(m_waterRegionLevel-m_waterRegionBuiltLevel)<.02f){
+        m_waterRegionRefresh=now;
+        QueryPerformanceCounter(&end);m_waterRegionCpuMs=float((end.QuadPart-start.QuadPart)*1000.0/m_qpcFreq.QuadPart);
+        return;
+    }
+    if(m_waterRegionNext==total) {m_waterRegionChanged=false;m_waterRegionBuiltLevel=m_waterRegionLevel;}
     if(m_waterRegionNext==total && m_waterRegions.Build(info.w,info.h,m_waterRegionHeights,m_waterRegionLevel)){
         ID3D11ShaderResourceView* none[3]={};
         BindPSSrv(12,3,none);BindVSSrv(12,3,none);

@@ -628,6 +628,8 @@ void Device::DrawOverlay()
             ImGui::SliderFloat("Radio de faroles", &g_config.pointLightRadius, 0.5f, 64, "%.1f");
             ImGui::SliderFloat("Calidez de faroles", &g_config.pointLightWarmth, 0, 1, "%.2f");
             ImGui::ColorEdit3("Color de faroles", g_config.pointLightTint);
+            ImGui::SliderInt("Depurar faroles", &g_config.pointLightDebug, 0, 2);
+            ImGui::SetItemTooltip("1: color = faroles por zona de pantalla (rojo = lleno), columnas verdes = donde quedo cada farol. 2: lo mismo sin zonas, recorriendo todos.");
             ImGui::Checkbox("Bloom", &g_config.bloom);
             ImGui::SliderFloat("Intensidad de bloom", &g_config.bloomStrength, 0, 4, "%.2f");
             ImGui::SliderFloat("Umbral de bloom", &g_config.bloomThreshold, 0, 1, "%.2f");

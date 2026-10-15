@@ -5,17 +5,17 @@
 
 // Fixed query ring. No Flush, spins or blocking GPU readbacks. Times are inclusive.
 struct Performance {
-    enum Stage { Frame, Effects, Resolve, WaterCopy, Temporal, Upscale, Count };
+    enum Stage { Frame, Effects, Resolve, WaterCopy, Temporal, Upscale, Shadow, Count };
     enum CpuStage { CpuPrepare, CpuTess, CpuShadow, CpuSetup, CpuScene,
         CpuDiagnostics, CpuVertex, CpuConstants, CpuResources, CpuPipeline, CpuGeometryUpload, CpuCount };
-    static constexpr int Slots=4, Events=32;
+    static constexpr int Slots=4, Events=64;
     struct Event { ComPtr<ID3D11Query> begin,end; int stage=0; };
     struct Slot { ComPtr<ID3D11Query> disjoint; Event events[Events]; int used=0; bool pending=false, overflow=false; };
     Slot slots[Slots];
     bool enabled=false, active=false, failed=false, valid=false, attempted=false;
     unsigned serial=0;
     int current=-1;
-    unsigned skipped=0;
+    unsigned skipped=0, spikesLogged=0;
     double gpu[Count]={}, frameMs=0, peakMs=0, presentMs=0, limiterMs=0;
     float history[180]={}; unsigned historyAt=0;
     SIZE_T privateBytes=0, workingSet=0, basePrivate=0, peakPrivate=0;

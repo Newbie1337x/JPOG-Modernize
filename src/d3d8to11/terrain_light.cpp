@@ -27,13 +27,38 @@ void Device::UpdateTerrainHeights()
         m_terrainNext = 0; // rescan: the texture keeps the previous heights until it completes
     }
     const unsigned count = (std::min)(16384u, total - m_terrainNext);
-    if (!native_terrain::HeightsSafe(bridge, info, m_terrainHeights.data(), m_terrainNext, count)) {
+    // The first scan fills the array; rescans (every 3 s, for terrain edits) read into a scratch
+    // chunk and only the rows that changed are uploaded: the whole map is several MB and sending
+    // it every 3 s was a visible hitch.
+    float* dst = m_terrainHeights.data() + m_terrainNext;
+    if (m_terrainReady) { m_terrainScan.resize(count); dst = m_terrainScan.data(); }
+    if (!native_terrain::HeightsSafe(bridge, info, dst, m_terrainNext, count)) {
         m_terrainFault = true; m_terrainReady = false;
         Log("Terrain height field scan stopped: invalid terrain read; no engine state modified");
         return;
     }
+    if (m_terrainReady) {
+        float* old = m_terrainHeights.data() + m_terrainNext;
+        for (unsigned k = 0; k < count; k++) {
+            if (old[k] == dst[k]) continue;
+            old[k] = dst[k];
+            const unsigned row = (m_terrainNext + k) / info.w;
+            m_terrainDirtyLo = (std::min)(m_terrainDirtyLo, row);
+            m_terrainDirtyHi = (std::max)(m_terrainDirtyHi, row + 1);
+        }
+    }
     m_terrainNext += count;
     if (m_terrainNext < total) return;
+    if (m_terrainReady) {
+        if (m_terrainDirtyHi > m_terrainDirtyLo && m_terrainHeightTex) {
+            const D3D11_BOX box = { 0, m_terrainDirtyLo, 0, info.w, m_terrainDirtyHi, 1 };
+            m_ctx->UpdateSubresource(m_terrainHeightTex.Get(), 0, &box, m_terrainHeights.data() + size_t(m_terrainDirtyLo) * info.w,
+                                     info.w * sizeof(float), 0);
+        }
+        m_terrainDirtyLo = ~0u; m_terrainDirtyHi = 0;
+        m_terrainRefresh = now;
+        return;
+    }
     if (!m_terrainHeightTex) {
         D3D11_TEXTURE2D_DESC td = { info.w, info.h, 1, 1, DXGI_FORMAT_R32_FLOAT, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 };
         if (FAILED(m_device->CreateTexture2D(&td, nullptr, &m_terrainHeightTex)) ||

@@ -496,7 +496,14 @@ std::string MaterialCode(bool normalMap, int stage){
         " float3 indirectSpec=environment*envF*materialSurface.z*(1-.5*rough);\n"
         " float3 lit=ambient+direct+indirectSpec;\n"
         " if(game){float3 rim=RimLight(N,i.world);lit+=albedo*rim+rim*.08;}\n"
-        " return float4(game?LinearToOutput(lit):pow(max(lit,0),1/2.2),color.a);}\n";
+        " if(!game)return float4(pow(max(lit,0),1/2.2),color.a);\n"
+        // As ApplySun on the surfaces without a material profile: the moonlight grade, then the
+        // night lamps (lights.cpp) added after it so they keep their warm colour.
+        " float3 outRgb=LinearToOutput(lit);\n"
+        " if(sunFlags.x<.5||sunFlags.y>.5)return float4(outRgb,color.a);\n"
+        " float3 lamps=LinearToOutput(lit+albedo*PointLights(N,i.world,false,i.pos.xy))-outRgb;\n"
+        " if(nightGrade.w>0)outRgb=NightGrade(outRgb);\n"
+        " return float4(outRgb+lamps,color.a);}\n";
     if(stage==1){size_t p=0;while((p=s.find("i.t0.xy",p))!=std::string::npos){s.replace(p,7,"i.t1.xy");p+=7;}}
     return s;
 }
@@ -542,18 +549,36 @@ std::string SunPixelCodeBase() {
         // light: full sun and full shade reproduce the original colours exactly, the rest is
         // physically summed and gets a sky/ground tinted ambient. Output goes through exposure and
         // a highlight-only shoulder so values the game kept below 1 are not changed.
-        // Night point lights (lights.cpp): pos.w = radius; count.y = inverse-square knee.
-        "cbuffer PointLights : register(b5) { float4 lightCount; float4 lightPos[64]; float4 lightColor[64]; };\n"
+        // Night point lights (lights.cpp): count.y = inverse-square knee.
+        "cbuffer PointLights : register(b5) { float4 lightCount; };\n"
         // Lamp light in output space, added after the night grade so lamps keep their warm colour.
         "static float3 pointExtra = 0;\n"
-        "float3 PointLights(float3 N, float3 P, bool flat) {\n"
+        // Per lamp two texels: position + radius, colour.
+        "Buffer<float4> lightData : register(t18);\n"
+        "float3 PointLight(uint k, float3 N, float3 P, bool flat) {\n"
+        "  float4 lp = lightData.Load(k * 2);\n"
+        "  float3 L = lp.xyz - P; float d2 = dot(L, L), r2 = lp.w * lp.w;\n"
+        "  if (d2 >= r2) return 0;\n"
+        "  float f = saturate(1 - d2 / r2); f *= f;\n"
+        "  float ndl = flat ? 1 : saturate(dot(N, L * rsqrt(max(d2, 1e-6))) * 0.8 + 0.2);\n"
+        "  return lightData.Load(k * 2 + 1).rgb * f * ndl / (1 + d2 * lightCount.y); }\n"
+        // Screen tiles (lights.cpp BuildLightTiles): offset << 8 | count, then the lamps of each 32-pixel tile.
+        "Buffer<uint> lightTiles : register(t17);\n"
+        "float3 PointLights(float3 N, float3 P, bool flat, float2 px) {\n"
         "  float3 sum = 0;\n"
-        "  [loop] for (int k = 0; k < (int)lightCount.x; k++) {\n"
-        "    float3 L = lightPos[k].xyz - P; float d2 = dot(L, L), r2 = lightPos[k].w * lightPos[k].w;\n"
-        "    if (d2 >= r2) continue;\n"
-        "    float f = saturate(1 - d2 / r2); f *= f;\n"
-        "    float ndl = flat ? 1 : saturate(dot(N, L * rsqrt(max(d2, 1e-6))) * 0.8 + 0.2);\n"
-        "    sum += lightColor[k].rgb * f * ndl / (1 + d2 * lightCount.y);\n"
+        "  if (lightCount.w <= 0) return sum;\n"
+        "  if (lightCount.w > 2.5) {\n" // PointLightDebug 2: every lamp, no tiles
+        "    [loop] for (uint k = 0; k < (uint)lightCount.x; k++) { float2 d = lightData.Load(k * 2).xz - P.xz; if (dot(d, d) < 0.36) return float3(0, 6, 0); sum += PointLight(k, N, P, flat); }\n"
+        "    return sum * 0.2; }\n"
+        "  uint2 t = (uint2)px / 32;\n"
+        "  uint e = lightTiles.Load(t.y * (uint)lightCount.z + t.x);\n"
+        "  uint o = e >> 8, c = e & 255;\n"
+        "  [loop] for (uint j = 0; j < c; j++) sum += PointLight(lightTiles.Load(o + j), N, P, flat);\n"
+        // PointLightDebug: lamps in this tile as colour (blue few .. red full) and a green column
+        // under each lamp centre (JPOG is Y-down: the column is the xz distance).
+        "  if (lightCount.w > 1.5) {\n"
+        "    float h = c / 48.0; sum = float3(h, 0.15 * (1 - h), 1 - h) * 0.4;\n"
+        "    [loop] for (uint j = 0; j < c; j++) { float2 d = lightData.Load(lightTiles.Load(o + j) * 2).xz - P.xz; if (dot(d, d) < 0.36) sum = float3(0, 6, 0); }\n"
         "  }\n"
         "  return sum; }\n"
         "float3 ToLinear(float3 c) { return pow(max(c, 0), 2.2); }\n"
@@ -647,7 +672,7 @@ std::string SunPixelCodeBase() {
         "    if (field) sunF = fieldNdl * min(fieldShadow, lerp(1, fieldNdl > 0.05 ? saturate(f / fieldNdl) : 1, sunControl.w));\n"
         "    float3 light = GameAmbient(N) + GameSun() * sunF, albedo = ToLinear(color.rgb * tint);\n"
         "    float3 outRgb = LinearToOutput(albedo * light);\n"
-        "    pointExtra = LinearToOutput(albedo * (light + PointLights(N, i.world, false))) - outRgb;\n"
+        "    pointExtra = LinearToOutput(albedo * (light + PointLights(N, i.world, false, i.pos.xy))) - outRgb;\n"
         "    return float4(outRgb, color.a);\n"
         "  }\n"
         // Grass: the game draws it unlit (blade texture blended with the terrain colour map; v0 is
@@ -662,7 +687,7 @@ std::string SunPixelCodeBase() {
         // The tips (t7.x = blade height) catch the moon (rimColor.w).
         "    light += GameSun() * saturate(i.t7.x * 1.5) * rimColor.w;\n"
         "    float3 outRgb = LinearToOutput(ToLinear(color.rgb) * light / max(base, 0.05));\n"
-        "    pointExtra = LinearToOutput(ToLinear(color.rgb) * (light / max(base, 0.05) + PointLights(N, i.world, true))) - outRgb;\n"
+        "    pointExtra = LinearToOutput(ToLinear(color.rgb) * (light / max(base, 0.05) + PointLights(N, i.world, true, i.pos.xy))) - outRgb;\n"
         "    return float4(outRgb, color.a);\n"
         "  }\n"
         // Terrain: the game's per-vertex sun factor (v0.w, passed in t7.x) keeps its smooth slopes.
@@ -692,7 +717,7 @@ std::string SunPixelCodeBase() {
         // The terrain shader fades its lighting out under distant haze; keep that.
         "  if (sunFlags.w == 2) light = lerp(light, 1, saturate(i.d1.w));\n"
         "  float3 lin = ToLinear(color.rgb) * light + rim * grassGrade.z + sheen, outRgb = LinearToOutput(lin);\n"
-        "  float3 lamps = PointLights(N, i.world, false);\n"
+        "  float3 lamps = PointLights(N, i.world, false, i.pos.xy);\n"
         "  if (sunFlags.w == 2) lamps *= saturate(1 - i.d1.w);\n" // not through distant haze
         "  pointExtra = LinearToOutput(lin + ToLinear(color.rgb) * lamps) - outRgb;\n"
         "  return float4(outRgb, color.a);\n"

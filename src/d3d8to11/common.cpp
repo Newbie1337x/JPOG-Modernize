@@ -103,6 +103,7 @@ void LoadConfig()
     g_config.pointLightIntensity = readFloat("PointLightIntensity", 1.5f, 0, 16);
     g_config.pointLightRadius = readFloat("PointLightRadius", 8.0f, 0.5f, 64);
     g_config.pointLightWarmth = readFloat("PointLightWarmth", 0.75f, 0, 1);
+    g_config.pointLightDebug = (std::max)(0, (std::min)(2, (int)GetPrivateProfileIntA("Lighting", "PointLightDebug", 0, ini.c_str())));
     {
         char v[64] = {};
         GetPrivateProfileStringA("Lighting", "PointLightTint", "", v, sizeof(v), ini.c_str());
@@ -330,6 +331,7 @@ void SaveConfig()
     putFloat("Lighting", "PointLightIntensity", g_config.pointLightIntensity);
     putFloat("Lighting", "PointLightRadius", g_config.pointLightRadius);
     putFloat("Lighting", "PointLightWarmth", g_config.pointLightWarmth);
+    putInt("Lighting", "PointLightDebug", g_config.pointLightDebug);
     {
         char v[64];
         sprintf_s(v, "%.3f,%.3f,%.3f", g_config.pointLightTint[0], g_config.pointLightTint[1], g_config.pointLightTint[2]);

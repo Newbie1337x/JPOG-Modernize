@@ -417,6 +417,7 @@ void Device::StartSunFrame()
     if (std::fabs(XMVectorGetX(det)) < 1e-20f) return;
     StoreRows(inv, m_sun.clipToWorld);
     memcpy(m_waterViewProjection,rows,sizeof(rows));
+    BuildLightTiles(); // this frame's camera
     // Camera position: the point that maps to clip (0, 0, z, 0).
     XMVECTOR camH = XMVector4Transform(XMVectorSet(0, 0, 1, 0), inv);
     XMVECTOR cam;
@@ -428,6 +429,9 @@ void Device::StartSunFrame()
         cam = centre - XMVector3Normalize(XMVectorSetW(camH, 0)) * 1e5f;
     }
     m_sun.camera[0] = XMVectorGetX(cam); m_sun.camera[1] = XMVectorGetY(cam); m_sun.camera[2] = XMVectorGetZ(cam);
+    if (g_config.pointLightDebug && m_frame % 300 == 0)
+        Log("Sun segment: camera %.1f %.1f %.1f, viewport %ux%u at %u,%u, rt %s", m_sun.camera[0], m_sun.camera[1], m_sun.camera[2],
+            m_viewport.Width, m_viewport.Height, m_viewport.X, m_viewport.Y, m_rt == m_backBuffer ? "back" : "other");
 
     // JPOG's world is Y-down: "up" is -Y (camera above the park at y = -55, palm crowns at
     // y = -6 over ground at -1). SunX/Y/Z in the ini use Y-up, so Y is negated here.
@@ -487,6 +491,7 @@ void Device::StartSunFrame()
     m_sunTexelWorld = texel;
     m_sun.settings[0] = g_config.sunAmbient; m_sun.settings[1] = g_config.sunDirect;
     m_sun.settings[2] = g_config.shadowStrength; m_sun.settings[3] = 1.0f / res;
+    FlushShadowBatch(); // a segment that never resolved
     if (g_config.sunLighting && m_sunDSV) m_ctx->ClearDepthStencilView(m_sunDSV.Get(), D3D11_CLEAR_DEPTH, 1, 0);
     m_sunStarted = true;
     m_pusherCount = 0;
@@ -521,11 +526,15 @@ void Device::CaptureGameSun()
     // In-game this comes out as e.g. (0.47 -0.74 0.47): negative Y is up in JPOG, so the sun
     // is above the island. Should it ever point below the ground, mirror it up.
     if (XMVectorGetY(w) > 0) w = -w;
+    static bool logged = false; // LogOnce locks and searches a set: not on every skinned draw
+    if (!logged) {
+    logged = true;
     XMFLOAT4X4 mf;
     XMStoreFloat4x4(&mf, model);
     LogOnce("sun-game", "Game sun (skin c89) %.3f %.3f %.3f; model matrix w column %.4f %.4f %.4f %.4f; terrain c22 %.3f %.3f %.3f",
             XMVectorGetX(w), XMVectorGetY(w), XMVectorGetZ(w), mf._14, mf._24, mf._34, mf._44,
             m_vsConst[22][0], m_vsConst[22][1], m_vsConst[22][2]);
+    }
     if (!m_gameSunValid) {
         XMStoreFloat3(reinterpret_cast<XMFLOAT3*>(m_gameSun), w);
         m_gameSunValid = true;
@@ -764,22 +773,140 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base)
     UpdateSun(true);
     ID3D11PixelShader* depthPixel = GetPixelShader();
     if (!depthPixel) { UpdateSun(false); return; }
-    m_ctx->PSSetShader(depthPixel, nullptr, 0);
-    m_lastPS = nullptr;
+    ++m_shadowDraws;
+    ++m_perfShadowDraws;
+    ++m_segmentCasters;
+    // Batched: the caster is recorded and drawn with the others into the shadow map before the
+    // resolve reads it (FlushShadowBatch), instead of switching the render target to the shadow
+    // map and back for every caster (about 3 us of GPU each, 4 ms a frame with 1300 casters).
+    // Recorded state comes from the context itself; the vertex constants stay in the ring window
+    // this draw used. Grass casters (pusher constants) and draws from our own dynamic buffers
+    // keep the immediate path.
+    ShadowDraw d = {};
+    ComPtr<ID3D11Buffer> ib;
+    DXGI_FORMAT ibFormat = DXGI_FORMAT_UNKNOWN;
+    UINT ibOffset = 0;
+    m_ctx->IAGetIndexBuffer(&ib, &ibFormat, &ibOffset);
+    ID3D11Buffer* vbs[kMaxStreams] = {};
+    UINT strides[kMaxStreams] = {}, offsets[kMaxStreams] = {};
+    m_ctx->IAGetVertexBuffers(0, kMaxStreams, vbs, strides, offsets);
+    bool batch = m_vsRing && g_config.constantRing && m_vsRingBound && m_worldKind != 4 && !(indexed && ib.Get() == m_dynIB.Get());
+    for (int s = 0; s < kMaxStreams; s++) {
+        if (vbs[s] && vbs[s] == m_dynVB.Get()) batch = false;
+        d.vb[s].Attach(vbs[s]); // IAGetVertexBuffers added a reference
+        d.stride[s] = strides[s];
+        d.offset[s] = offsets[s];
+    }
+    if (!batch) {
+        FlushShadowBatch();
+        m_ctx->PSSetShader(depthPixel, nullptr, 0);
+        m_lastPS = nullptr;
+        m_ctx->OMSetRenderTargets(0, nullptr, m_sunDSV.Get());
+        D3D11_VIEWPORT vp = { 0, 0, (float)m_sunMapSize, (float)m_sunMapSize, 0, 1 };
+        m_ctx->RSSetViewports(1, &vp);
+        m_ctx->RSSetState(m_sunRaster.Get());
+        m_ctx->OMSetDepthStencilState(m_sunDepth.Get(), 0);
+        m_ctx->OMSetBlendState(m_noBlend.Get(), nullptr, 0xffffffff);
+        if (indexed) m_ctx->DrawIndexed(count, start, base); else m_ctx->Draw(count, start);
+        // Vertex/pixel shaders, streams and constants remain valid. PrepareDraw restores targets,
+        // viewport and the sun-pass flag before the next game draw.
+        m_rtDirty = m_viewportDirty = true;
+        m_lastBlend = nullptr; m_lastDepth = nullptr; m_lastRaster = nullptr;
+        return;
+    }
+    d.ib = ib;
+    d.ibFormat = ibFormat;
+    d.ibOffset = ibOffset;
+    m_ctx->IAGetInputLayout(&d.layout);
+    m_ctx->IAGetPrimitiveTopology(&d.topo);
+    m_ctx->VSGetShader(&d.vs, nullptr, nullptr);
+    d.ps = depthPixel;
+    ID3D11ShaderResourceView* srvs[kMaxStages] = {};
+    ID3D11SamplerState* samplers[kMaxStages] = {};
+    m_ctx->PSGetShaderResources(0, kMaxStages, srvs);
+    m_ctx->PSGetSamplers(0, kMaxStages, samplers);
+    for (int s = 0; s < kMaxStages; s++) { d.srv[s].Attach(srvs[s]); d.sampler[s].Attach(samplers[s]); }
+    d.vsFirst = m_vsRingFirst;
+    if (m_shadowSuns.empty() || memcmp(&m_shadowSuns.back(), &m_sun, sizeof(m_sun))) m_shadowSuns.push_back(m_sun);
+    d.sun = (UINT)m_shadowSuns.size() - 1;
+    if (m_shadowPS.empty() || memcmp(&m_shadowPS.back(), &m_psConst, sizeof(m_psConst))) m_shadowPS.push_back(m_psConst);
+    d.psc = (UINT)m_shadowPS.size() - 1;
+    d.indexed = indexed; d.count = count; d.start = start; d.base = base;
+    m_shadowBatch.push_back(std::move(d));
+}
+
+// Draws the recorded casters into the shadow map in one render-target switch. Called before the
+// resolve reads the map, and before anything the recorded draws reference changes: the vertex
+// constant ring wrapping, a game buffer or texture being written.
+void Device::FlushShadowBatch()
+{
+    if (m_shadowBatch.empty()) return;
+    ++m_shadowBatchesFrame;
+    if (!m_shadowPSCB) {
+        D3D11_BUFFER_DESC bd = { (UINT)((sizeof(PSConstants) + 15) & ~15u), D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0 };
+        if (FAILED(m_device->CreateBuffer(&bd, nullptr, &m_shadowPSCB))) { m_shadowBatch.clear(); return; }
+    }
+    PerformanceScope perf(m_perf, m_device.Get(), m_ctx.Get(), Performance::Shadow);
     m_ctx->OMSetRenderTargets(0, nullptr, m_sunDSV.Get());
     D3D11_VIEWPORT vp = { 0, 0, (float)m_sunMapSize, (float)m_sunMapSize, 0, 1 };
     m_ctx->RSSetViewports(1, &vp);
     m_ctx->RSSetState(m_sunRaster.Get());
     m_ctx->OMSetDepthStencilState(m_sunDepth.Get(), 0);
     m_ctx->OMSetBlendState(m_noBlend.Get(), nullptr, 0xffffffff);
-    if (indexed) m_ctx->DrawIndexed(count, start, base); else m_ctx->Draw(count, start);
-    ++m_shadowDraws;
-    ++m_perfShadowDraws;
-    ++m_segmentCasters;
-    // Vertex/pixel shaders, streams and constants remain valid. PrepareDraw restores targets,
-    // viewport and the sun-pass flag before the next game draw.
+    ID3D11Buffer* none = nullptr;
+    m_ctx->VSSetConstantBuffers(4, 1, &none); // water block: casters are never water
+    m_ctx->PSSetConstantBuffers(0, 1, m_shadowPSCB.GetAddressOf());
+    m_ctx->VSSetConstantBuffers(2, 1, m_sunCB.GetAddressOf());
+    m_ctx->PSSetConstantBuffers(1, 1, m_sunCB.GetAddressOf());
+    UINT sun = ~0u, psc = ~0u, first = ~0u;
+    ID3D11VertexShader* vs = nullptr; ID3D11PixelShader* ps = nullptr; ID3D11InputLayout* layout = nullptr;
+    D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    ID3D11Buffer* ib = nullptr;
+    for (const ShadowDraw& d : m_shadowBatch) {
+        if (d.sun != sun) {
+            sun = d.sun;
+            D3D11_MAPPED_SUBRESOURCE map;
+            if (SUCCEEDED(m_ctx->Map(m_sunCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+                memcpy(map.pData, &m_shadowSuns[sun], sizeof(m_sun)); m_ctx->Unmap(m_sunCB.Get(), 0);
+            }
+        }
+        if (d.psc != psc) {
+            psc = d.psc;
+            D3D11_MAPPED_SUBRESOURCE map;
+            if (SUCCEEDED(m_ctx->Map(m_shadowPSCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+                memcpy(map.pData, &m_shadowPS[psc], sizeof(PSConstants)); m_ctx->Unmap(m_shadowPSCB.Get(), 0);
+            }
+        }
+        if (d.vsFirst != first) {
+            first = d.vsFirst;
+            const UINT num = kMaxVSConst;
+            m_ctx1->VSSetConstantBuffers1(0, 1, m_vsRing.GetAddressOf(), &first, &num);
+        }
+        if (d.vs.Get() != vs) { vs = d.vs.Get(); m_ctx->VSSetShader(vs, nullptr, 0); }
+        if (d.ps != ps) { ps = d.ps; m_ctx->PSSetShader(ps, nullptr, 0); }
+        if (d.layout.Get() != layout) { layout = d.layout.Get(); m_ctx->IASetInputLayout(layout); }
+        if (d.topo != topo) { topo = d.topo; m_ctx->IASetPrimitiveTopology(topo); }
+        ID3D11Buffer* vbs[kMaxStreams];
+        for (int s = 0; s < kMaxStreams; s++) vbs[s] = d.vb[s].Get();
+        m_ctx->IASetVertexBuffers(0, kMaxStreams, vbs, d.stride, d.offset);
+        if (d.indexed && d.ib.Get() != ib) { ib = d.ib.Get(); m_ctx->IASetIndexBuffer(ib, d.ibFormat, d.ibOffset); }
+        ID3D11ShaderResourceView* srvs[kMaxStages];
+        ID3D11SamplerState* samplers[kMaxStages];
+        for (int s = 0; s < kMaxStages; s++) { srvs[s] = d.srv[s].Get(); samplers[s] = d.sampler[s].Get(); }
+        m_ctx->PSSetShaderResources(0, kMaxStages, srvs);
+        m_ctx->PSSetSamplers(0, kMaxStages, samplers);
+        if (d.indexed) m_ctx->DrawIndexed(d.count, d.start, d.base); else m_ctx->Draw(d.count, d.start);
+    }
+    m_shadowBatch.clear();
+    m_shadowSuns.clear();
+    m_shadowPS.clear();
+    // Everything the game's draws had bound is rebound by the next PrepareDraw.
+    InvalidateBindings();
     m_rtDirty = m_viewportDirty = true;
     m_lastBlend = nullptr; m_lastDepth = nullptr; m_lastRaster = nullptr;
+    m_lastVS = nullptr; m_lastPS = nullptr; m_lastLayout = nullptr; m_lastIB = nullptr;
+    for (int s = 0; s < kMaxStreams; s++) m_lastVB[s] = nullptr;
+    m_sunUploadedValid = false;
 }
 
 // End of the world pass: copies the scene and redraws it with sun shadows and the [Post]
@@ -787,6 +914,7 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base)
 void Device::ResolveSun(const char* reason)
 {
     if (!m_sunStarted || m_sunResolved) return;
+    FlushShadowBatch(); // the shadow map is complete before anything reads it
     // JPOG clears depth at the end of the world, before Present. Capture the
     // current scene's footprints while its camera and pusher list are valid.
     UpdateWaterInteractions();

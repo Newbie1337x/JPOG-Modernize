@@ -1257,6 +1257,9 @@ bool Device::PrepareDraw()
     m_perf.enabled=g_config.performanceGPU;
     m_perf.Begin(m_device.Get(),m_ctx.Get());
     ++m_perfDraws;
+    // Recorded shadow casters read the current constant ring window: draw them before it wraps,
+    // and before this draw binds anything (the flush leaves its own state behind).
+    if (!m_shadowBatch.empty() && m_vsRingPos + sizeof(m_vsConst) > kVsRingBytes) FlushShadowBatch();
     // The first depth-less draw to the back buffer after the world is the HUD: apply the
     // sun shadows before it so they never darken the interface.
     if (m_sunStarted && !m_sunResolved && m_rt == m_backBuffer && !m_rs[RS_ZENABLE]) { ResolveSun("hud"); InvalidateBindings(); }
@@ -1827,6 +1830,18 @@ HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
     QueryPerformanceCounter(&perfStart);
     m_perf.limiterMs=(perfStart.QuadPart-perfEnd.QuadPart)*1000.0/m_qpcFreq.QuadPart;
     RecordPerformance();
+    {
+        // Spike log, render side: a frame of this thread over 15 ms (the game side is in csmt_device.cpp).
+        static LARGE_INTEGER last = {};
+        static UINT logged = 0;
+        const double ms = last.QuadPart ? (perfStart.QuadPart - last.QuadPart) * 1000.0 / m_qpcFreq.QuadPart : 0;
+        last = perfStart;
+        if (ms >= 15 && ms < 200 && logged < 300) {
+            logged++;
+            Log("Render frame %.1f ms: present %.1f ms, limiter %.1f ms, %u draws, %u shadow draws", ms, m_perf.presentMs, m_perf.limiterMs,
+                m_perfDraws, m_perfShadowDraws);
+        }
+    }
     m_perfDraws=m_perfWaterDraws=m_perfShadowDraws=0;
     m_tessDrawsShown=m_tessDraws; m_tessDraws=0;
     m_reliefDrawsShown=m_reliefDraws; m_reliefDraws=0;

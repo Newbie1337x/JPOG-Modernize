@@ -169,6 +169,7 @@ public:
             q->FrameDone();
         });
         q->FramePosted();
+        LogGameSpike(q);
         return S_OK;
     }
 
@@ -483,6 +484,35 @@ public:
     }
 
 private:
+    // A game-thread frame (Present to Present) over 15 ms: where it stalled on the render thread.
+    LARGE_INTEGER m_lastPresent = {};
+    UINT m_spikesLogged = 0;
+    void LogGameSpike(CommandQueue* q)
+    {
+        LARGE_INTEGER now, f;
+        QueryPerformanceCounter(&now);
+        QueryPerformanceFrequency(&f);
+        const double ms = m_lastPresent.QuadPart ? (now.QuadPart - m_lastPresent.QuadPart) * 1000.0 / f.QuadPart : 0;
+        m_lastPresent = now;
+        CommandQueue::Stalls s = q->m_stalls;
+        q->m_stalls = {};
+        if (ms < 15 || ms > 200 || m_spikesLogged >= 300) return;
+        m_spikesLogged++;
+        std::string where;
+        for (int i = 0; i < 6 && s.where[i]; i++) {
+            HMODULE mod = nullptr;
+            char name[MAX_PATH] = "?";
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)s.where[i], &mod))
+                GetModuleFileNameA(mod, name, MAX_PATH);
+            const char* base = strrchr(name, '\\');
+            char item[MAX_PATH + 64];
+            sprintf_s(item, " %s+0x%x x%u %.1fms;", base ? base + 1 : name, (unsigned)((uintptr_t)s.where[i] - (uintptr_t)mod),
+                      s.whereCount[i], s.whereTicks[i] * 1000.0 / f.QuadPart);
+            where += item;
+        }
+        Log("Game frame %.1f ms: %u syncs %.1f ms, waited %.1f ms for the render thread;%s", ms, s.syncs,
+            s.syncTicks * 1000.0 / f.QuadPart, s.frameWaitTicks * 1000.0 / f.QuadPart, where.c_str());
+    }
     CommandQueue& Queue() { if (m_vscHi > m_vscLo) FlushConstants(); return m_dev->m_csmt; }
     void FlushConstants()
     {

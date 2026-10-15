@@ -6,6 +6,7 @@ bool Device::CreateWaterResources()
 {
     m_waterTimeOrigin=GetTickCount64();
     D3D11_BUFFER_DESC cb={sizeof(WaterConstants),D3D11_USAGE_DYNAMIC,D3D11_BIND_CONSTANT_BUFFER,D3D11_CPU_ACCESS_WRITE,0,0};
+    m_waterCBZero=false;
     if(FAILED(m_device->CreateBuffer(&cb,nullptr,&m_waterCB))) return false;
     D3D11_SAMPLER_DESC sd={};
     sd.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -104,10 +105,15 @@ void Device::PrepareWaterDraw()
         }
         LogOnce("water-shader","Modern water active: captured bump-reflection shader VS %lx PS %lx",m_vsHandle,m_psHandle);
     }
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    if(SUCCEEDED(m_ctx->Map(m_waterCB.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped))) {
-        memcpy(mapped.pData,&c,sizeof(c)); m_ctx->Unmap(m_waterCB.Get(),0);
-    } else m_waterDraw=false;
+    // The block is 2.3 KB: other draws keep the zero block from the last upload instead of
+    // renaming the buffer for every draw of the frame.
+    if(m_waterDraw || !m_waterCBZero) {
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        if(SUCCEEDED(m_ctx->Map(m_waterCB.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped))) {
+            memcpy(mapped.pData,&c,sizeof(c)); m_ctx->Unmap(m_waterCB.Get(),0);
+            m_waterCBZero=!m_waterDraw;
+        } else { m_waterDraw=false; m_waterCBZero=false; }
+    }
     BindVSCB(4,1,m_waterCB.GetAddressOf());
     BindPSCB(2,1,m_waterCB.GetAddressOf());
     ID3D11ShaderResourceView* views[2]={m_waterDraw ? m_waterDepthSRV.Get():nullptr,m_waterDraw ? m_waterColorSRV.Get():nullptr};

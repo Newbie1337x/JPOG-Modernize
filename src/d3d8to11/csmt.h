@@ -6,6 +6,7 @@
 // that carry data (constants, rectangles, buffer contents) copy it after the lambda.
 #pragma once
 #include "common.h"
+#include <intrin.h>
 #include <new>
 #include <utility>
 
@@ -50,15 +51,25 @@ public:
         Commit(h->size);
     }
     // Runs f() on the worker and waits for it (and for everything queued before it).
-    template<class F> void Sync(F&& f)
+    template<class F> __declspec(noinline) void Sync(F&& f)
     {
         if (!OffWorker()) { f(); return; }
+        LARGE_INTEGER t0, t1;
+        QueryPerformanceCounter(&t0);
         Post([&f, this]() { f(); SetEvent(m_syncEvent); });
         WakeWorker();
         Wait(m_syncEvent, INFINITE);
+        QueryPerformanceCounter(&t1);
+        NoteSync(_ReturnAddress(), t1.QuadPart - t0.QuadPart);
     }
     void Drain() { Sync([] {}); }
 
+    // Game-thread stalls in the current frame (Sync, frame pacing), for the spike log.
+    struct Stalls {
+        UINT syncs; LONGLONG syncTicks, frameWaitTicks;
+        void* where[6]; LONGLONG whereTicks[6]; UINT whereCount[6];
+    } m_stalls = {};
+    void NoteSync(void* where, LONGLONG ticks);
     // Frame pacing: the game records at most one frame ahead of the worker.
     void FramePosted();
     void FrameDone();

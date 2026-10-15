@@ -320,6 +320,8 @@ private:
     ComPtr<ID3D11ShaderResourceView> m_terrainHeightSRV;
     ComPtr<ID3D11SamplerState> m_terrainSampler;
     std::vector<float> m_terrainHeights;
+    std::vector<float> m_terrainScan;          // rescan chunk, compared with m_terrainHeights
+    unsigned m_terrainDirtyLo = ~0u, m_terrainDirtyHi = 0; // rows changed by the current rescan
     void* m_terrainField = nullptr;
     unsigned m_terrainW = 0, m_terrainH = 0, m_terrainNext = 0;
     bool m_terrainReady = false, m_terrainFault = false;
@@ -451,19 +453,55 @@ private:
         (g_config.sunLighting || g_config.postEnabled || g_config.grassPhysics || g_config.aoEnabled || g_config.waterEnabled || g_config.taa || g_config.fsr31 || g_config.materialsEnabled); }
     void CapturePusher(UINT firstVertex, UINT numVertices);
     // lights.cpp: night point lights from the emission masks.
-    static const int kMaxPointLights = 64; // shaders.cpp PointLights arrays
-    struct PointLightConstants { float count[4]; float pos[kMaxPointLights][4]; float color[kMaxPointLights][4]; };
+    static const int kMaxPointLights = 1024; // lamps lit at once (t18)
+    // b5: x = lamps, y = inverse-square knee, z = tiles per row, w = 1 when the tiles are valid.
+    struct PointLightConstants { float count[4]; };
     struct LightEmitter { float local[3]; BYTE weights[4], indices[4]; float rgb[3]; float weight; UINT count; };
     struct WorldLight { float pos[3]; float rgb[3]; UINT lastSeen; UINT count; };
     std::unordered_map<unsigned long long, std::vector<LightEmitter>> m_emitterCache;
     std::unordered_map<unsigned long long, WorldLight> m_worldLights;
+    // Lamps as drawn, keyed by their world light: eased in and out so a lamp that appears,
+    // disappears or leaves the kMaxPointLights nearest does not pop.
+    struct ShownLight { float pos[3]; float rgb[3]; float level; float dist; bool live; };
+    std::unordered_map<unsigned long long, ShownLight> m_shownLights;
+    LARGE_INTEGER m_shownLightsTime = {};
     PointLightConstants m_pointLights = {};
+    std::vector<float> m_lightData; // per lamp: position, radius, colour, 0
+    ComPtr<ID3D11Buffer> m_lightDataBuf;
+    ComPtr<ID3D11ShaderResourceView> m_lightDataSRV;
+    UINT m_lightDataCapacity = 0;
     ComPtr<ID3D11Buffer> m_pointLightCB;
     bool m_pointLightsDirty = true;
     UINT m_pointLightsShown = 0, m_pointLightTris = 0;
     void CaptureEmitters(DWORD type, UINT baseVertex, UINT startIndex, UINT primCount, bool indexed);
     void BuildPointLights();
     void BindPointLights();
+    // Shadow casters recorded during the world pass and drawn together (sun.cpp FlushShadowBatch).
+    struct ShadowDraw {
+        ComPtr<ID3D11VertexShader> vs; ID3D11PixelShader* ps; ComPtr<ID3D11InputLayout> layout;
+        D3D11_PRIMITIVE_TOPOLOGY topo;
+        ComPtr<ID3D11Buffer> vb[kMaxStreams]; UINT stride[kMaxStreams], offset[kMaxStreams];
+        ComPtr<ID3D11Buffer> ib; DXGI_FORMAT ibFormat; UINT ibOffset;
+        ComPtr<ID3D11ShaderResourceView> srv[kMaxStages]; ComPtr<ID3D11SamplerState> sampler[kMaxStages];
+        UINT vsFirst, sun, psc; bool indexed; UINT count, start; INT base;
+    };
+    std::vector<ShadowDraw> m_shadowBatch;
+    std::vector<SunConstants> m_shadowSuns;
+    std::vector<PSConstants> m_shadowPS;
+    ComPtr<ID3D11Buffer> m_shadowPSCB;
+    UINT m_shadowBatchesFrame = 0;
+public:
+    void FlushShadowBatch(); // also before game buffers and textures are written (resources.cpp)
+private:
+    // Screen tiles of kLightTile pixels, each with the lamps whose sphere can reach it (t17): the
+    // pixel shader walks those instead of every lamp. count[2] = tiles per row, count[3] = 1 valid.
+    static const int kLightTile = 32;
+    static const UINT kLightsPerTile = 48; // the nearest are kept
+    ComPtr<ID3D11Buffer> m_lightTileBuf;
+    ComPtr<ID3D11ShaderResourceView> m_lightTileSRV;
+    UINT m_lightTileCapacity = 0;
+    std::vector<UINT> m_lightTiles;
+    void BuildLightTiles();
     // Stage-0 night emission mask (world draws, time-of-day night only).
     ID3D11ShaderResourceView* ActiveEmissive() const {
         if (!g_config.emissive || !m_tod.active || m_tod.dayW > 0.98f || !m_worldDraw || m_sun.flags[1] > 0.5f ||
@@ -529,6 +567,7 @@ private:
     void CaptureGameSun();
     void ResolveSun(const char* reason);
     ComPtr<ID3D11Buffer> m_waterCB;
+    bool m_waterCBZero = false; // m_waterCB holds the all-zero block of non-water draws
     ComPtr<ID3D11Texture2D> m_waterDepthCopy, m_waterColorCopy;
     ComPtr<ID3D11ShaderResourceView> m_waterDepthSRV, m_waterColorSRV;
     ComPtr<ID3D11SamplerState> m_waterSampler;
@@ -547,6 +586,9 @@ private:
     ComPtr<ID3D11Texture2D> m_waterShoreTexture;
     ComPtr<ID3D11ShaderResourceView> m_waterShoreSRV;
     std::vector<float> m_waterRegionHeights;
+    std::vector<float> m_waterRegionScan;   // rescan chunk, compared with m_waterRegionHeights
+    bool m_waterRegionChanged = false;      // the current rescan found different heights
+    float m_waterRegionBuiltLevel = 0;      // water height the region map was built for
     void* m_waterRegionTerrain=nullptr;
     void* m_waterRegionHeightField=nullptr;
     UINT m_waterRegionW=0,m_waterRegionH=0,m_waterRegionNext=0;

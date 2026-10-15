@@ -6,8 +6,8 @@
 // into a few emitters (one per lamp, cached per draw). Every frame those are moved to the world
 // with the draw's bone palette (as CapturePusher) and kept in a world grid that remembers lights
 // whose objects went off screen for a while, so the light they cast on visible ground stays.
-// At the end of the frame the grid is merged more coarsely with distance and the nearest
-// lights (faded out toward the cut) light the next frame (cbuffer b5, shaders.cpp PointLights).
+// At the end of the frame the nearest lamps, each its own light, light the next frame through
+// screen tiles (t17/t18, shaders.cpp PointLights).
 #include "device.h"
 #include <algorithm>
 #include <DirectXMath.h>
@@ -33,11 +33,23 @@ void SampleMask(const Texture* t, float u, float v, float out[3])
 }
 
 const UINT kLightMemoryFrames = 900; // a light whose object is not drawn stays this long
+const float kLampLevel = 1.3f; // brightest channel of every lamp, before PointLightIntensity
 }
 
 void Device::CaptureEmitters(DWORD type, UINT baseVertex, UINT startIndex, UINT primCount, bool indexed)
 {
-    if (!g_config.effectsEnabled || !g_config.pointLights || !g_config.replaceLighting || m_worldKind != 1 || !ActiveEmissive()) return;
+    if (!g_config.effectsEnabled || !g_config.pointLights || !g_config.replaceLighting) return;
+    // PointLightDebug: why a draw of a lamp texture lights nothing, once per texture and reason.
+    auto skip = [&](const char* why) {
+        if (g_config.pointLightDebug && m_textures[0] && m_textures[0]->GetType() == D8RTYPE_TEXTURE) {
+            const Texture* t = static_cast<Texture*>(static_cast<ID8Texture*>(m_textures[0]));
+            if (t->m_emissiveMask)
+                LogOnce("lampskip-" + t->m_name + why, "Point lights: %s skipped (%s; kind %d, world %d, sun started %d resolved %d, %u triangles)",
+                        t->m_name.c_str(), why, m_worldKind, (int)m_worldDraw, (int)m_sunStarted, (int)m_sunResolved, primCount);
+        }
+    };
+    if (m_worldKind != 1) { skip("not a skinned world draw"); return; }
+    if (!ActiveEmissive()) { skip(m_worldDraw ? "no emissive" : "outside the world pass"); return; }
     Texture* tex = static_cast<Texture*>(static_cast<ID8Texture*>(m_textures[0]));
     if (!tex->m_emissiveMask) return;
     const size_t idx = m_vsHandle >> 1;
@@ -53,11 +65,13 @@ void Device::CaptureEmitters(DWORD type, UINT baseVertex, UINT startIndex, UINT 
     }
     VertexBuffer* vb = m_streams[0].vb;
     const UINT stride = m_streams[0].stride;
-    if (!pos || !weights || !indices || !uv || !vb || !stride || vb->m_impl.m_dynamic) return;
-    if (type != D8PT_TRIANGLELIST && type != D8PT_TRIANGLESTRIP) return;
+    if (!pos || !weights || !indices || !uv) { skip("vertex layout"); return; }
+    if (!vb || !stride || vb->m_impl.m_dynamic) { skip("dynamic vertices"); return; }
+    if (type != D8PT_TRIANGLELIST && type != D8PT_TRIANGLESTRIP) { skip("primitive type"); return; }
+    if (primCount > 16384) skip("over 16384 triangles, the rest unread");
     const std::vector<BYTE>& data = vb->m_impl.m_shadow;
     const IndexBuffer* ib = indexed ? m_indices : nullptr;
-    if (indexed && (!ib || ib->m_impl.m_dynamic)) return;
+    if (indexed && (!ib || ib->m_impl.m_dynamic)) { skip("dynamic indices"); return; }
 
     // Glowing parts of this draw, found once and merged per lamp in object space.
     const unsigned long long key = ((unsigned long long)(uintptr_t)vb * 1099511628211ull) ^ ((unsigned long long)(uintptr_t)ib << 7) ^
@@ -149,7 +163,18 @@ void Device::CaptureEmitters(DWORD type, UINT baseVertex, UINT startIndex, UINT 
         XMStoreFloat3(&f, XMVector3TransformCoord(XMVectorSet(o[0], o[1], o[2], 1), model));
         if (!std::isfinite(f.x + f.y + f.z)) continue;
         const long long x = (long long)std::floor(f.x / cell), y = (long long)std::floor(f.y / cell), z = (long long)std::floor(f.z / cell);
-        const unsigned long long k = ((unsigned long long)(x & 0x1FFFFF) << 42) | ((unsigned long long)(y & 0x1FFFFF) << 21) | (unsigned long long)(z & 0x1FFFFF);
+        auto key = [](long long x, long long y, long long z) {
+            return ((unsigned long long)(x & 0x1FFFFF) << 42) | ((unsigned long long)(y & 0x1FFFFF) << 21) | (unsigned long long)(z & 0x1FFFFF);
+        };
+        unsigned long long k = key(x, y, z);
+        // A lamp nudged across a cell border (LOD, animation) keeps its entry instead of leaving a
+        // stale copy behind for kLightMemoryFrames, which doubled its brightness.
+        if (!m_worldLights.count(k))
+            for (int n = 0; n < 27; n++) {
+                if (n == 13) continue;
+                const unsigned long long nk = key(x + n % 3 - 1, y + n / 3 % 3 - 1, z + n / 9 - 1);
+                if (m_worldLights.count(nk)) { k = nk; break; }
+            }
         WorldLight& l = m_worldLights[k];
         if (l.lastSeen != (UINT)(m_frame + 1)) { // first sighting this frame: replace
             l = {};
@@ -157,79 +182,214 @@ void Device::CaptureEmitters(DWORD type, UINT baseVertex, UINT startIndex, UINT 
         }
         const float n = (float)l.count;
         l.pos[0] = (l.pos[0] * n + f.x) / (n + 1); l.pos[1] = (l.pos[1] * n + f.y) / (n + 1); l.pos[2] = (l.pos[2] * n + f.z) / (n + 1);
-        const float area = (std::min)(2.0f, 0.6f + 0.2f * std::sqrt((float)e.count));
-        for (int c = 0; c < 3; c++) l.rgb[c] += e.rgb[c] * area;
+        // Every lamp the same strength, in its mask's hue: the glowing triangle count and the
+        // texel under each centroid differ between a model's LODs (a fence segment has 30 glowing
+        // triangles per lamp, the merged far set 4), which made a lamp change as the camera moved.
+        // Two draws of one lamp in a frame (shared posts, LOD overlap) do not add up.
+        const float peak = (std::max)(e.rgb[0], (std::max)(e.rgb[1], e.rgb[2]));
+        for (int c = 0; c < 3; c++) l.rgb[c] = (std::max)(l.rgb[c], kLampLevel * e.rgb[c] / (std::max)(peak, 1e-3f));
         l.count++;
     }
 }
 
-// End of frame: remembered lights merged more coarsely with distance; the nearest light the next frame.
+// End of frame: every remembered lamp is its own light (no grouping that changes with the camera);
+// the nearest kMaxPointLights light the next frame, eased in and out per lamp.
 void Device::BuildPointLights()
 {
-    m_pointLights = {};
+    m_lightData.clear();
     m_pointLightsShown = 0;
-    if (!g_config.effectsEnabled || !g_config.pointLights || !m_tod.active) { m_worldLights.clear(); return; }
+    if (!g_config.effectsEnabled || !g_config.pointLights || !m_tod.active) { m_worldLights.clear(); m_shownLights.clear(); return; }
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    const float dt = m_shownLightsTime.QuadPart ? (float)((t.QuadPart - m_shownLightsTime.QuadPart) / (double)m_qpcFreq.QuadPart) : 0.0f;
+    m_shownLightsTime = t;
+    const float ease = 1.0f - std::exp(-(std::min)(dt, 0.25f) / 0.15f); // 0.15 s to settle
     if (m_emitterCache.size() > 8192) m_emitterCache.clear();
     const UINT now = (UINT)(m_frame + 1);
     for (auto it = m_worldLights.begin(); it != m_worldLights.end();)
         it = now - it->second.lastSeen > kLightMemoryFrames ? m_worldLights.erase(it) : std::next(it);
     m_pointLightTris = (UINT)m_worldLights.size();
     const float night = 1 - m_tod.dayW;
-    if (night <= 0.01f || m_worldLights.empty()) return;
+    if (night <= 0.01f || m_worldLights.empty()) { m_shownLights.clear(); return; }
 
-    struct Candidate { float pos[3]; float rgb[3]; float dist; };
+    struct Candidate { const WorldLight* l; float dist; unsigned long long key; };
     std::vector<Candidate> all;
     all.reserve(m_worldLights.size());
     const float* cam = m_sun.camera;
     for (const auto& w : m_worldLights) {
-        Candidate c;
-        memcpy(c.pos, w.second.pos, sizeof(c.pos));
-        memcpy(c.rgb, w.second.rgb, sizeof(c.rgb));
-        const float dx = c.pos[0] - cam[0], dy = c.pos[1] - cam[1], dz = c.pos[2] - cam[2];
-        c.dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-        all.push_back(c);
+        const float dx = w.second.pos[0] - cam[0], dy = w.second.pos[1] - cam[1], dz = w.second.pos[2] - cam[2];
+        all.push_back({ &w.second, std::sqrt(dx * dx + dy * dy + dz * dz), w.first });
     }
     std::sort(all.begin(), all.end(), [](const Candidate& a, const Candidate& b) { return a.dist < b.dist; });
+    const size_t keep = (std::min)(all.size(), (size_t)kMaxPointLights);
+    // Past the cap the farthest kept lamps fade out by distance, not by rank.
+    const float cutoff = all.size() > keep ? all[keep].dist : 1e30f;
 
-    // Greedy: each light joins a chosen one closer than a distance-scaled merge range.
-    const float radius = g_config.pointLightRadius;
-    struct Chosen { float pos[3]; float rgb[3]; float w; float dist; };
-    std::vector<Chosen> chosen;
-    float cutoff = 1e30f;
-    for (const Candidate& c : all) {
-        const float merge = (std::max)(radius * 0.3f, c.dist * 0.08f);
-        Chosen* into = nullptr;
-        for (Chosen& s : chosen) {
-            const float dx = s.pos[0] / s.w - c.pos[0], dy = s.pos[1] / s.w - c.pos[1], dz = s.pos[2] / s.w - c.pos[2];
-            if (dx * dx + dy * dy + dz * dz < merge * merge) { into = &s; break; }
-        }
-        if (!into) {
-            if (chosen.size() >= (size_t)kMaxPointLights) { cutoff = c.dist; break; }
-            chosen.push_back({});
-            into = &chosen.back();
-            into->dist = c.dist;
-        }
-        const float lum = c.rgb[0] * 0.2126f + c.rgb[1] * 0.7152f + c.rgb[2] * 0.0722f;
-        for (int k = 0; k < 3; k++) { into->pos[k] += c.pos[k] * lum; into->rgb[k] += c.rgb[k]; }
-        into->w += lum;
-    }
-
-    // Colour: the mask's own colour pulled toward the warm lamp tint; faded toward the cut.
+    // Colour: the mask's own colour pulled toward the warm lamp tint.
     const float warm = g_config.pointLightWarmth;
-    for (size_t i = 0; i < chosen.size(); i++) {
-        Chosen& s = chosen[i];
-        const float fade = cutoff < 1e29f ? (std::min)(1.0f, (std::max)(0.0f, (cutoff - s.dist) / (cutoff * 0.25f))) : 1.0f;
-        const float lum = s.rgb[0] * 0.2126f + s.rgb[1] * 0.7152f + s.rgb[2] * 0.0722f;
+    for (auto& e : m_shownLights) e.second.live = false;
+    for (size_t i = 0; i < keep; i++) {
+        const Candidate& c = all[i];
+        const float fade = cutoff < 1e29f ? (std::min)(1.0f, (std::max)(0.0f, (cutoff - c.dist) / (cutoff * 0.25f))) : 1.0f;
+        const float* rgb = c.l->rgb;
+        const float lum = rgb[0] * 0.2126f + rgb[1] * 0.7152f + rgb[2] * 0.0722f;
+        auto found = m_shownLights.find(c.key);
+        const bool known = found != m_shownLights.end();
+        ShownLight& o = known ? found->second : (m_shownLights[c.key] = ShownLight{});
         for (int k = 0; k < 3; k++) {
-            m_pointLights.pos[i][k] = s.pos[k] / (std::max)(s.w, 1e-6f);
-            const float c = s.rgb[k] + (lum * g_config.pointLightTint[k] - s.rgb[k]) * warm;
-            m_pointLights.color[i][k] = c * g_config.pointLightIntensity * night * fade;
+            o.pos[k] = c.l->pos[k];
+            const float col = rgb[k] + (lum * g_config.pointLightTint[k] - rgb[k]) * warm;
+            const float target = col * g_config.pointLightIntensity * night * fade;
+            o.rgb[k] = known ? o.rgb[k] + (target - o.rgb[k]) * ease : target;
         }
-        m_pointLights.pos[i][3] = radius;
+        o.level += (1.0f - o.level) * ease;
+        o.dist = c.dist;
+        o.live = true;
     }
-    m_pointLights.count[0] = (float)chosen.size();
+    // Lamps no longer kept fade out where they were.
+    for (auto it = m_shownLights.begin(); it != m_shownLights.end();) {
+        if (!it->second.live) it->second.level -= it->second.level * ease;
+        it = !it->second.live && it->second.level < 0.01f ? m_shownLights.erase(it) : std::next(it);
+    }
+    std::vector<const ShownLight*> order;
+    order.reserve(m_shownLights.size());
+    for (const auto& e : m_shownLights) order.push_back(&e.second);
+    // Nearest first: a tile that overflows keeps its nearest lamps (BuildLightTiles).
+    std::sort(order.begin(), order.end(), [](const ShownLight* a, const ShownLight* b) {
+        return a->live != b->live ? a->live : a->dist < b->dist; });
+    const size_t n = (std::min)(order.size(), (size_t)kMaxPointLights);
+    const float radius = g_config.pointLightRadius;
+    m_lightData.resize(n * 8);
+    for (size_t i = 0; i < n; i++) {
+        float* d = &m_lightData[i * 8];
+        for (int k = 0; k < 3; k++) {
+            d[k] = order[i]->pos[k];
+            d[4 + k] = order[i]->rgb[k] * order[i]->level;
+        }
+        d[3] = radius;
+        d[7] = 0;
+    }
+    m_pointLightsShown = (UINT)n;
+}
+
+// Lamps (t18, two float4 each: position + radius, colour) and per screen tile the lamps whose
+// sphere can reach it (t17: one uint per tile, offset << 8 | count, then the index lists).
+// Built when the frame's camera is known.
+void Device::BuildLightTiles()
+{
+    m_pointLights = {};
+    m_pointLightsDirty = true;
+    const UINT n = (UINT)(m_lightData.size() / 8);
+    if (!n || !m_backBuffer) return;
+    const UINT w = m_backBuffer->m_width, h = m_backBuffer->m_height;
+    const UINT tx = (w + kLightTile - 1) / kLightTile, ty = (h + kLightTile - 1) / kLightTile;
+    if (!tx || !ty) return;
+    const UINT tiles = tx * ty;
+
+    struct Rect { int ax, bx, ay, by; };
+    std::vector<Rect> rects(n);
+    std::vector<UINT> counts(tiles, 0);
+    const float (*vp)[4] = m_waterViewProjection; // clip[r] = dot(float4(P, 1), vp[r])
+    UINT nearPlane = 0, behind = 0;
+    for (UINT i = 0; i < n; i++) {
+        const float* l = &m_lightData[i * 8];
+        const float r = l[3];
+        Rect& b = rects[i];
+        b.bx = -1;
+        // Screen bound of the lamp's box, clipped to the near plane (clip z = 0): a lamp beside or
+        // behind the camera reaches no pixel, one crossing the plane covers only what its front
+        // part projects to. (Taking every tile for those filled the tiles with lamps nobody sees,
+        // and the visible ones were dropped: all lamps went out with the camera low.)
+        float clip[8][4];
+        bool front = false, back = false;
+        for (int c = 0; c < 8; c++) {
+            const float p[3] = { l[0] + (c & 1 ? r : -r), l[1] + (c & 2 ? r : -r), l[2] + (c & 4 ? r : -r) };
+            for (int k = 0; k < 4; k++) clip[c][k] = p[0] * vp[k][0] + p[1] * vp[k][1] + p[2] * vp[k][2] + vp[k][3];
+            (clip[c][2] >= 0 ? front : back) = true;
+        }
+        if (!front) { behind++; continue; }
+        nearPlane += back;
+        float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+        bool unbounded = false;
+        auto add = [&](const float* q) {
+            if (q[3] < 1e-4f) { unbounded = true; return; }
+            const float sx = (q[0] / q[3] * 0.5f + 0.5f) * w, sy = (0.5f - q[1] / q[3] * 0.5f) * h;
+            x0 = (std::min)(x0, sx); x1 = (std::max)(x1, sx); y0 = (std::min)(y0, sy); y1 = (std::max)(y1, sy);
+        };
+        for (int c = 0; c < 8; c++) {
+            if (clip[c][2] >= 0) add(clip[c]);
+            for (int bit = 1; bit < 8; bit <<= 1) { // the box edges that cross the plane, once each
+                const int d = c | bit;
+                if (d == c || (clip[c][2] >= 0) == (clip[d][2] >= 0)) continue;
+                const float t = clip[c][2] / (clip[c][2] - clip[d][2]);
+                float q[4];
+                for (int k = 0; k < 4; k++) q[k] = clip[c][k] + (clip[d][k] - clip[c][k]) * t;
+                add(q);
+            }
+        }
+        b = { 0, (int)tx - 1, 0, (int)ty - 1 };
+        if (!unbounded) {
+            if (x1 < 0 || y1 < 0 || x0 >= w || y0 >= h) { b.bx = -1; continue; } // off screen
+            // One tile of margin: TAA/FSR jitter and the rasteriser's half-pixel rules.
+            b.ax = (std::max)(0, (int)(x0 / kLightTile) - 1); b.bx = (std::min)((int)tx - 1, (int)(x1 / kLightTile) + 1);
+            b.ay = (std::max)(0, (int)(y0 / kLightTile) - 1); b.by = (std::min)((int)ty - 1, (int)(y1 / kLightTile) + 1);
+        }
+        for (int y = b.ay; y <= b.by; y++)
+            for (int x = b.ax; x <= b.bx; x++) {
+                UINT& c = counts[size_t(y) * tx + x];
+                if (c < kLightsPerTile) c++;
+            }
+    }
+    UINT total = tiles, full = 0, most = 0;
+    for (UINT i = 0; i < tiles; i++) { total += counts[i]; full += counts[i] >= kLightsPerTile; most = (std::max)(most, counts[i]); }
+    if (g_config.pointLightDebug && m_frame % 300 == 0)
+        Log("Point lights: first at %.1f %.1f %.1f (tiles %d-%d, %d-%d); %u remembered, %u shown, %u behind the camera, %u across its near plane; tiles: %u of %u full, %u most, %.1f average",
+            m_lightData[0], m_lightData[1], m_lightData[2], rects[0].ax, rects[0].bx, rects[0].ay, rects[0].by, m_pointLightTris, n, behind, nearPlane, full, tiles, most, (total - tiles) / (float)tiles);
+    m_lightTiles.assign(total, 0);
+    UINT at = tiles;
+    for (UINT i = 0; i < tiles; i++) { m_lightTiles[i] = at << 8; at += counts[i]; }
+    for (UINT i = 0; i < n; i++) { // nearest lamps first, so a full tile keeps those
+        const Rect& b = rects[i];
+        for (int y = b.ay; y <= b.by; y++)
+            for (int x = b.ax; x <= b.bx; x++) {
+                UINT& e = m_lightTiles[size_t(y) * tx + x];
+                const UINT c = e & 0xff;
+                if (c >= counts[size_t(y) * tx + x]) continue;
+                m_lightTiles[(e >> 8) + c] = i;
+                e++;
+            }
+    }
+
+    // Grow either buffer geometrically; both are rewritten every frame.
+    auto ensure = [&](ComPtr<ID3D11Buffer>& buf, ComPtr<ID3D11ShaderResourceView>& srv, UINT& capacity, UINT need, UINT bytesPer, DXGI_FORMAT fmt) {
+        if (capacity >= need) return true;
+        const UINT size = (std::max)(need, capacity * 2);
+        srv.Reset(); buf.Reset(); capacity = 0;
+        D3D11_BUFFER_DESC bd = { size * bytesPer, D3D11_USAGE_DYNAMIC, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_WRITE, 0, 0 };
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+        sd.Format = fmt;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+        sd.Buffer.NumElements = size;
+        if (FAILED(m_device->CreateBuffer(&bd, nullptr, &buf)) || FAILED(m_device->CreateShaderResourceView(buf.Get(), &sd, &srv))) {
+            buf.Reset(); srv.Reset(); return false;
+        }
+        capacity = size;
+        return true;
+    };
+    if (!ensure(m_lightTileBuf, m_lightTileSRV, m_lightTileCapacity, total, 4, DXGI_FORMAT_R32_UINT) ||
+        !ensure(m_lightDataBuf, m_lightDataSRV, m_lightDataCapacity, n * 2, 16, DXGI_FORMAT_R32G32B32A32_FLOAT)) return;
+    D3D11_MAPPED_SUBRESOURCE map;
+    if (FAILED(m_ctx->Map(m_lightTileBuf.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
+    memcpy(map.pData, m_lightTiles.data(), m_lightTiles.size() * sizeof(UINT));
+    m_ctx->Unmap(m_lightTileBuf.Get(), 0);
+    if (FAILED(m_ctx->Map(m_lightDataBuf.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
+    memcpy(map.pData, m_lightData.data(), m_lightData.size() * sizeof(float));
+    m_ctx->Unmap(m_lightDataBuf.Get(), 0);
+    const float radius = g_config.pointLightRadius;
+    m_pointLights.count[0] = (float)n;
     m_pointLights.count[1] = 1.0f / (radius * radius * 0.08f); // inverse-square knee (about a third of the radius)
-    m_pointLightsShown = (UINT)chosen.size();
+    m_pointLights.count[2] = (float)tx;
+    m_pointLights.count[3] = g_config.pointLightDebug == 2 ? 3.0f : g_config.pointLightDebug ? 2.0f : 1.0f;
 }
 
 void Device::BindPointLights()
@@ -248,4 +408,6 @@ void Device::BindPointLights()
         m_pointLightsDirty = false;
     }
     BindPSCB(5, 1, m_pointLightCB.GetAddressOf());
+    ID3D11ShaderResourceView* views[2] = { m_lightTileSRV.Get(), m_lightDataSRV.Get() };
+    BindPSSrv(17, 2, views);
 }

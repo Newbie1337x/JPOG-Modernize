@@ -69,13 +69,33 @@ void* CommandQueue::Reserve(size_t bytes)
     return m_ring + pos;
 }
 
+void CommandQueue::NoteSync(void* where, LONGLONG ticks)
+{
+    Stalls& s = m_stalls;
+    s.syncs++;
+    s.syncTicks += ticks;
+    int slot = -1, least = 0;
+    for (int i = 0; i < 6; i++) {
+        if (s.where[i] == where || !s.where[i]) { slot = i; break; }
+        if (s.whereTicks[i] < s.whereTicks[least]) least = i;
+    }
+    if (slot < 0) { slot = least; s.where[slot] = nullptr; s.whereTicks[slot] = 0; s.whereCount[slot] = 0; }
+    s.where[slot] = where;
+    s.whereTicks[slot] += ticks;
+    s.whereCount[slot]++;
+}
+
 void CommandQueue::FramePosted()
 {
     InterlockedIncrement(&m_framesInFlight);
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
     while (InterlockedCompareExchange(&m_framesInFlight, 0, 0) > 1) {
         WakeWorker();
         Wait(m_frameEvent, INFINITE);
     }
+    QueryPerformanceCounter(&t1);
+    m_stalls.frameWaitTicks += t1.QuadPart - t0.QuadPart;
 }
 
 void CommandQueue::FrameDone()
