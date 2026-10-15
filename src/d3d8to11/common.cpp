@@ -161,6 +161,13 @@ void LoadConfig()
     g_config.proceduralSky = GetPrivateProfileIntA("Lighting", "ProceduralSky", 1, ini.c_str()) != 0;
     g_config.timeOfDay = GetPrivateProfileIntA("TimeOfDay", "Preview", g_config.timeOfDay ? 1 : 0, ini.c_str()) != 0;
     g_config.timeOfDayHour = readTod("Hour", g_config.timeOfDayHour, 0, 24);
+    g_config.timeRuns = GetPrivateProfileIntA("TimeOfDay", "Running", g_config.timeRuns ? 1 : 0, ini.c_str()) != 0;
+    g_config.dayMinutes = readTod("DayMinutes", g_config.dayMinutes, 1, 240);
+    g_config.moonCycleDays = readTod("MoonCycleDays", g_config.moonCycleDays, 1, 60);
+    g_config.timeOfDayDay = readTod("Day", g_config.timeOfDayDay, 0, 60);
+    if (g_config.timeOfDayDay >= g_config.moonCycleDays) g_config.timeOfDayDay = std::fmod(g_config.timeOfDayDay, g_config.moonCycleDays);
+    g_config.moonlessLight = readTod("MoonlessLight", g_config.moonlessLight, 0, 1);
+    g_config.sunDisc = readTod("SunDisc", g_config.sunDisc, 0, 4);
     g_config.bakedTerrainDetail = readFloat("BakedTerrainDetail", 1, 0, 1);
     g_config.shadowStrength = readFloat("ShadowStrength", 0.25f, 0, 1);
     g_config.sunMinElevation = readFloat("SunMinHeight", 0.35f, 0.05f, 1);
@@ -398,6 +405,12 @@ void SaveConfig()
     putInt("Lighting", "ProceduralSky", g_config.proceduralSky);
     putInt("TimeOfDay", "Preview", g_config.timeOfDay);
     putFloat("TimeOfDay", "Hour", g_config.timeOfDayHour);
+    putInt("TimeOfDay", "Running", g_config.timeRuns);
+    putFloat("TimeOfDay", "DayMinutes", g_config.dayMinutes);
+    putFloat("TimeOfDay", "MoonCycleDays", g_config.moonCycleDays);
+    putFloat("TimeOfDay", "Day", g_config.timeOfDayDay);
+    putFloat("TimeOfDay", "MoonlessLight", g_config.moonlessLight);
+    putFloat("TimeOfDay", "SunDisc", g_config.sunDisc);
     putFloat("Lighting", "BakedTerrainDetail", g_config.bakedTerrainDetail);
     putFloat("Lighting", "Ambient", g_config.sunAmbient);
     putFloat("Lighting", "SunIntensity", g_config.sunDirect);

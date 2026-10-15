@@ -34,6 +34,8 @@ struct ResolveConstants {
     float tod3[4];   // moon visibility, shadow tint rgb
     float tod4[4];   // night sky brightness, stars, day weight, night desaturation
     float tod5[4];   // night tint, w = filmic exposure (0 = off)
+    float tod6[4];   // toward the moon (renderer Y-down), w = lit share of its disc (phase)
+    float tod7[4];   // star rotation (radians), moon above the horizon, sun disc brightness, sky bodies on
 };
 
 const char* kResolveVS =
@@ -46,7 +48,7 @@ const char* kResolveVS =
 const char* kSceneCommon =
     "cbuffer Resolve : register(b0) { float4 clipToWorld[4]; float4 lightRows[4]; float4 sunDir;\n"
     "  float4 params; float4 screen; float4 misc; float4 grade0; float4 grade1; float4 fx0; float4 fx1; float4 tod;\n"
-    "  float4 tod2; float4 tod3; float4 tod4; float4 tod5; };\n"
+    "  float4 tod2; float4 tod3; float4 tod4; float4 tod5; float4 tod6; float4 tod7; };\n"
     "#if MSAA\n"
     "Texture2DMS<float> sceneDepth : register(t0);\n"
     "float LoadDepth(int2 p) { return sceneDepth.Load(p, 0); }\n"
@@ -152,17 +154,27 @@ const char* kResolveMain =
     "  return sum / wsum; }\n"
     // Time-of-day sky (night and dusk; the game's sky texture is kept by day). Y-down world.
     "float Hash(float2 p) { return frac(sin(dot(p, float2(127.1, 311.7))) * 43758.5453); }\n"
+    "float VNoise(float2 p) { float2 i = floor(p), f = frac(p); f = f * f * (3 - 2 * f);\n"
+    "  return lerp(lerp(Hash(i), Hash(i + float2(1, 0)), f.x), lerp(Hash(i + float2(0, 1)), Hash(i + 1), f.x), f.y); }\n"
+    // The sky turns with the hour around the pole of the sun's arc (sun.cpp EvaluateTimeOfDay:
+    // Y-up axis (0, cos 70, -sin 70)): a world direction to the fixed star frame.
+    "float3 StarDir(float3 dir) {\n"
+    "  float3 u = float3(dir.x, -dir.y, dir.z), a = float3(0, 0.34202, -0.93969);\n"
+    "  float s, c; sincos(tod7.x, s, c);\n"
+    "  return u * c + cross(a, u) * s + a * dot(a, u) * (1 - c); }\n"
     "float3 ProceduralSky(float3 dir) {\n"
     "  float el = -dir.y, sunEl = -tod2.y;\n"
     "  float3 night = lerp(float3(0.11, 0.145, 0.215), float3(0.065, 0.095, 0.18), saturate(el * 1.4)) * tod4.x;\n"
-    "  float2 sc = float2(atan2(dir.z, dir.x), asin(saturate(el))) * 600, cell = floor(sc);\n"
+    "  float3 sd3 = StarDir(dir); float lat = asin(clamp(sd3.y, -1, 1));\n"
+    "  float2 sc = float2(atan2(sd3.z, sd3.x), lat) * 600, cell = floor(sc);\n"
     "  float h = Hash(cell);\n"
     "  float2 at = float2(Hash(cell + 3.1), Hash(cell + 5.7)) * 0.6 + 0.2;\n"
-    "  float star = step(0.994, h) * saturate(1.3 - length(frac(sc) - at) * 2.6);\n"
-    "  night += saturate(star) * saturate(el * 5) * (0.4 + 1.2 * Hash(cell + 7.3)) * float3(0.9, 0.95, 1) * tod4.y;\n"
-    "  float3 moonDir = -tod2.xyz; float m = saturate(dot(dir, moonDir));\n"
-    "  night += tod3.x * (smoothstep(0.99955, 0.9998, m) * float3(1.0, 1.0, 0.95) * 1.4\n"
-    "    + pow(m, 600) * float3(0.55, 0.62, 0.8) * 0.6 + pow(m, 24) * float3(0.10, 0.13, 0.20));\n"
+    // Cells narrow toward the pole: fewer stars there keeps the density even.
+    "  float star = step(1 - 0.006 * max(cos(lat), 0.05), h) * saturate(1.3 - length(frac(sc) - at) * 2.6);\n"
+    // A bright moon washes out the faint stars.
+    "  night += saturate(star) * saturate(el * 5) * (0.4 + 1.2 * Hash(cell + 7.3)) * float3(0.9, 0.95, 1) * tod4.y * (1 - 0.6 * tod6.w * tod7.y);\n"
+    "  float m = saturate(dot(dir, tod6.xyz));\n"
+    "  night += tod3.x * tod6.w * saturate(el * 20 + 1) * (pow(m, 600) * float3(0.55, 0.62, 0.8) * 0.6 + pow(m, 24) * float3(0.10, 0.13, 0.20));\n"
     "  float2 flat = dir.xz / max(length(dir.xz), 1e-4), sunFlat = tod2.xz / max(length(tod2.xz), 1e-4);\n"
     "  float toward = saturate(dot(flat, sunFlat) * 0.5 + 0.5);\n"
     "  float3 horizon = lerp(float3(0.55, 0.35, 0.38), float3(1.0, 0.52, 0.22), toward);\n"
@@ -173,8 +185,46 @@ const char* kResolveMain =
     "  float3 day = el >= 0 ? lerp(haze, float3(0.30, 0.52, 0.86), pow(saturate(el), 0.45))\n"
     "                       : lerp(haze, float3(0.55, 0.60, 0.62), saturate(-el * 4));\n"
     "  float sd = saturate(dot(dir, tod2.xyz));\n"
-    "  day += float3(1.0, 0.95, 0.85) * (pow(sd, 900) * 4 + pow(sd, 12) * 0.18);\n"
+    "  day += float3(1.0, 0.95, 0.85) * pow(sd, 12) * 0.18;\n"
     "  return lerp(lerp(night, dusk, duskW), day, tod4.z); }\n"
+    // Dark seas of the moon's face (q: position on the disc, radius 1).
+    "float MoonAlbedo(float2 q) {\n"
+    "  float m = smoothstep(0.42, 0.05, length(q - float2(-0.28, -0.22))) + smoothstep(0.30, 0.04, length(q - float2(0.18, -0.30)))\n"
+    "    + smoothstep(0.34, 0.05, length(q - float2(-0.05, 0.25))) + smoothstep(0.22, 0.03, length(q - float2(0.40, 0.10)));\n"
+    "  m += (VNoise(q * 6) - 0.5) * 0.4 + (VNoise(q * 14 + 3) - 0.5) * 0.2;\n"
+    "  return 1 - 0.32 * saturate(m); }\n"
+    // The sun's and the moon's discs, by day over the game's sky texture too.
+    "float3 SkyBodies(float3 c, float3 dir) {\n"
+    "  float horizon = smoothstep(-0.01, 0.005, -dir.y);\n"
+    // Sun: 0.9 degrees, darker toward the limb, orange near the horizon.
+    "  float sd = dot(dir, tod2.xyz);\n"
+    "  if (sd > 0.9997) {\n"
+    "    float r = sqrt(saturate(1 - sd * sd)) / 0.0157;\n"
+    "    float disc = saturate((1 - r) * 25) * horizon * tod7.z;\n"
+    "    float3 sunCol = lerp(float3(1.0, 0.45, 0.18), float3(1.0, 0.96, 0.88), saturate(-tod2.y * 5));\n"
+    "    c = lerp(c, sunCol * (0.55 + 0.45 * sqrt(saturate(1 - r * r))) * 1.6, saturate(disc));\n"
+    "  }\n"
+    // Moon: 1.25 degrees, a sphere lit by the sun, so its phase follows from where the two are.
+    "  float3 md = tod6.xyz;\n"
+    "  float cm = dot(dir, md);\n"
+    "  if (cm > 0.999) {\n"
+    "    float3 e1 = abs(md.y) > 0.999 ? float3(1, 0, 0) : normalize(cross(float3(0, -1, 0), md));\n"
+    "    float3 e2 = cross(md, e1);\n"
+    "    float2 q = float2(dot(dir, e1), dot(dir, e2)) / 0.022;\n"
+    "    float r2 = dot(q, q);\n"
+    "    if (r2 < 1.2) {\n"
+    "      float cover = saturate((1 - sqrt(r2)) * 25) * horizon;\n"
+    "      float3 n = e1 * q.x + e2 * q.y - md * sqrt(saturate(1 - r2));\n"
+    "      float lit = smoothstep(-0.04, 0.12, dot(n, tod2.xyz));\n"
+    "      float3 albedo = float3(0.97, 0.96, 0.92) * MoonAlbedo(q);\n"
+    // Night: the disc hides the stars, its dark side faintly lit by the Earth. Day: only its lit
+    // side, pale over the blue.
+    "      float3 nightC = lerp(c, albedo * (lit * 1.5 + 0.03), cover);\n"
+    "      float3 dayC = c + albedo * lit * 0.45 * cover;\n"
+    "      c = lerp(dayC, nightC, tod3.x);\n"
+    "    }\n"
+    "  }\n"
+    "  return c; }\n"
     "float4 main(float4 pos : SV_Position) : SV_Target {\n"
     "  int2 p = int2(pos.xy);\n"
     "  float3 color = sceneColor.Load(int3(p, 0)).rgb;\n"
@@ -224,7 +274,11 @@ const char* kResolveMain =
     // Night colour fade: per world draw (shaders.cpp NightGrade), so emission keeps its colour.
     "  if (sky) {\n"
     "    c *= tod.rgb;\n"
-    "    if (tod2.w > 0.001) c = lerp(c, ProceduralSky(normalize(Unproject(pos.xy, 0.99999) - Unproject(pos.xy, 0))), tod2.w);\n"
+    "    if (tod2.w > 0.001 || tod7.w > 0.5) {\n"
+    "      float3 vd = normalize(Unproject(pos.xy, 0.99999) - Unproject(pos.xy, 0));\n"
+    "      if (tod2.w > 0.001) c = lerp(c, ProceduralSky(vd), tod2.w);\n"
+    "      if (tod7.w > 0.5) c = SkyBodies(c, vd);\n"
+    "    }\n"
     "  }\n"
     "  if (tod5.w > 0) {\n" // filmic curve (ACES fit) over the whole picture
     "    float3 x = pow(max(c, 0), 2.2) * tod5.w * 0.6;\n"
@@ -416,26 +470,63 @@ BYTE Device::ShadowTargets(const float* instanceConsts, UINT instances, const UI
     return targets;
 }
 
-// Time-of-day preview (Insert panel): the sun crosses a tilted arc from east (6 h) through a 70
-// degree noon to west (18 h); below the horizon the moon (opposite direction) lights the scene.
-// Colours are multipliers on the game's own light, 1 at noon. Y-up here.
+// The game clock: with [TimeOfDay] Running the hour advances DayMinutes real minutes per game
+// day, and each midnight moves the moon one day on in its cycle. A frame after a long stall
+// (loading, the window in the background) does not jump the sky.
+void Device::TickClock()
+{
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    const double dt = m_clockLast.QuadPart ? (now.QuadPart - m_clockLast.QuadPart) / (double)m_qpcFreq.QuadPart : 0.0;
+    m_clockLast = now;
+    if (!g_config.timeOfDay || !g_config.timeRuns || !(dt > 0) || dt > 0.25) return;
+    float hour = g_config.timeOfDayHour + (float)(dt * 24.0 / (g_config.dayMinutes * 60.0));
+    if (hour >= 24) {
+        hour -= 24;
+        g_config.timeOfDayDay += 1;
+        if (g_config.timeOfDayDay >= g_config.moonCycleDays) g_config.timeOfDayDay -= g_config.moonCycleDays;
+    }
+    g_config.timeOfDayHour = hour;
+}
+
+// Time of day (Insert panel): the sun crosses a tilted arc from east (6 h) through a 70 degree
+// noon to west (18 h). The moon runs the same arc a share of a turn behind it, the share growing
+// with the days of its cycle: together with the sun (new), opposite (full, up all night), or up
+// by day in between. At night the moon lights the scene by its phase while it is up; sky glow
+// (MoonlessLight) is the floor. Colours are multipliers on the game's own light, 1 at noon. Y-up here.
 void Device::EvaluateTimeOfDay()
 {
     m_tod = TimeOfDay();
     if (!g_config.timeOfDay) return;
     auto smooth = [](float a, float b, float x) { float t = (x - a) / (b - a); t = t < 0 ? 0 : t > 1 ? 1 : t; return t * t * (3 - 2 * t); };
     auto mix = [](const float* a, const float* b, float t, float* o) { for (int k = 0; k < 3; k++) o[k] = a[k] + (b[k] - a[k]) * t; };
-    const float tilt = 70.0f * 3.14159265f / 180, phi = (g_config.timeOfDayHour - 6.0f) / 12.0f * 3.14159265f;
+    const float pi = 3.14159265f;
+    const float tilt = 70.0f * pi / 180, phi = (g_config.timeOfDayHour - 6.0f) / 12.0f * pi;
     const float sun[3] = { std::cos(phi), std::sin(phi) * std::sin(tilt), std::sin(phi) * std::cos(tilt) };
     const float sunY = sun[1];
     const float up = smooth(-0.03f, 0.12f, sunY), warm = smooth(0.0f, 0.45f, sunY);
     const float white[3] = { 1, 1, 1 };
     float sunColor[3]; mix(g_config.lowSunColor, white, warm, sunColor); // golden low sun
-    const float moonUp = smooth(0.0f, 0.15f, -sunY) * (1 - up);
+    const float moonUp = smooth(0.0f, 0.15f, -sunY) * (1 - up); // night
+    // The moon's age in its cycle: 0 new, 0.5 full.
+    float age = (g_config.timeOfDayDay + g_config.timeOfDayHour / 24) / (std::max)(g_config.moonCycleDays, 1.0f);
+    age -= std::floor(age);
+    const float moonPhi = phi - 2 * pi * age;
+    const float moon[3] = { std::cos(moonPhi), std::sin(moonPhi) * std::sin(tilt), std::sin(moonPhi) * std::cos(tilt) };
+    const float moonLit = 0.5f * (1 - std::cos(2 * pi * age)); // lit share of the disc
+    const float moonAbove = smooth(-0.02f, 0.12f, moon[1]);
+    const float moonShare = moonAbove * (0.15f + 0.85f * moonLit); // 1 = the full moon high up
+    const float nightLight = moonShare > g_config.moonlessLight ? moonShare : g_config.moonlessLight;
+    // The night light comes from the moon, turning to a high sky light as it sets (no jump).
+    float nightDir[3] = { moon[0] * (0.4f + 0.6f * moonAbove), moon[1] * moonAbove + (1 - moonAbove), moon[2] * (0.4f + 0.6f * moonAbove) };
+    {
+        const float len = std::sqrt(nightDir[0] * nightDir[0] + nightDir[1] * nightDir[1] + nightDir[2] * nightDir[2]);
+        for (int k = 0; k < 3; k++) nightDir[k] /= len > 1e-4f ? len : 1.0f;
+    }
     for (int k = 0; k < 3; k++) {
-        // full moon: cold, silvery, clearly directional
-        m_tod.light[k] = sunColor[k] * up * (0.8f + 0.2f * warm) + g_config.moonColor[k] * g_config.moonIntensity * moonUp;
-        m_tod.dir[k] = sunY > -0.03f ? sun[k] : -sun[k];
+        // moonlight: cold, silvery, clearly directional
+        m_tod.light[k] = sunColor[k] * up * (0.8f + 0.2f * warm) + g_config.moonColor[k] * g_config.moonIntensity * moonUp * nightLight;
+        m_tod.dir[k] = sunY > -0.03f ? sun[k] : nightDir[k];
     }
     // Dusk ambient is the blue sky: warm sunlit faces against cool shade.
     const float day[3] = { 1, 1, 1 };
@@ -468,14 +559,23 @@ void Device::EvaluateTimeOfDay()
     const float share = lum(m_tod.light) / (lum(m_tod.light) + lum(m_tod.ambient) + 1e-3f);
     m_tod.shadowStrength = g_config.shadowStrength + (share * 0.9f - g_config.shadowStrength) * (1 - dayW);
     if (m_tod.shadowStrength < g_config.shadowStrength) m_tod.shadowStrength = g_config.shadowStrength;
+    // Shadows dissolve while the light hands over from the sun to the night light (their directions
+    // differ), instead of jumping.
+    m_tod.shadowStrength *= sunY > -0.03f ? smooth(-0.03f, 0.03f, sunY) : smooth(0.03f, 0.09f, -sunY);
     const float coolDay[3] = { 0.93f, 0.96f, 1.0f }, coolDusk[3] = { 0.70f, 0.80f, 1.08f };
     mix(coolDusk, coolDay, dayW, m_tod.shadowTint);
     for (int k = 0; k < 3; k++) m_tod.sunDir[k] = sun[k];
     m_tod.procSky = 1 - dayW; // the game's sky texture only by day
     m_tod.dayW = dayW;
-    m_tod.sheen = g_config.moonSheen * moonUp + g_config.specular * up;
+    m_tod.sheen = g_config.moonSheen * moonUp * nightLight + g_config.specular * up;
     m_tod.moon = moonUp;
-    m_tod.rim = g_config.moonRim * moonUp + g_config.rimLight * up * (1.0f + 0.8f * (1 - warm)); // moon, then the sun (stronger when low)
+    m_tod.rim = g_config.moonRim * moonUp * nightLight + g_config.rimLight * up * (1.0f + 0.8f * (1 - warm)); // moon, then the sun (stronger when low)
+    for (int k = 0; k < 3; k++) m_tod.moonDir[k] = moon[k];
+    m_tod.moonAge = age;
+    m_tod.moonLit = moonLit;
+    m_tod.moonAbove = moonAbove;
+    m_tod.moonGlitter = moonUp * moonShare;
+    m_tod.starAngle = phi;
     m_tod.active = true;
 }
 
@@ -889,6 +989,8 @@ void Device::UpdateSun(bool shadowPass)
     m_sun.todSun[3] = m_tod.active ? m_tod.sheen : g_config.specular;
     m_sun.specParams[0] = g_config.specRoughness; m_sun.specParams[1] = 0.04f;
     m_sun.specParams[2] = m_tod.active ? m_tod.moon : 0.0f; m_sun.specParams[3] = g_config.moonRimWidth;
+    for (int k = 0; k < 3; k++) m_sun.moonDir[k] = m_tod.active ? (k == 1 ? -m_tod.moonDir[k] : m_tod.moonDir[k]) : 0.0f;
+    m_sun.moonDir[3] = m_tod.active ? m_tod.moonGlitter : 0.0f;
     for (int k = 0; k < 3; k++) m_sun.gameSunDir[k] = m_gameSunValid ? m_gameSun[k] : m_sun.direction[k];
     {
         // Night emission: fades in as the day fades out.
@@ -1211,6 +1313,10 @@ void Device::ResolveSun(const char* reason)
     rc.tod4[0] = g_config.nightSky; rc.tod4[1] = g_config.stars;
     rc.tod4[3] = 0.0f;
     for (int k = 0; k < 3; k++) rc.tod5[k] = g_config.nightTint[k];
+    for (int k = 0; k < 3; k++) rc.tod6[k] = m_tod.active ? (k == 1 ? -m_tod.moonDir[k] : m_tod.moonDir[k]) : 0.0f;
+    rc.tod6[3] = m_tod.active ? m_tod.moonLit : 0.0f;
+    rc.tod7[0] = m_tod.starAngle; rc.tod7[1] = m_tod.moonAbove; rc.tod7[2] = g_config.sunDisc;
+    rc.tod7[3] = m_tod.active ? 1.0f : 0.0f;
     rc.tod5[3] = g_config.filmic && g_config.replaceLighting ? g_config.filmicExposure : 0.0f;
     D3D11_MAPPED_SUBRESOURCE map;
     if (FAILED(m_ctx->Map(m_resolveCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;

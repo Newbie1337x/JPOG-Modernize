@@ -133,6 +133,7 @@ struct SunConstants {
     float emissiveGlow[4];  // night emission of the bound stage-0 texture (rgb, already scaled)
     float nightGrade[4];    // night colour fade: tint rgb, strength (world draws, before emission)
     float grassThin[4];     // distant grass: thinning start, end (xz distance), clumps kept at the end, w = 1 + alpha compensation on grass draws
+    float moonDir[4];       // time of day: toward the moon (renderer Y-down), w = moonlight on water (phase, above the horizon, night)
 };
 
 struct WaterConstants {

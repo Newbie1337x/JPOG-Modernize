@@ -89,6 +89,12 @@ struct Config {
     float stars = 1.0f;
     bool timeOfDay = false;         // Insert panel preview: drive the sun from an hour of the day
     float timeOfDayHour = 12.0f;
+    bool timeRuns = true;           // [TimeOfDay] Running: the hour advances by itself (sun.cpp TickClock)
+    float dayMinutes = 24.0f;       // [TimeOfDay] DayMinutes: real minutes per game day
+    float moonCycleDays = 8.0f;     // [TimeOfDay] MoonCycleDays: game days from one full moon to the next
+    float timeOfDayDay = 3.0f;      // [TimeOfDay] Day: day of the moon cycle (3 with the default cycle: full moon at midnight)
+    float moonlessLight = 0.4f;     // [TimeOfDay] MoonlessLight: night light without the moon (sky glow), share of a full moon's
+    float sunDisc = 1.0f;           // [TimeOfDay] SunDisc: brightness of the sun's disc in the sky
     bool relightTonemap = true;     // [Lighting] RelightTonemap: soft shoulder for values above 0.8
     bool sunFromGame = true;        // [Lighting] SunSource=game (else SunX/Y/Z)
     bool grassShadows = false;      // [Lighting] GrassShadows

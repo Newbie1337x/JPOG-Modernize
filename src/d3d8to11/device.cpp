@@ -1960,6 +1960,7 @@ HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
     m_perf.limiterMs=(perfStart.QuadPart-perfEnd.QuadPart)*1000.0/m_qpcFreq.QuadPart;
     RecordPerformance();
     TickGpuBench();
+    TickClock();
     {
         // Spike log, render side: a frame of this thread over 15 ms (the game side is in csmt_device.cpp).
         static LARGE_INTEGER last = {};

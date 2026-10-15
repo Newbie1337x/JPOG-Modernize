@@ -348,8 +348,11 @@ private:
     bool m_iniTimeValid = false;
     void UpdateTerrainHeights();
     void EvaluateTimeOfDay();
+    void TickClock();
+    LARGE_INTEGER m_clockLast = {};
     bool ProceduralSkyActive() const { return g_config.replaceLighting && g_config.proceduralSky; }
-    struct TimeOfDay { bool active = false; float dir[3] = {}, light[3] = {}, ambient[3] = {}, sky[3] = {}, fog[3] = {}, surface[3] = {}, sunDir[3] = {}; float sunLight = 1, procSky = 0, moon = 0, rim = 0, exposure = 1, dayW = 1, sheen = 0, shadowStrength = 0, shadowTint[3] = {}; } m_tod;
+    struct TimeOfDay { bool active = false; float dir[3] = {}, light[3] = {}, ambient[3] = {}, sky[3] = {}, fog[3] = {}, surface[3] = {}, sunDir[3] = {}; float sunLight = 1, procSky = 0, moon = 0, rim = 0, exposure = 1, dayW = 1, sheen = 0, shadowStrength = 0, shadowTint[3] = {};
+        float moonDir[3] = {}, moonAge = 0, moonLit = 0, moonAbove = 0, moonGlitter = 0, starAngle = 0; } m_tod;
     void BindTerrainHeights();
     bool TerrainHeightsActive() const { return m_terrainReady && m_terrainHeightSRV && g_config.heightfieldLighting; }
     ComPtr<ID3D11Texture2D> m_terrainHeightTex;

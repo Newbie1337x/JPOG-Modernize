@@ -389,6 +389,21 @@ void Device::DrawOverlay()
             int hh = (int)g_config.timeOfDayHour, mm = (int)((g_config.timeOfDayHour - hh) * 60);
             char label[32]; sprintf_s(label, "%02d:%02d", hh, mm);
             ImGui::SliderFloat("Hora", &g_config.timeOfDayHour, 0, 23.99f, label);
+            ImGui::Checkbox("El tiempo corre", &g_config.timeRuns);
+            ImGui::SetItemTooltip("La hora avanza sola. Cada medianoche la luna avanza un dia en su ciclo.");
+            ImGui::SliderFloat("Duracion del dia", &g_config.dayMinutes, 2, 120, "%.0f minutos");
+            ImGui::SetItemTooltip("Minutos reales que dura un dia completo del juego.");
+            ImGui::SliderFloat("Ciclo lunar", &g_config.moonCycleDays, 2, 30, "%.0f dias");
+            ImGui::SetItemTooltip("Dias de juego de una luna llena a la siguiente.");
+            if (g_config.timeOfDayDay >= g_config.moonCycleDays) g_config.timeOfDayDay = std::fmod(g_config.timeOfDayDay, g_config.moonCycleDays);
+            ImGui::SliderFloat("Dia del ciclo lunar", &g_config.timeOfDayDay, 0, g_config.moonCycleDays - 0.01f, "%.1f");
+            {
+                const float a = m_tod.moonAge;
+                const char* phase = a < 0.03f || a > 0.97f ? "nueva" : a < 0.22f ? "creciente" : a < 0.28f ? "cuarto creciente" :
+                                    a < 0.47f ? "gibosa creciente" : a < 0.53f ? "llena" : a < 0.72f ? "gibosa menguante" :
+                                    a < 0.78f ? "cuarto menguante" : "menguante";
+                ImGui::Text("Luna %s, %.0f%% iluminada, %s", phase, m_tod.moonLit * 100, m_tod.moonAbove > 0.5f ? "en el cielo" : "bajo el horizonte");
+            }
             ImGui::EndDisabled();
         }
         if (tab == 0 && ImGui::CollapsingHeader("Dia y noche: ajustes avanzados")) {
@@ -409,6 +424,9 @@ void Device::DrawOverlay()
             ImGui::SliderFloat("Desaturacion nocturna", &g_config.nightDesaturate, 0, 1, "%.2f");
             ImGui::ColorEdit3("Tinte nocturno", g_config.nightTint, ImGuiColorEditFlags_Float);
             ImGui::SliderFloat("Estrellas", &g_config.stars, 0, 4, "%.2f");
+            ImGui::SliderFloat("Luz sin luna", &g_config.moonlessLight, 0, 1, "%.2f");
+            ImGui::SetItemTooltip("Luz de la noche cuando la luna esta baja o es fina, en proporcion a la luna llena.");
+            ImGui::SliderFloat("Disco solar", &g_config.sunDisc, 0, 4, "%.2f");
             ImGui::TextDisabled("Amanecer y atardecer");
             ImGui::ColorEdit3("Color del sol bajo", g_config.lowSunColor, ImGuiColorEditFlags_Float);
             ImGui::ColorEdit3("Ambiente del atardecer", g_config.duskAmbient, ImGuiColorEditFlags_Float);

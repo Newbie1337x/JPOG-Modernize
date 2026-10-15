@@ -328,10 +328,12 @@ std::string WaterPixelCode(int samples) {
         "  surface*=lerp(1,bodyLight,ocean);\n"
         "  float3 halfVector=L+V;float3 H=halfVector/max(length(halfVector),.001);\n"
         "  float nh=saturate(dot(N,H)), moon=specParams.z;\n"
-        "  float glint=pow(nh,96)*(.08+.24*fresnel)*waterOptical.x*lerp(ocean,1,moon);\n"
+        "  float glint=pow(nh,96)*(.08+.24*fresnel)*waterOptical.x*lerp(ocean,1,moon)*lerp(1,moonDir.w,moon);\n"
         "  surface+=glint*lerp(float3(1,.96,.86),rimColor.rgb,moon);\n"
-        // Moonlight on water: a sharp glitter on the wave facets plus a soft path toward the moon.
-        "  surface+=moon*rimColor.rgb*(pow(nh,900)*1.6+pow(nh,140)*0.05)*(.35+.65*fresnel)*waterOptical.x;\n"
+        // Moonlight on water: the moon's mirror image broken into glitter on the wave facets, plus a
+        // soft path toward it. From the moon itself (its phase, above the horizon), not the night light.
+        "  float3 moonHalf=moonDir.xyz+V;float mh=saturate(dot(N,moonHalf/max(length(moonHalf),.001)));\n"
+        "  surface+=moonDir.w*rimColor.rgb*(pow(mh,900)*1.6+pow(mh,140)*0.05)*(.35+.65*fresnel)*waterOptical.x;\n"
         // Advancing/receding depth-space fronts plus drifting porous foam, no
         // permanent uniform white outline. Footprint waves remain independent.
         "  float phase=waterOptical.w*1.4+FoamNoise(i.world.xz*.09)*2;\n"
@@ -346,7 +348,10 @@ std::string WaterPixelCode(int samples) {
         "  float crestBreak=smoothstep(.40,.68,FoamNoise(i.world.xz*.28-float2(.06,.02)*waterOptical.w));\n"
         "  float crest=WaterSwellAt(i.world).w*waterSwell.w*.32*crestBreak*porous;\n"
         "  float foam=saturate(shore+crest);\n"
-        "  surface=lerp(surface,float3(0.80,0.86,0.78),foam);\n"
+        "  float3 foamColor=float3(0.80,0.86,0.78);\n"
+        // Foam is lit by the scene light like the water body (time of day), never a white glow at night.
+        "  if(todNight.w>.5)foamColor*=todNight.rgb;\n"
+        "  surface=lerp(surface,foamColor,foam);\n"
         "  if(waterMisc.x==1) return float4(saturate(amount).xxx,1);\n"
         "  if(waterMisc.x==2) return float4(fresnel.xxx,1);\n"
         "  if(waterMisc.x==3) return float4(foam.xxx,1);\n"
@@ -360,7 +365,7 @@ std::string WaterPixelCode(int samples) {
 }
 std::string SunBlock(int slot) {
     return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera;"
-               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; float4 specParams; float4 gameSunDir; float4 emissiveGlow; float4 nightGrade; float4 grassThin; };\n"
+               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; float4 specParams; float4 gameSunDir; float4 emissiveGlow; float4 nightGrade; float4 grassThin; float4 moonDir; };\n"
                // Distant grass keeps a share of its clumps (vertex shader); the rest are drawn fuller.
                "float GrassKeep(float2 xz) {\n"
                "  float t = saturate((length(xz - sunCamera.xz) - grassThin.x) / max(grassThin.y - grassThin.x, 1e-3));\n"
