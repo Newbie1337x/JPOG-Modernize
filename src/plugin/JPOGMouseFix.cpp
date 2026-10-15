@@ -38,6 +38,9 @@ static float g_remX = 0.0f, g_remY = 0.0f;
 static HWND g_gameWnd = nullptr;
 static bool g_modernCamera = true;
 static bool g_gameFastPaths = true;
+static bool g_fullWallView = true; // [Performance] FullWallView: walls over the whole view, not a 512-unit square
+static float g_drawDistanceScale = 2.0f;  // [Performance] DrawDistance: camera far clip and sky
+static float g_objectDistanceScale = 1.5f; // [Performance] ObjectDistance: model fade distances
 static float g_cameraResponse = 0.12f;
 static float g_dragPanSensitivity = 0.0015f;
 static float g_dragRotateSensitivity = 0.0018f;
@@ -1603,6 +1606,13 @@ static void LoadConfig(HMODULE self)
     g_texModsEnabled = GetPrivateProfileIntA("Mods", "TextureReplacement", 1, path) != 0;
     g_profileD3D8 = GetPrivateProfileIntA("Debug", "ProfileD3D8", 0, path) != 0;
     g_gameFastPaths = GetPrivateProfileIntA("Performance", "GameFastPaths", 1, path) != 0;
+    g_fullWallView = GetPrivateProfileIntA("Performance", "FullWallView", 1, path) != 0;
+    GetPrivateProfileStringA("Performance", "DrawDistance", "2.0", buf, sizeof(buf), path);
+    g_drawDistanceScale = (float)atof(buf);
+    if (!(g_drawDistanceScale >= 1.0f && g_drawDistanceScale <= 4.0f)) g_drawDistanceScale = 2.0f;
+    GetPrivateProfileStringA("Performance", "ObjectDistance", "1.5", buf, sizeof(buf), path);
+    g_objectDistanceScale = (float)atof(buf);
+    if (!(g_objectDistanceScale >= 1.0f && g_objectDistanceScale <= 4.0f)) g_objectDistanceScale = 1.5f;
     g_borderless = GetPrivateProfileIntA("Display", "Borderless", 1, path) != 0;
     g_forceWindowed = g_borderless; // borderless = forced windowed + no borders
     g_altF4 = GetPrivateProfileIntA("Display", "AltF4Quit", 1, path) != 0;
@@ -2018,7 +2028,9 @@ static int __fastcall ComparePlane_Hook(const float* box, void*, const float* pl
 // AWallManager::CullQuadTree(x, z, halfX, halfZ, planes, mask) (SimJP 0x5ef870): fences and walls
 // by 32x32 terrain cells. The same steps as the original, which spends most of its time in x87
 // float-to-int conversions that reload the FPU control word; the game's own helpers do the work.
+static int __fastcall ComparePlane_Hook(const float* box, void*, const float* plane);
 namespace wall {
+static int ComparePlane(const float* box, const float* plane) { return ComparePlane_Hook(box, nullptr, plane); }
 typedef bool(__fastcall* CellCached_t)(BYTE* cell, void*, int x, int z);              // 0x5f1ff0
 typedef void(__fastcall* CellSetKey_t)(BYTE* cell, void*, int x, int z);              // 0x5f1fd0
 typedef void(__fastcall* FillCache_t)(BYTE* self, void*, BYTE* cell, int x0, int z0, int x1, int z1); // 0x5ef2b0
@@ -2060,11 +2072,138 @@ static void AddCell(BYTE* self, int x, int z, unsigned mask)
     const int n = (*(int*)(self + 0x500))++;
     *(short*)(self + self[0x4f8] * 0x1fe + 0xfc + n * 2) = (short)index;
 }
+
+// Full view (FullWallView). The game keeps 16 x 16 cells of 32 units in a ring (self + 0xf8,
+// index (x & 15) + (z & 15) * 16) and culls a 512-unit square around a point 80 units ahead of the
+// camera: walls past it are not drawn even in view, and cells entering it are refilled
+// (FillCache) as the camera moves. Here every 32-unit cell of the map has its own render list
+// (the same 0x30-byte ARenderList the game builds in AWallManager::Create), filled once and only
+// emptied by SetRenderBufDirty, and the whole map is culled against the view planes.
+// ARenderList: +0 list head (next +4, prev +8), +0xc count, +0x10 second list, +0x20 visited this
+// frame, +0x24 state (0 all visible, 1 hidden, 2 per item), +0x28/+0x2c key (cell x, z).
+typedef void(__fastcall* CellClear_t)(BYTE* cell, void*);              // 0x5f10c0: hide, return the items to the pool
+typedef void(__fastcall* CellShow_t)(BYTE* cell, void*, int visible);  // 0x5f0c10
+struct Grid {
+    BYTE* owner = nullptr; // the AWallManager
+    BYTE* cells = nullptr;
+    int w = 0, h = 0;
+    std::vector<int> shown, next; // cells added last frame / this frame
+};
+static Grid g_grid;
+
+static void ReleaseGrid()
+{
+    if (g_grid.cells) {
+        for (int i = 0; i < g_grid.w * g_grid.h; i++) {
+            BYTE* cell = g_grid.cells + i * 0x30;
+            if (*(int*)(cell + 0xc) > 0 || *(int*)(cell + 0x24) != 1) ((CellClear_t)0x5f10c0)(cell, nullptr);
+        }
+        VirtualFree(g_grid.cells, 0, MEM_RELEASE);
+    }
+    g_grid.cells = nullptr;
+    g_grid.owner = nullptr;
+    g_grid.w = g_grid.h = 0;
+    g_grid.shown.clear();
+    g_grid.next.clear();
+}
+
+static bool EnsureGrid(BYTE* self)
+{
+    BYTE* field = *(BYTE**)(*kSimJPTerrain + 0x28);
+    const int w = (*(int*)(field + 0x38) + 31) >> 5, h = (*(int*)(field + 0x3c) + 31) >> 5;
+    if (g_grid.owner == self && g_grid.w == w && g_grid.h == h) return true;
+    if (g_grid.owner == self) ReleaseGrid(); // same manager, new terrain size
+    else if (g_grid.cells) { VirtualFree(g_grid.cells, 0, MEM_RELEASE); g_grid = Grid(); } // its manager went without Destroy
+    if (w <= 0 || h <= 0 || w > 256 || h > 256) return false;
+    g_grid.cells = (BYTE*)VirtualAlloc(nullptr, (size_t)w * h * 0x30, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!g_grid.cells) return false;
+    for (int i = 0; i < w * h; i++) {
+        DWORD* c = (DWORD*)(g_grid.cells + i * 0x30);
+        c[1] = c[2] = (DWORD)c;
+        c[5] = c[6] = (DWORD)(c + 4);
+        c[9] = 1;
+        c[10] = c[11] = 0xffffffff;
+    }
+    g_grid.owner = self;
+    g_grid.w = w;
+    g_grid.h = h;
+    return true;
+}
+
+static void AddGridCell(BYTE* self, int x, int z, unsigned mask)
+{
+    BYTE* cell = g_grid.cells + (x + z * g_grid.w) * 0x30;
+    if (cell[0x20]) return;
+    if (!((CellCached_t)0x5f1ff0)(cell, nullptr, x, z)) {
+        ((CellSetKey_t)0x5f1fd0)(cell, nullptr, x, z);
+        ((FillCache_t)0x5ef2b0)(self, nullptr, cell, x * 32, z * 32, x * 32 + 32, z * 32 + 32);
+    }
+    ((AddCell_t)0x5f1140)(cell, nullptr, self + 0x538, 6, mask);
+    cell[0x20] = 1;
+    g_grid.next.push_back(x + z * g_grid.w);
+}
+
+// The quadtree of CullQuadTree_Hook over the map grid.
+static void CullGrid(BYTE* self, float x, float z, float hx, float hz, const float* planes, unsigned mask)
+{
+    BYTE* field = *(BYTE**)(*kSimJPTerrain + 0x28);
+    // The game's box is 12 units tall at the terrain height under its centre: enough for a
+    // 32-unit cell, not for the hills under a box the size of the map. Taller above a leaf.
+    float box[6] = { x, *kNoHeight, z, hx + *kGrow, hx <= *kLeaf ? 12.0f : max(12.0f, hx), hz + *kGrow };
+    const int ix = (int)x, iz = (int)z;
+    if (ix >= 0 && ix < *(int*)(field + 0x38) && iz >= 0 && iz < *(int*)(field + 0x3c))
+        box[1] = -getHeight(field, nullptr, ix, iz);
+    box[1] = box[1] - *kLift;
+    const float* plane = planes;
+    for (unsigned bit = 1; bit < 64; bit <<= 1, plane += 4) {
+        if (!(mask & bit)) continue;
+        const int side = ComparePlane(box, plane);
+        if (side == 1) mask ^= bit;
+        else if (side == -1) return;
+    }
+    const int x0 = max((int)floorf((x - hx) / 32), 0), z0 = max((int)floorf((z - hz) / 32), 0);
+    const int x1 = min((int)ceilf((x + hx) / 32), g_grid.w), z1 = min((int)ceilf((z + hz) / 32), g_grid.h);
+    if (x0 >= x1 || z0 >= z1) return; // off the map
+    if (!mask || (hx <= *kLeaf && hz <= *kLeaf)) {
+        // Wholly inside (every cell under the box, no plane tests left), or a leaf cell.
+        *(unsigned*)(RenderContext() + 0xc) = mask;
+        for (int cz = z0; cz < z1; cz++)
+            for (int cx = x0; cx < x1; cx++) AddGridCell(self, cx, cz, mask);
+        return;
+    }
+    const float qx = hx * *kHalf, qz = hz * *kHalf;
+    CullGrid(self, x - qx, z - qz, qx, qz, planes, mask);
+    CullGrid(self, x - qx, z + qz, qx, qz, planes, mask);
+    CullGrid(self, x + qx, z - qz, qx, qz, planes, mask);
+    CullGrid(self, x + qx, z + qz, qx, qz, planes, mask);
+}
+
+// One frame: the visited flags of last frame's cells are cleared, the map culled, and the cells
+// that left the view hidden (as RenderScene does for the ring).
+static void CullFullView(BYTE* self, const float* planes, unsigned mask)
+{
+    for (int i : g_grid.shown) g_grid.cells[i * 0x30 + 0x20] = 0;
+    g_grid.next.clear();
+    float half = 16;
+    while (half * 2 < max(g_grid.w, g_grid.h) * 32) half *= 2;
+    CullGrid(self, half, half, half, half, planes, mask);
+    for (int i : g_grid.shown) {
+        BYTE* cell = g_grid.cells + i * 0x30;
+        if (!cell[0x20] && *(int*)(cell + 0x24) != 1) ((CellShow_t)0x5f0c10)(cell, nullptr, 0);
+    }
+    g_grid.shown.swap(g_grid.next);
+}
 }
 
 static void __fastcall CullQuadTree_Hook(BYTE* self, void*, float x, float z, float hx, float hz, const float* planes, unsigned mask)
 {
     using namespace wall;
+    // RenderScene's call (the root, 256 x 256): the whole map instead, in full-view mode. The
+    // recursion below calls this function directly with smaller boxes.
+    static int depth = 0;
+    if (g_fullWallView && depth == 0 && EnsureGrid(self)) { CullFullView(self, planes, mask); return; }
+    ++depth;
+    struct Leave { ~Leave() { --depth; } } leave;
     const bool leafX = hx <= *kLeaf, leafZ = hz <= *kLeaf;
     BYTE* field = *(BYTE**)(*kSimJPTerrain + 0x28);
     float box[6] = { x, *kNoHeight, z, hx + *kGrow, 12.0f, hz + *kGrow };
@@ -2237,6 +2376,92 @@ static void InstallSkinFastPath()
                                      : "JPOG: game fast paths: skin bone upload on\n");
 }
 
+// AWallManager::SetRenderBufDirty(x, z) (0x5edac0): a wall in the cell at x, z changed. The
+// original empties that cell of the game's ring; the full-view grid cell is emptied as well.
+static void __fastcall SetRenderBufDirty_Hook(BYTE* self, void*, unsigned x, unsigned z)
+{
+    using namespace wall;
+    BYTE* ring = *(BYTE**)(self + 0xf8) + (((x >> 5) & 15) + ((z >> 5) & 15) * 16) * 0x30;
+    ((CellSetKey_t)0x5f1fd0)(ring, nullptr, -1, -1);
+    ((CellClear_t)0x5f10c0)(ring, nullptr);
+    const int cx = (int)(x >> 5), cz = (int)(z >> 5);
+    if (g_grid.owner == self && cx < g_grid.w && cz < g_grid.h) {
+        BYTE* cell = g_grid.cells + (cx + cz * g_grid.w) * 0x30;
+        ((CellSetKey_t)0x5f1fd0)(cell, nullptr, -1, -1);
+        ((CellClear_t)0x5f10c0)(cell, nullptr);
+    }
+}
+
+// AWallManager::Destroy (0x5e3cf0): the grid's items go back to the pool while the walls exist.
+typedef DWORD(__fastcall* WallDestroy_t)(BYTE* self, void*);
+static WallDestroy_t g_origWallDestroy;
+static DWORD __fastcall WallDestroy_Hook(BYTE* self, void*)
+{
+    if (wall::g_grid.owner == self) wall::ReleaseGrid();
+    return g_origWallDestroy(self, nullptr);
+}
+
+// ARootTask::ResetOptions (0x47bce0) copies the row of the detail level's draw distance table
+// (0x8c5338, 0x58 bytes per level, filled from the game data) into the camera far clip, the sky
+// dome, the water rings and the per-category model fade distances, then refreshes the tree and
+// wall fades. The game sized those for its low park camera; the rows are scaled just before it
+// runs. Each value remembers what the game put there, so a reload of the table is picked up.
+namespace drawdist {
+constexpr int kLevels = 3, kRow = 0x58 / 4;
+constexpr int kFadeEnd = 14;   // floats 0..13: near/far fade pairs of the model categories
+constexpr int kFarClip = 16;   // 14, 15: grass (left alone); 17..21: sky and water tessellation
+float* const kTable = (float*)0x8c5338;
+static float g_original[kLevels][kRow], g_written[kLevels][kRow];
+
+static void Scale()
+{
+    for (int level = 0; level < kLevels; level++)
+        for (int i = 0; i <= kFarClip; i++) {
+            if (i >= kFadeEnd && i < kFarClip) continue;
+            float& v = kTable[level * kRow + i];
+            if (v != g_written[level][i]) g_original[level][i] = v;
+            v = g_written[level][i] = g_original[level][i] * (i == kFarClip ? g_drawDistanceScale : g_objectDistanceScale);
+        }
+}
+}
+
+// The water reflection is a 256x256 view with its own camera: it keeps the game's own far clip,
+// since the extra range is not visible there and it doubled the terrain and model draws.
+typedef float(__thiscall* SetFar_t)(void* camera, float farClip);
+static float __fastcall ReflectionSetFar_Hook(void* camera, void*, float farClip)
+{
+    return (*(SetFar_t*)0x739fac)(camera, farClip / g_drawDistanceScale);
+}
+
+typedef void(__stdcall* ResetOptions_t)();
+static ResetOptions_t g_origResetOptions;
+static void __stdcall ResetOptions_Hook()
+{
+    drawdist::Scale();
+    g_origResetOptions();
+}
+
+static void InstallDrawDistance()
+{
+    if (g_drawDistanceScale == 1.0f && g_objectDistanceScale == 1.0f) return;
+    BYTE* reset = (BYTE*)0x47bce0;
+    static const unsigned char resetSig[] = { 0x83, 0xEC, 0x34, 0xB9, 0x80, 0x85, 0x8B, 0x00, 0xC7, 0x04, 0x24, 0x02, 0x00, 0x00, 0x00 };
+    if (!BytesMatch(reset, resetSig, sizeof(resetSig))) {
+        OutputDebugStringA("JPOG: draw distance: unknown ResetOptions, left alone\n");
+        return;
+    }
+    g_origResetOptions = (ResetOptions_t)MakeTrampoline(reset, 8, (void*)&ResetOptions_Hook);
+    // ARenderer::OnUpdate: MOV EDX,[EBP+0x38]; PUSH EDX; MOV ECX,[ESP+0xf8]; CALL [SetFar] (reflection camera).
+    BYTE* reflection = (BYTE*)0x47779e;
+    static const unsigned char reflectionSig[] = { 0x8B, 0x55, 0x38, 0x52, 0x8B, 0x8C, 0x24, 0xF8, 0x00, 0x00, 0x00, 0xFF, 0x15, 0xAC, 0x9F, 0x73, 0x00 };
+    const bool reflectionFar = BytesMatch(reflection, reflectionSig, sizeof(reflectionSig));
+    if (reflectionFar) WriteRel(reflection + 11, (void*)&ReflectionSetFar_Hook, 0xE8, 6);
+    char line[160];
+    sprintf_s(line, "JPOG: draw distance x%.2f, object distance x%.2f, reflection at the game's distance %s\n",
+        g_drawDistanceScale, g_objectDistanceScale, reflectionFar ? "on" : "off");
+    OutputDebugStringA(line);
+}
+
 static void InstallGameFastPaths()
 {
     if (!g_gameFastPaths) return;
@@ -2259,9 +2484,23 @@ static void InstallGameFastPaths()
     wall::getContext = *(wall::GetContext_t*)0x739f58;
     const bool wallCull = wall::getHeight && wall::getContext && BytesMatch(cull, cullSig, sizeof(cullSig));
     if (wallCull) WriteRel(cull, (void*)&CullQuadTree_Hook, 0xE9, 5);
+    bool fullView = false;
+    if (wallCull && g_fullWallView) {
+        BYTE* dirty = (BYTE*)0x5edac0;
+        static const unsigned char dirtySig[] = { 0x56, 0x55, 0x56, 0x8B, 0xF1, 0x8B, 0x44, 0x24, 0x10, 0x8B, 0x54, 0x24, 0x14 };
+        BYTE* destroy = (BYTE*)0x5e3cf0;
+        static const unsigned char destroySig[] = { 0x57, 0x56, 0x55, 0x53, 0x83, 0xEC, 0x0C, 0x8B, 0xE9, 0x8B, 0x8D, 0xF8, 0x00, 0x00, 0x00 };
+        fullView = BytesMatch(dirty, dirtySig, sizeof(dirtySig)) && BytesMatch(destroy, destroySig, sizeof(destroySig));
+        if (fullView) {
+            WriteRel(dirty, (void*)&SetRenderBufDirty_Hook, 0xE9, 5);
+            g_origWallDestroy = (WallDestroy_t)MakeTrampoline(destroy, 7, (void*)&WallDestroy_Hook);
+        }
+    }
+    g_fullWallView = fullView;
     char line[160];
-    sprintf_s(line, "JPOG: game fast paths: terrain sort %s, matrix multiply %s, plane test %s, wall culling %s\n",
-        g_origInsertGap ? "on" : "off", g_origMatMul ? "on" : "off", comparePlane ? "on" : "off", wallCull ? "on" : "off");
+    sprintf_s(line, "JPOG: game fast paths: terrain sort %s, matrix multiply %s, plane test %s, wall culling %s%s\n",
+        g_origInsertGap ? "on" : "off", g_origMatMul ? "on" : "off", comparePlane ? "on" : "off", wallCull ? "on" : "off",
+        fullView ? " (full view)" : "");
     OutputDebugStringA(line);
 }
 
@@ -2274,6 +2513,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
         InstallD3DHooks();
         InstallTextureMods();
         InstallGameFastPaths();
+        InstallDrawDistance();
         if (g_borderless) {
             HANDLE t = CreateThread(nullptr, 0, BorderlessThread, nullptr, 0, nullptr);
             if (t) CloseHandle(t);
