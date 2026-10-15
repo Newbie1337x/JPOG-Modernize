@@ -804,15 +804,27 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base, UINT 
     // this draw used. Grass casters (pusher constants) and draws from our own dynamic buffers
     // keep the immediate path.
     ShadowDraw d = {};
-    ComPtr<ID3D11Buffer> ib;
-    DXGI_FORMAT ibFormat = DXGI_FORMAT_UNKNOWN;
-    UINT ibOffset = 0;
-    m_ctx->IAGetIndexBuffer(&ib, &ibFormat, &ibOffset);
-    ComPtr<ID3D11Buffer> vbs[kMaxStreams];
-    m_ctx->IAGetVertexBuffers(0, kMaxStreams, vbs[0].GetAddressOf(), d.stride, d.offset);
-    bool batch = m_vsRing && g_config.constantRing && m_vsRingBound && m_worldKind != 4 && !(indexed && ib.Get() == m_dynIB.Get());
+    ComPtr<ID3D11Buffer> ib, vbs[kMaxStreams];
+    ComPtr<ID3D11InputLayout> layout;
+    ComPtr<ID3D11VertexShader> vs;
+    if (const ShadowInput* in = m_shadowInput) {
+        d.ib = in->ib; d.ibFormat = in->ibFormat;
+        memcpy(d.vb, in->vb, sizeof(d.vb));
+        memcpy(d.stride, in->stride, sizeof(d.stride)); // offsets are always 0
+        d.layout = in->layout; d.vs = in->vs; d.topo = in->topo;
+    } else {
+        m_ctx->IAGetIndexBuffer(&ib, &d.ibFormat, &d.ibOffset);
+        m_ctx->IAGetVertexBuffers(0, kMaxStreams, vbs[0].GetAddressOf(), d.stride, d.offset);
+        m_ctx->IAGetInputLayout(&layout);
+        m_ctx->VSGetShader(&vs, nullptr, nullptr);
+        m_ctx->IAGetPrimitiveTopology(&d.topo);
+        d.ib = ib.Get();
+        for (int s = 0; s < kMaxStreams; s++) d.vb[s] = vbs[s].Get();
+        d.layout = layout.Get(); d.vs = vs.Get();
+    }
+    bool batch = m_vsRing && g_config.constantRing && m_vsRingBound && m_worldKind != 4 && !(indexed && d.ib == m_dynIB.Get());
     for (int s = 0; s < kMaxStreams; s++)
-        if (vbs[s] && vbs[s].Get() == m_dynVB.Get()) batch = false;
+        if (d.vb[s] && d.vb[s] == m_dynVB.Get()) batch = false;
     if (!batch) {
         FlushShadowBatch();
         m_ctx->PSSetShader(depthPixel, nullptr, 0);
@@ -832,19 +844,10 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base, UINT 
         return;
     }
     int slot = 0;
-    d.ib = ib.Get();
-    d.ibFormat = ibFormat;
-    d.ibOffset = ibOffset;
     KeepForShadow(slot++, d.ib);
-    for (int s = 0; s < kMaxStreams; s++) { d.vb[s] = vbs[s].Get(); KeepForShadow(slot++, d.vb[s]); }
-    // Shader, layout and topology as bound for this draw.
-    ComPtr<ID3D11InputLayout> layout;
-    ComPtr<ID3D11VertexShader> vs;
-    m_ctx->IAGetInputLayout(&layout);
-    m_ctx->VSGetShader(&vs, nullptr, nullptr);
-    m_ctx->IAGetPrimitiveTopology(&d.topo);
-    d.layout = layout.Get(); KeepForShadow(slot++, d.layout);
-    d.vs = vs.Get(); KeepForShadow(slot++, d.vs);
+    for (int s = 0; s < kMaxStreams; s++) KeepForShadow(slot++, d.vb[s]);
+    KeepForShadow(slot++, d.layout);
+    KeepForShadow(slot++, d.vs);
     d.ps = depthPixel;
     // Stage textures and samplers as PrepareDraw bound them (the binding cache), unless the cache
     // was invalidated since.

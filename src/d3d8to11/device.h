@@ -509,6 +509,14 @@ private:
     std::vector<ShadowDraw> m_shadowBatch;
     std::vector<ComPtr<IUnknown>> m_shadowKeep;
     IUnknown* m_shadowKept[3 + kMaxStreams + 2 * kMaxStages] = {};
+    // The input state of the caster being recorded, when the caller knows it (skin_batch.cpp):
+    // DrawSunShadow then does not read it back from the context (about a dozen COM calls each).
+    struct ShadowInput {
+        ID3D11Buffer* ib; DXGI_FORMAT ibFormat;
+        ID3D11Buffer* vb[kMaxStreams]; UINT stride[kMaxStreams];
+        ID3D11InputLayout* layout; ID3D11VertexShader* vs; D3D11_PRIMITIVE_TOPOLOGY topo;
+    };
+    const ShadowInput* m_shadowInput = nullptr;
     void KeepForShadow(int slot, IUnknown* p) { if (p && m_shadowKept[slot] != p) { m_shadowKeep.emplace_back(p); m_shadowKept[slot] = p; } }
     std::vector<SunConstants> m_shadowSuns;
     std::vector<PSConstants> m_shadowPS;
@@ -551,7 +559,8 @@ private:
     std::vector<float> m_skinConsts;
     ComPtr<ID3D11Buffer> m_skinBuf, m_skinCB;
     ComPtr<ID3D11ShaderResourceView> m_skinSRV;
-    UINT m_skinStatsFrame = 0, m_skinBatches = 0, m_skinBatchedDraws = 0, m_skinAppended = 0, m_skinLogged = 0;
+    float m_skinLight[4][4] = {}; // c88-c91 of the first draw: the relighting reads c88, c90, c91 on the CPU (UpdateSun)
+    UINT m_skinStatsFrame = 0, m_skinBatches = 0, m_skinBatchedDraws = 0, m_skinAppended = 0, m_skinLogged = 0, m_skinLightBreaks = 0;
     bool CreateSkinBatchResources();
     void SetSkinInstanceInfo(const UINT info[4], ID3D11ShaderResourceView* consts);
     bool StartSkinBatch(DWORD type, UINT minIndex, UINT numVertices, UINT startIndex, UINT primCount,

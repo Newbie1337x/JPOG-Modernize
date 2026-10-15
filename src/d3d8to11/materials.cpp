@@ -14,8 +14,15 @@ int Device::MaterialTextureStage() const {
         if(stage==0)return 0;
         // Adult/juvenile skins are blended from t0 and t1. Never use an unused,
         // stale stage-1 binding from another draw (including the HUD).
-        if(m_psHandle && m_psHandle<=m_pixelShaders.size() && m_pixelShaders[m_psHandle-1] &&
-           m_pixelShaders[m_psHandle-1]->samplesStage1)return stage;
+        if(!(m_psHandle && m_psHandle<=m_pixelShaders.size() && m_pixelShaders[m_psHandle-1] &&
+             m_pixelShaders[m_psHandle-1]->samplesStage1))continue;
+        // Trees, lamps and buildings use the same skin shader with stage 1 left over from the
+        // last animal drawn: stage 1 counts only beside a skin of the same library in stage 0.
+        if(!m_textures[0] || m_textures[0]->GetType()!=D8RTYPE_TEXTURE)continue;
+        const std::string& own=static_cast<Texture*>(static_cast<ID8Texture*>(m_textures[0]))->m_normalName;
+        const std::string& other=static_cast<Texture*>(static_cast<ID8Texture*>(m_textures[1]))->m_normalName;
+        const size_t lib=other.find("__");
+        if(lib!=std::string::npos && own.compare(0,lib+2,other,0,lib+2)==0)return stage;
     }
     return -1;
 }

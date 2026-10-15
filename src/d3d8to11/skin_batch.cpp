@@ -76,6 +76,7 @@ bool Device::StartSkinBatch(DWORD type, UINT minIndex, UINT numVertices, UINT st
     m_skinStart = startIndex; m_skinPrims = primCount; m_skinCount = count; m_skinTopo = topo;
     m_skinBase = (INT)m_baseVertex;
     m_skinLo = writeLo; m_skinHi = writeHi;
+    memcpy(m_skinLight, m_vsConst[88], sizeof(m_skinLight));
     m_skinConsts.assign(&m_vsConst[writeLo][0], &m_vsConst[writeHi][0]);
     m_skinInstances = 1;
     m_skinBatchOpen = true;
@@ -90,6 +91,10 @@ bool Device::AppendSkinBatch(DWORD type, UINT minIndex, UINT numVertices, UINT s
         startIndex != m_skinStart || primCount != m_skinPrims || m_skinInstances >= kMaxInstances)
         return false;
     if (m_vsWriteHi > m_vsWriteLo && (m_vsWriteLo < m_skinLo || m_vsWriteHi > m_skinHi)) return false;
+    // The game's light for this object (c88 material, c90 ambient, c91 sun) is turned into the
+    // relighting constants once per draw on the CPU, so only objects lit alike share a draw.
+    // (c89, the light direction in the object's own space, differs with each one's rotation.)
+    if (memcmp(m_skinLight[0], m_vsConst[88], 16) || memcmp(m_skinLight[2], m_vsConst[90], 32)) { ++m_skinLightBreaks; return false; }
     m_skinConsts.insert(m_skinConsts.end(), &m_vsConst[m_skinLo][0], &m_vsConst[m_skinHi][0]);
     ++m_skinInstances;
     if (GrassCaptureActive()) CapturePusher(m_baseVertex + minIndex, numVertices);
@@ -111,10 +116,26 @@ void Device::DrawSkinBatch()
         m_lastIB = ib;
         m_lastIBFormat = fmt;
     }
+    // The input state for the shadow caster: bound by the first draw's PrepareDraw (the setters
+    // draw the batch before changing any of it) and the lines above.
+    ShadowInput input = {};
+    auto shadowInput = [&]() -> const ShadowInput* {
+        if (!m_lastVS || !m_lastLayout) return nullptr;
+        input.ib = ib; input.ibFormat = fmt; input.topo = m_skinTopo;
+        input.layout = m_lastLayout; input.vs = m_lastVS;
+        for (int s = 0; s < kMaxStreams; s++) {
+            if (!(m_skinVS->parsed.streamMask & (1u << s))) continue;
+            if (!m_lastVB[s]) return nullptr;
+            input.vb[s] = m_lastVB[s]; input.stride[s] = m_lastStride[s];
+        }
+        return &input;
+    };
     if (n == 1) {
         // The constant ring still holds this draw's constants (uploaded by its PrepareDraw).
         m_ctx->DrawIndexed(m_skinCount, m_skinStart, m_skinBase);
+        m_shadowInput = shadowInput();
         DrawSunShadow(true, m_skinCount, m_skinStart, m_skinBase);
+        m_shadowInput = nullptr;
         return;
     }
     const UINT window = m_skinHi - m_skinLo, elements = n * window;
@@ -130,16 +151,18 @@ void Device::DrawSkinBatch()
     m_ctx->VSSetShader(vs, nullptr, 0);
     m_lastVS = vs; // the next draw binds its own shader
     m_ctx->DrawIndexedInstanced(m_skinCount, n, m_skinStart, m_skinBase, 0);
+    m_shadowInput = shadowInput();
     DrawSunShadow(true, m_skinCount, m_skinStart, m_skinBase, n, info, m_skinConsts.data());
+    m_shadowInput = nullptr;
     ++m_skinBatches;
     m_skinBatchedDraws += n;
     if (m_skinStatsFrame + 300 <= m_frame) {
         if (m_skinBatches && m_skinLogged < 40) {
             ++m_skinLogged;
-            Log("skin instancing: %u instanced draws, %.1f instances each, %u draws joined (last 300 frames)",
-                m_skinBatches, (double)m_skinBatchedDraws / m_skinBatches, m_skinAppended);
+            Log("skin instancing: %u instanced draws, %.1f instances each, %u draws joined, %u runs split by their light (last 300 frames)",
+                m_skinBatches, (double)m_skinBatchedDraws / m_skinBatches, m_skinAppended, m_skinLightBreaks);
         }
         m_skinStatsFrame = (UINT)m_frame;
-        m_skinBatches = m_skinBatchedDraws = m_skinAppended = 0;
+        m_skinBatches = m_skinBatchedDraws = m_skinAppended = m_skinLightBreaks = 0;
     }
 }
