@@ -240,7 +240,7 @@ void LoadConfig()
     g_config.terrainBatching=GetPrivateProfileIntA("Performance","TerrainBatching",1,ini.c_str())!=0;
     g_config.hitchSampler=GetPrivateProfileIntA("Performance","HitchSampler",0,ini.c_str())!=0;
     g_config.hitchThresholdMs=GetPrivateProfileIntA("Performance","HitchThresholdMs",60,ini.c_str());
-    if(g_config.hitchThresholdMs<20)g_config.hitchThresholdMs=20;
+    if(g_config.hitchThresholdMs<5)g_config.hitchThresholdMs=5;
     g_config.asyncShaders=GetPrivateProfileIntA("Performance","AsyncShaders",1,ini.c_str())!=0;
     g_config.prewarmShaders=GetPrivateProfileIntA("Performance","PrewarmShaders",1,ini.c_str())!=0;
     g_config.threaded=GetPrivateProfileIntA("Performance","Threaded",0,ini.c_str())!=0;

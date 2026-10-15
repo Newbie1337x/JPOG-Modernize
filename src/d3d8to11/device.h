@@ -492,15 +492,20 @@ private:
     void BuildPointLights();
     void BindPointLights();
     // Shadow casters recorded during the world pass and drawn together (sun.cpp FlushShadowBatch).
+    // Plain pointers: m_shadowKeep holds a reference to each object while the batch is open, taken
+    // only when a slot changes from the previous caster (consecutive casters share most of them).
     struct ShadowDraw {
-        ComPtr<ID3D11VertexShader> vs; ID3D11PixelShader* ps; ComPtr<ID3D11InputLayout> layout;
+        ID3D11VertexShader* vs; ID3D11PixelShader* ps; ID3D11InputLayout* layout;
         D3D11_PRIMITIVE_TOPOLOGY topo;
-        ComPtr<ID3D11Buffer> vb[kMaxStreams]; UINT stride[kMaxStreams], offset[kMaxStreams];
-        ComPtr<ID3D11Buffer> ib; DXGI_FORMAT ibFormat; UINT ibOffset;
-        ComPtr<ID3D11ShaderResourceView> srv[kMaxStages]; ComPtr<ID3D11SamplerState> sampler[kMaxStages];
+        ID3D11Buffer* vb[kMaxStreams]; UINT stride[kMaxStreams], offset[kMaxStreams];
+        ID3D11Buffer* ib; DXGI_FORMAT ibFormat; UINT ibOffset;
+        ID3D11ShaderResourceView* srv[kMaxStages]; ID3D11SamplerState* sampler[kMaxStages];
         UINT vsFirst, sun, psc; bool indexed; UINT count, start; INT base;
     };
     std::vector<ShadowDraw> m_shadowBatch;
+    std::vector<ComPtr<IUnknown>> m_shadowKeep;
+    IUnknown* m_shadowKept[3 + kMaxStreams + 2 * kMaxStages] = {};
+    void KeepForShadow(int slot, IUnknown* p) { if (p && m_shadowKept[slot] != p) { m_shadowKeep.emplace_back(p); m_shadowKept[slot] = p; } }
     std::vector<SunConstants> m_shadowSuns;
     std::vector<PSConstants> m_shadowPS;
     ComPtr<ID3D11Buffer> m_shadowPSCB;

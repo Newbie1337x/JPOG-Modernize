@@ -579,8 +579,21 @@ void Device::CapturePusher(UINT firstVertex, UINT numVertices)
     };
     BYTE used[256] = {};
     UINT distinct = 0;
-    XMVECTOR lo = XMVectorReplicate(1e30f), hi = XMVectorReplicate(-1e30f);
     const UINT samples = numVertices < 48 ? numVertices : 48;
+    // Bones first: trees, props and buildings use one or a few and stop here, without the skinning.
+    for (UINT k = 0; k < samples; k++) {
+        const BYTE* v = data.data() + (size_t)(firstVertex + (UINT)((uint64_t)k * numVertices / samples)) * stride;
+        const XMFLOAT4 w = color(v + weights->offset), i = color(v + indices->offset);
+        const float wv[4] = { w.x, w.y, w.z, w.w }, iv[4] = { i.x, i.y, i.z, i.w };
+        for (int j = 0; j < 4; j++) {
+            if (wv[j] <= 0) continue;
+            const int a0 = (int)std::floor(m_vsConst[4][j] * iv[j] + 0.001f);
+            if (a0 < 0 || 5 + a0 + 2 >= kMaxVSConst) continue;
+            if (!used[a0 & 255]) { used[a0 & 255] = 1; distinct++; }
+        }
+    }
+    if (distinct < (UINT)g_config.grassMinBones && !m_trace) return;
+    XMVECTOR lo = XMVectorReplicate(1e30f), hi = XMVectorReplicate(-1e30f);
     for (UINT k = 0; k < samples; k++) {
         const BYTE* v = data.data() + (size_t)(firstVertex + (UINT)((uint64_t)k * numVertices / samples)) * stride;
         float p[4];
@@ -593,7 +606,6 @@ void Device::CapturePusher(UINT firstVertex, UINT numVertices)
             if (wv[j] <= 0) continue;
             const int a0 = (int)std::floor(m_vsConst[4][j] * iv[j] + 0.001f);
             if (a0 < 0 || 5 + a0 + 2 >= kMaxVSConst) continue;
-            if (!used[a0 & 255]) { used[a0 & 255] = 1; distinct++; }
             for (int r = 0; r < 3; r++) {
                 const float* row = m_vsConst[5 + a0 + r];
                 out[r] += wv[j] * (row[0] * p[0] + row[1] * p[1] + row[2] * p[2] + row[3] * p[3]);
@@ -787,16 +799,11 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base)
     DXGI_FORMAT ibFormat = DXGI_FORMAT_UNKNOWN;
     UINT ibOffset = 0;
     m_ctx->IAGetIndexBuffer(&ib, &ibFormat, &ibOffset);
-    ID3D11Buffer* vbs[kMaxStreams] = {};
-    UINT strides[kMaxStreams] = {}, offsets[kMaxStreams] = {};
-    m_ctx->IAGetVertexBuffers(0, kMaxStreams, vbs, strides, offsets);
+    ComPtr<ID3D11Buffer> vbs[kMaxStreams];
+    m_ctx->IAGetVertexBuffers(0, kMaxStreams, vbs[0].GetAddressOf(), d.stride, d.offset);
     bool batch = m_vsRing && g_config.constantRing && m_vsRingBound && m_worldKind != 4 && !(indexed && ib.Get() == m_dynIB.Get());
-    for (int s = 0; s < kMaxStreams; s++) {
-        if (vbs[s] && vbs[s] == m_dynVB.Get()) batch = false;
-        d.vb[s].Attach(vbs[s]); // IAGetVertexBuffers added a reference
-        d.stride[s] = strides[s];
-        d.offset[s] = offsets[s];
-    }
+    for (int s = 0; s < kMaxStreams; s++)
+        if (vbs[s] && vbs[s].Get() == m_dynVB.Get()) batch = false;
     if (!batch) {
         FlushShadowBatch();
         m_ctx->PSSetShader(depthPixel, nullptr, 0);
@@ -814,25 +821,46 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base)
         m_lastBlend = nullptr; m_lastDepth = nullptr; m_lastRaster = nullptr;
         return;
     }
-    d.ib = ib;
+    int slot = 0;
+    d.ib = ib.Get();
     d.ibFormat = ibFormat;
     d.ibOffset = ibOffset;
-    m_ctx->IAGetInputLayout(&d.layout);
+    KeepForShadow(slot++, d.ib);
+    for (int s = 0; s < kMaxStreams; s++) { d.vb[s] = vbs[s].Get(); KeepForShadow(slot++, d.vb[s]); }
+    // Shader, layout and topology as bound for this draw.
+    ComPtr<ID3D11InputLayout> layout;
+    ComPtr<ID3D11VertexShader> vs;
+    m_ctx->IAGetInputLayout(&layout);
+    m_ctx->VSGetShader(&vs, nullptr, nullptr);
     m_ctx->IAGetPrimitiveTopology(&d.topo);
-    m_ctx->VSGetShader(&d.vs, nullptr, nullptr);
+    d.layout = layout.Get(); KeepForShadow(slot++, d.layout);
+    d.vs = vs.Get(); KeepForShadow(slot++, d.vs);
     d.ps = depthPixel;
-    ID3D11ShaderResourceView* srvs[kMaxStages] = {};
-    ID3D11SamplerState* samplers[kMaxStages] = {};
-    m_ctx->PSGetShaderResources(0, kMaxStages, srvs);
-    m_ctx->PSGetSamplers(0, kMaxStages, samplers);
-    for (int s = 0; s < kMaxStages; s++) { d.srv[s].Attach(srvs[s]); d.sampler[s].Attach(samplers[s]); }
+    // Stage textures and samplers as PrepareDraw bound them (the binding cache), unless the cache
+    // was invalidated since.
+    const ID3D11ShaderResourceView* const invalidSrv = (ID3D11ShaderResourceView*)~(uintptr_t)0;
+    const ID3D11SamplerState* const invalidSamp = (ID3D11SamplerState*)~(uintptr_t)0;
+    bool cached = true;
+    for (int s = 0; s < kMaxStages; s++) cached = cached && m_bind.psSrv[s] != invalidSrv && m_bind.psSamp[s] != invalidSamp;
+    if (cached) {
+        memcpy(d.srv, m_bind.psSrv, sizeof(d.srv));
+        memcpy(d.sampler, m_bind.psSamp, sizeof(d.sampler));
+    } else {
+        ComPtr<ID3D11ShaderResourceView> srvs[kMaxStages];
+        ComPtr<ID3D11SamplerState> samplers[kMaxStages];
+        m_ctx->PSGetShaderResources(0, kMaxStages, srvs[0].GetAddressOf());
+        m_ctx->PSGetSamplers(0, kMaxStages, samplers[0].GetAddressOf());
+        for (int s = 0; s < kMaxStages; s++) { d.srv[s] = srvs[s].Get(); d.sampler[s] = samplers[s].Get(); KeepForShadow(slot + s, d.srv[s]); KeepForShadow(slot + kMaxStages + s, d.sampler[s]); }
+    }
+    if (cached)
+        for (int s = 0; s < kMaxStages; s++) { KeepForShadow(slot + s, d.srv[s]); KeepForShadow(slot + kMaxStages + s, d.sampler[s]); }
     d.vsFirst = m_vsRingFirst;
     if (m_shadowSuns.empty() || memcmp(&m_shadowSuns.back(), &m_sun, sizeof(m_sun))) m_shadowSuns.push_back(m_sun);
     d.sun = (UINT)m_shadowSuns.size() - 1;
     if (m_shadowPS.empty() || memcmp(&m_shadowPS.back(), &m_psConst, sizeof(m_psConst))) m_shadowPS.push_back(m_psConst);
     d.psc = (UINT)m_shadowPS.size() - 1;
     d.indexed = indexed; d.count = count; d.start = start; d.base = base;
-    m_shadowBatch.push_back(std::move(d));
+    m_shadowBatch.push_back(d);
 }
 
 // Draws the recorded casters into the shadow map in one render-target switch. Called before the
@@ -862,6 +890,8 @@ void Device::FlushShadowBatch()
     ID3D11VertexShader* vs = nullptr; ID3D11PixelShader* ps = nullptr; ID3D11InputLayout* layout = nullptr;
     D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
     ID3D11Buffer* ib = nullptr;
+    UINT ibOffset = 0;
+    const ShadowDraw* prev = nullptr;
     for (const ShadowDraw& d : m_shadowBatch) {
         if (d.sun != sun) {
             sun = d.sun;
@@ -882,22 +912,23 @@ void Device::FlushShadowBatch()
             const UINT num = kMaxVSConst;
             m_ctx1->VSSetConstantBuffers1(0, 1, m_vsRing.GetAddressOf(), &first, &num);
         }
-        if (d.vs.Get() != vs) { vs = d.vs.Get(); m_ctx->VSSetShader(vs, nullptr, 0); }
+        if (d.vs != vs) { vs = d.vs; m_ctx->VSSetShader(vs, nullptr, 0); }
         if (d.ps != ps) { ps = d.ps; m_ctx->PSSetShader(ps, nullptr, 0); }
-        if (d.layout.Get() != layout) { layout = d.layout.Get(); m_ctx->IASetInputLayout(layout); }
+        if (d.layout != layout) { layout = d.layout; m_ctx->IASetInputLayout(layout); }
         if (d.topo != topo) { topo = d.topo; m_ctx->IASetPrimitiveTopology(topo); }
-        ID3D11Buffer* vbs[kMaxStreams];
-        for (int s = 0; s < kMaxStreams; s++) vbs[s] = d.vb[s].Get();
-        m_ctx->IASetVertexBuffers(0, kMaxStreams, vbs, d.stride, d.offset);
-        if (d.indexed && d.ib.Get() != ib) { ib = d.ib.Get(); m_ctx->IASetIndexBuffer(ib, d.ibFormat, d.ibOffset); }
-        ID3D11ShaderResourceView* srvs[kMaxStages];
-        ID3D11SamplerState* samplers[kMaxStages];
-        for (int s = 0; s < kMaxStages; s++) { srvs[s] = d.srv[s].Get(); samplers[s] = d.sampler[s].Get(); }
-        m_ctx->PSSetShaderResources(0, kMaxStages, srvs);
-        m_ctx->PSSetSamplers(0, kMaxStages, samplers);
+        // Consecutive casters of one model share streams, textures and samplers.
+        if (!prev || memcmp(prev->vb, d.vb, sizeof(d.vb)) || memcmp(prev->stride, d.stride, sizeof(d.stride)) ||
+            memcmp(prev->offset, d.offset, sizeof(d.offset)))
+            m_ctx->IASetVertexBuffers(0, kMaxStreams, d.vb, d.stride, d.offset);
+        if (d.indexed && (d.ib != ib || d.ibOffset != ibOffset)) { ib = d.ib; ibOffset = d.ibOffset; m_ctx->IASetIndexBuffer(ib, d.ibFormat, d.ibOffset); }
+        if (!prev || memcmp(prev->srv, d.srv, sizeof(d.srv))) m_ctx->PSSetShaderResources(0, kMaxStages, d.srv);
+        if (!prev || memcmp(prev->sampler, d.sampler, sizeof(d.sampler))) m_ctx->PSSetSamplers(0, kMaxStages, d.sampler);
+        prev = &d;
         if (d.indexed) m_ctx->DrawIndexed(d.count, d.start, d.base); else m_ctx->Draw(d.count, d.start);
     }
     m_shadowBatch.clear();
+    m_shadowKeep.clear();
+    memset(m_shadowKept, 0, sizeof(m_shadowKept));
     m_shadowSuns.clear();
     m_shadowPS.clear();
     // Everything the game's draws had bound is rebound by the next PrepareDraw.

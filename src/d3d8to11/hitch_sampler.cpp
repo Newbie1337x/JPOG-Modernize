@@ -165,7 +165,7 @@ void FramePresented()
         return;
     }
     const double ms = (now.QuadPart - g_frameStart) * 1000.0 / g_freq;
-    if (ms >= g_config.hitchThresholdMs && g_logged < 100) {
+    if (ms >= g_config.hitchThresholdMs && g_logged < 300) {
         g_logged++;
         Report(g_frameStart, now.QuadPart, ms);
         QueryPerformanceCounter(&now); // the report is not part of the next frame
