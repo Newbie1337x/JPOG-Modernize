@@ -265,6 +265,21 @@ void Device::DrawOverlay()
             ImGui::Checkbox("Arboles instanciados (prueba A/B)",&g_config.skinInstancing);
             ImGui::Checkbox("Sombras lejanas en cache (prueba A/B)",&g_config.shadowCache);
             ImGui::Checkbox("Guardar CSV de rendimiento (1/seg)",&g_config.performanceLog);
+            if(m_bench.step>=0)ImGui::Text("Midiendo costos de GPU... paso %d (no muevas la camara)",m_bench.step+1);
+            else if(ImGui::Button("Medir costo de cada efecto (camara quieta, ~1 min)"))StartGpuBench();
+            if(m_bench.step<0 && m_bench.results.size()>1 && ImGui::BeginTable("bench",2,ImGuiTableFlags_RowBg|ImGuiTableFlags_SizingStretchProp)) {
+                const double total=m_bench.results.front().stages[Performance::Frame];
+                ImGui::TableNextRow();ImGui::TableNextColumn();ImGui::TextUnformatted("GPU con todo");
+                ImGui::TableNextColumn();ImGui::Text("%.2f ms",total);
+                for(size_t i=1;i<m_bench.results.size();i++){
+                    const auto& r=m_bench.results[i];
+                    ImGui::TableNextRow();ImGui::TableNextColumn();ImGui::TextUnformatted(r.name.c_str());
+                    ImGui::TableNextColumn();
+                    if(i+1==m_bench.results.size())ImGui::Text("%.2f ms",r.stages[Performance::Frame]);
+                    else ImGui::Text("%+.2f ms",total-r.stages[Performance::Frame]);
+                }
+                ImGui::EndTable();
+            }
             if(m_perf.csvFailed)ImGui::TextColored(ImVec4(1,.4f,.3f,1),"No se pudo escribir el CSV.");
             else if(!m_perf.csvPath.empty()){ImGui::TextWrapped("CSV: %s",m_perf.csvPath.c_str());}
             ImGui::Text("Cuadro: %.2f ms  Pico: %.2f ms",m_perf.frameMs,m_perf.peakMs);
@@ -647,6 +662,9 @@ void Device::DrawOverlay()
             ImGui::Checkbox("Luces de faroles", &g_config.pointLights);
             ImGui::SliderFloat("Intensidad de faroles", &g_config.pointLightIntensity, 0, 16, "%.2f");
             ImGui::SliderFloat("Radio de faroles", &g_config.pointLightRadius, 0.5f, 64, "%.1f");
+            ImGui::SliderFloat("Juntar faroles cercanos", &g_config.pointLightMerge, 0, 16, g_config.pointLightMerge > 0 ? "%.1f unidades" : "Apagado");
+            ImGui::SetItemTooltip("Faroles dentro de la misma celda de este tamano iluminan como uno solo (mas rapido).");
+            ImGui::Text("%u faroles encendidos", m_pointLightsShown);
             ImGui::SliderFloat("Calidez de faroles", &g_config.pointLightWarmth, 0, 1, "%.2f");
             ImGui::ColorEdit3("Color de faroles", g_config.pointLightTint);
             ImGui::SliderInt("Depurar faroles", &g_config.pointLightDebug, 0, 2);

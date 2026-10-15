@@ -424,6 +424,15 @@ private:
     Performance m_perf;
     DrawDiagnostics m_drawDiagnostics;
     void RecordPerformance();
+    // GPU cost per effect and draw kind (bench.cpp): one off at a time against everything on.
+    struct GpuBench {
+        struct Result { std::string name; double stages[Performance::Count] = {}; unsigned samples = 0; };
+        int step = -1; unsigned frames = 0; bool flagWas = false, timingWas = false;
+        std::vector<Result> results;
+    } m_bench;
+    int m_benchSkipKind = -1; // world draws of this kind are skipped (main view)
+    void StartGpuBench();
+    void TickGpuBench();
     UINT m_perfDraws=0, m_perfWaterDraws=0, m_perfShadowDraws=0;
     // Sun shadows (sun.cpp). Casters are drawn into m_sunMap as the frame is rendered; once the
     // world is finished, a full-screen pass darkens the back buffer using the scene depth.
@@ -491,7 +500,7 @@ private:
     // lights.cpp: night point lights from the emission masks.
     static const int kMaxPointLights = 1024; // lamps lit at once (t18)
     // b5: x = lamps, y = inverse-square knee, z = tiles per row, w = 1 when the tiles are valid.
-    struct PointLightConstants { float count[4]; };
+    struct PointLightConstants { float count[4]; float slices[4]; };
     struct LightEmitter { float local[3]; BYTE weights[4], indices[4]; float rgb[3]; float weight; UINT count; };
     struct WorldLight { float pos[3]; float rgb[3]; UINT lastSeen; UINT count; };
     std::unordered_map<unsigned long long, std::vector<LightEmitter>> m_emitterCache;
@@ -659,9 +668,12 @@ private:
     bool StartTerrainBatch(DWORD type, UINT startIndex, UINT primCount);
     bool AppendTerrainBatch(DWORD type, UINT startIndex, UINT primCount);
     void DrawTerrainBatch();
-    // Screen tiles of kLightTile pixels, each with the lamps whose sphere can reach it (t17): the
-    // pixel shader walks those instead of every lamp. count[2] = tiles per row, count[3] = 1 valid.
+    // Clusters: screen tiles of kLightTile pixels cut into kLightSlices shells of distance from the
+    // camera, each with the lamps whose sphere can reach it (t17): the pixel shader walks those of
+    // its own cluster instead of every lamp. count[2] = tiles per row, count[3] = 1 valid;
+    // slices = nearest distance, slices per doubling of the distance, slice count, tile rows.
     static const int kLightTile = 32;
+    static const UINT kLightSlices = 16;
     static const UINT kLightsPerTile = 48; // the nearest are kept
     ComPtr<ID3D11Buffer> m_lightTileBuf;
     ComPtr<ID3D11ShaderResourceView> m_lightTileSRV;

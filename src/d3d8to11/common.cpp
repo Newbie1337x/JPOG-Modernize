@@ -111,6 +111,7 @@ void LoadConfig()
     g_config.pointLights = GetPrivateProfileIntA("Lighting", "PointLights", 1, ini.c_str()) != 0;
     g_config.pointLightIntensity = readFloat("PointLightIntensity", 1.5f, 0, 16);
     g_config.pointLightRadius = readFloat("PointLightRadius", 8.0f, 0.5f, 64);
+    g_config.pointLightMerge = readFloat("PointLightMerge", 4.0f, 0, 32);
     g_config.pointLightWarmth = readFloat("PointLightWarmth", 0.75f, 0, 1);
     g_config.pointLightDebug = (std::max)(0, (std::min)(2, (int)GetPrivateProfileIntA("Lighting", "PointLightDebug", 0, ini.c_str())));
     {
@@ -254,7 +255,7 @@ void LoadConfig()
     if(g_config.hitchProfileSeconds<0)g_config.hitchProfileSeconds=0;
     g_config.asyncShaders=GetPrivateProfileIntA("Performance","AsyncShaders",1,ini.c_str())!=0;
     g_config.prewarmShaders=GetPrivateProfileIntA("Performance","PrewarmShaders",1,ini.c_str())!=0;
-    g_config.skinInstancing=GetPrivateProfileIntA("Performance","SkinInstancing",1,ini.c_str())!=0;
+    g_config.skinInstancing=GetPrivateProfileIntA("Performance","SkinInstancing",0,ini.c_str())!=0;
     g_config.threaded=GetPrivateProfileIntA("Performance","Threaded",0,ini.c_str())!=0;
     g_config.taa=GetPrivateProfileIntA("Antialiasing","TAA",1,ini.c_str())!=0;
     g_config.fsr31=GetPrivateProfileIntA("Antialiasing","FSR31",1,ini.c_str())!=0;
@@ -357,6 +358,7 @@ void SaveConfig()
     putInt("Lighting", "PointLights", g_config.pointLights);
     putFloat("Lighting", "PointLightIntensity", g_config.pointLightIntensity);
     putFloat("Lighting", "PointLightRadius", g_config.pointLightRadius);
+    putFloat("Lighting", "PointLightMerge", g_config.pointLightMerge);
     putFloat("Lighting", "PointLightWarmth", g_config.pointLightWarmth);
     putInt("Lighting", "PointLightDebug", g_config.pointLightDebug);
     {

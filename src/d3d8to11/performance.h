@@ -13,6 +13,8 @@ struct Performance {
     struct Slot { ComPtr<ID3D11Query> disjoint; Event events[Events]; int used=0; bool pending=false, overflow=false; };
     Slot slots[Slots];
     bool enabled=false, active=false, failed=false, valid=false, attempted=false;
+    bool everyFrame=false; // GPU bench: every frame timed, each one summed into benchSum
+    double benchSum[Count]={}; unsigned benchCount=0;
     unsigned serial=0;
     int current=-1;
     unsigned skipped=0, spikesLogged=0;

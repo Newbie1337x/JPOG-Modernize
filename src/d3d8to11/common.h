@@ -52,6 +52,7 @@ struct Config {
     bool pointLights = true;        // [Lighting] PointLights: lamps and signs light their surroundings at night
     float pointLightIntensity = 1.5f; // [Lighting] PointLightIntensity
     float pointLightRadius = 8.0f;  // [Lighting] PointLightRadius (world units)
+    float pointLightMerge = 4.0f;   // [Lighting] PointLightMerge: lamps in one cell of this world grid light as one (0 = each its own)
     float pointLightTint[3] = { 1.0f, 0.741f, 0.439f }; // [Lighting] PointLightTint (#FFBD70)
     float pointLightWarmth = 0.75f; // [Lighting] PointLightWarmth: 0 = the mask's colour, 1 = the tint
     int pointLightDebug = 0;        // [Lighting] PointLightDebug: 1 = lamps per screen tile as colour, lamp centres as green columns; 2 = the same over every lamp, without tiles
@@ -142,7 +143,7 @@ struct Config {
     bool hitchSampler=false; int hitchThresholdMs=60; // [Performance] HitchSampler, HitchThresholdMs (hitch_sampler.h)
     int hitchProfileSeconds=0; // [Performance] HitchProfileSeconds: sum the slow frames, one report per period
     bool asyncShaders=true, prewarmShaders=true; // [Performance] AsyncShaders, PrewarmShaders (shader_jobs.h)
-    bool skinInstancing=true; // [Performance] SkinInstancing (skin_batch.cpp)
+    bool skinInstancing=false; // [Performance] SkinInstancing (skin_batch.cpp): slower than separate draws in the measured views
     bool taa=true, fsr1=true;
     bool fsr31=true; // experimental native-resolution temporal AA, not frame generation
     bool objectMotion=true; // [Antialiasing] ObjectMotion: animals' own motion vectors for FSR (motion.cpp)

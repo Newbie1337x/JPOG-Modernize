@@ -269,7 +269,34 @@ void Device::BuildPointLights()
         d[3] = radius;
         d[7] = 0;
     }
-    m_pointLightsShown = (UINT)n;
+    // Lamps in one cell of a fixed world grid (PointLightMerge units) light as one: a fence's
+    // lamps a few units apart overlap almost entirely, and each one costs every pixel it reaches.
+    // The grid does not move with the camera, so the grouping never changes while looking around.
+    const float cell = g_config.pointLightMerge;
+    if (cell > 0 && n > 1) {
+        std::unordered_map<unsigned long long, size_t> slots;
+        std::vector<float> merged, weight;
+        merged.reserve(m_lightData.size());
+        for (size_t i = 0; i < n; i++) {
+            const float* d = &m_lightData[i * 8];
+            const unsigned long long key = ((unsigned long long)(UINT)(int)std::floor(d[0] / cell) * 0x9E3779B97F4A7C15ull) ^
+                ((unsigned long long)(UINT)(int)std::floor(d[1] / cell) * 0xC2B2AE3D27D4EB4Full) ^ (UINT)(int)std::floor(d[2] / cell);
+            const float w = d[4] * 0.2126f + d[5] * 0.7152f + d[6] * 0.0722f + 1e-4f;
+            auto found = slots.find(key);
+            if (found == slots.end()) {
+                slots.emplace(key, weight.size());
+                merged.insert(merged.end(), d, d + 8);
+                weight.push_back(w);
+                continue;
+            }
+            float* m = &merged[found->second * 8];
+            float& W = weight[found->second];
+            for (int k = 0; k < 3; k++) { m[k] = (m[k] * W + d[k] * w) / (W + w); m[4 + k] += d[4 + k]; }
+            W += w;
+        }
+        m_lightData.swap(merged);
+    }
+    m_pointLightsShown = (UINT)(m_lightData.size() / 8);
 }
 
 // Lamps (t18, two float4 each: position + radius, colour) and per screen tile the lamps whose
@@ -284,11 +311,14 @@ void Device::BuildLightTiles()
     const UINT w = m_backBuffer->m_width, h = m_backBuffer->m_height;
     const UINT tx = (w + kLightTile - 1) / kLightTile, ty = (h + kLightTile - 1) / kLightTile;
     if (!tx || !ty) return;
-    const UINT tiles = tx * ty;
+    const UINT tiles = tx * ty, clusters = tiles * kLightSlices;
+    // Distance shells: logarithmic from kNear to kFar (a pixel nearer than kNear uses the first).
+    const float kNear = 4.0f, kFar = 4000.0f, perDoubling = kLightSlices / std::log2(kFar / kNear);
+    auto slice = [&](float d) { return (int)(std::max)(0.0f, (std::min)((float)kLightSlices - 1, std::log2((std::max)(d, kNear) / kNear) * perDoubling)); };
 
-    struct Rect { int ax, bx, ay, by; };
+    struct Rect { int ax, bx, ay, by, as, bs; };
     std::vector<Rect> rects(n);
-    std::vector<UINT> counts(tiles, 0);
+    std::vector<UINT> counts(clusters, 0);
     const float (*vp)[4] = m_waterViewProjection; // clip[r] = dot(float4(P, 1), vp[r])
     UINT nearPlane = 0, behind = 0;
     for (UINT i = 0; i < n; i++) {
@@ -327,37 +357,52 @@ void Device::BuildLightTiles()
                 add(q);
             }
         }
-        b = { 0, (int)tx - 1, 0, (int)ty - 1 };
+        b = { 0, (int)tx - 1, 0, (int)ty - 1, 0, (int)kLightSlices - 1 };
+        {
+            const float dx = l[0] - m_sun.camera[0], dy = l[1] - m_sun.camera[1], dz = l[2] - m_sun.camera[2];
+            const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+            // One shell of margin each side, like the tiles: the camera moves before the frame is drawn.
+            b.as = (std::max)(0, slice(d - r) - 1); b.bs = (std::min)((int)kLightSlices - 1, slice(d + r) + 1);
+        }
         if (!unbounded) {
             if (x1 < 0 || y1 < 0 || x0 >= w || y0 >= h) { b.bx = -1; continue; } // off screen
             // One tile of margin: TAA/FSR jitter and the rasteriser's half-pixel rules.
             b.ax = (std::max)(0, (int)(x0 / kLightTile) - 1); b.bx = (std::min)((int)tx - 1, (int)(x1 / kLightTile) + 1);
             b.ay = (std::max)(0, (int)(y0 / kLightTile) - 1); b.by = (std::min)((int)ty - 1, (int)(y1 / kLightTile) + 1);
         }
-        for (int y = b.ay; y <= b.by; y++)
-            for (int x = b.ax; x <= b.bx; x++) {
-                UINT& c = counts[size_t(y) * tx + x];
-                if (c < kLightsPerTile) c++;
-            }
+        for (int s = b.as; s <= b.bs; s++)
+            for (int y = b.ay; y <= b.by; y++)
+                for (int x = b.ax; x <= b.bx; x++) {
+                    UINT& c = counts[(size_t(s) * ty + y) * tx + x];
+                    if (c < kLightsPerTile) c++;
+                }
     }
-    UINT total = tiles, full = 0, most = 0;
-    for (UINT i = 0; i < tiles; i++) { total += counts[i]; full += counts[i] >= kLightsPerTile; most = (std::max)(most, counts[i]); }
+    UINT total = clusters, full = 0, most = 0, used = 0;
+    for (UINT i = 0; i < clusters; i++) {
+        total += counts[i]; full += counts[i] >= kLightsPerTile; most = (std::max)(most, counts[i]); used += counts[i] > 0;
+    }
+    static UINT statFrame;
+    if (++statFrame % 600 == 0)
+        Log("Point lights: %u lamps, clusters: %u with lamps of %u, %u full, %u most, %.1f average where used",
+            n, used, clusters, full, most, used ? (total - clusters) / (float)used : 0.0f);
     if (g_config.pointLightDebug && m_frame % 300 == 0)
         Log("Point lights: first at %.1f %.1f %.1f (tiles %d-%d, %d-%d); %u remembered, %u shown, %u behind the camera, %u across its near plane; tiles: %u of %u full, %u most, %.1f average",
-            m_lightData[0], m_lightData[1], m_lightData[2], rects[0].ax, rects[0].bx, rects[0].ay, rects[0].by, m_pointLightTris, n, behind, nearPlane, full, tiles, most, (total - tiles) / (float)tiles);
+            m_lightData[0], m_lightData[1], m_lightData[2], rects[0].ax, rects[0].bx, rects[0].ay, rects[0].by, m_pointLightTris, n, behind, nearPlane, full, clusters, most, (total - clusters) / (float)clusters);
     m_lightTiles.assign(total, 0);
-    UINT at = tiles;
-    for (UINT i = 0; i < tiles; i++) { m_lightTiles[i] = at << 8; at += counts[i]; }
+    UINT at = clusters;
+    for (UINT i = 0; i < clusters; i++) { m_lightTiles[i] = at << 8; at += counts[i]; }
     for (UINT i = 0; i < n; i++) { // nearest lamps first, so a full tile keeps those
         const Rect& b = rects[i];
-        for (int y = b.ay; y <= b.by; y++)
-            for (int x = b.ax; x <= b.bx; x++) {
-                UINT& e = m_lightTiles[size_t(y) * tx + x];
-                const UINT c = e & 0xff;
-                if (c >= counts[size_t(y) * tx + x]) continue;
-                m_lightTiles[(e >> 8) + c] = i;
-                e++;
-            }
+        for (int s = b.as; s <= b.bs; s++)
+            for (int y = b.ay; y <= b.by; y++)
+                for (int x = b.ax; x <= b.bx; x++) {
+                    const size_t k = (size_t(s) * ty + y) * tx + x;
+                    UINT& e = m_lightTiles[k];
+                    const UINT c = e & 0xff;
+                    if (c >= counts[k]) continue;
+                    m_lightTiles[(e >> 8) + c] = i;
+                    e++;
+                }
     }
 
     // Grow either buffer geometrically; both are rewritten every frame.
@@ -390,6 +435,10 @@ void Device::BuildLightTiles()
     m_pointLights.count[1] = 1.0f / (radius * radius * 0.08f); // inverse-square knee (about a third of the radius)
     m_pointLights.count[2] = (float)tx;
     m_pointLights.count[3] = g_config.pointLightDebug == 2 ? 3.0f : g_config.pointLightDebug ? 2.0f : 1.0f;
+    m_pointLights.slices[0] = kNear;
+    m_pointLights.slices[1] = perDoubling;
+    m_pointLights.slices[2] = (float)kLightSlices;
+    m_pointLights.slices[3] = (float)ty;
 }
 
 void Device::BindPointLights()
@@ -410,4 +459,7 @@ void Device::BindPointLights()
     BindPSCB(5, 1, m_pointLightCB.GetAddressOf());
     ID3D11ShaderResourceView* views[2] = { m_lightTileSRV.Get(), m_lightDataSRV.Get() };
     BindPSSrv(17, 2, views);
+    // Grass lights its vertices (shaders.cpp GrassLamps): blades are a few pixels wide.
+    BindVSCB(5, 1, m_pointLightCB.GetAddressOf());
+    BindVSSrv(17, 2, views);
 }

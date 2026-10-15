@@ -491,7 +491,6 @@ void Device::StartSunFrame()
     if (std::fabs(XMVectorGetX(det)) < 1e-20f) return;
     StoreRows(inv, m_sun.clipToWorld);
     memcpy(m_waterViewProjection,rows,sizeof(rows));
-    BuildLightTiles(); // this frame's camera
     // Camera position: the point that maps to clip (0, 0, z, 0).
     XMVECTOR camH = XMVector4Transform(XMVectorSet(0, 0, 1, 0), inv);
     XMVECTOR cam;
@@ -503,6 +502,7 @@ void Device::StartSunFrame()
         cam = centre - XMVector3Normalize(XMVectorSetW(camH, 0)) * 1e5f;
     }
     m_sun.camera[0] = XMVectorGetX(cam); m_sun.camera[1] = XMVectorGetY(cam); m_sun.camera[2] = XMVectorGetZ(cam);
+    BuildLightTiles(); // this frame's camera (view-projection and position)
     if (g_config.pointLightDebug && m_frame % 300 == 0)
         Log("Sun segment: camera %.1f %.1f %.1f, viewport %ux%u at %u,%u, rt %s", m_sun.camera[0], m_sun.camera[1], m_sun.camera[2],
             m_viewport.Width, m_viewport.Height, m_viewport.X, m_viewport.Y, m_rt == m_backBuffer ? "back" : "other");

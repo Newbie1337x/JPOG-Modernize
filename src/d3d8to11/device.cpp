@@ -1383,6 +1383,7 @@ bool Device::PrepareDraw()
     }
     VertexShader8* vs = m_vertexShaders[idx];
     m_worldKind = vs->worldKind;
+    if (m_benchSkipKind >= 0 && m_worldKind == m_benchSkipKind && m_rt == m_backBuffer && m_rs[RS_ZENABLE]) return false;
     bool waterShader=m_psHandle>0 && m_psHandle<=m_pixelShaders.size() && m_pixelShaders[m_psHandle-1] &&
         m_pixelShaders[m_psHandle-1]->water;
     m_waterShaderDraw = waterShader;
@@ -1958,6 +1959,7 @@ HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
     QueryPerformanceCounter(&perfStart);
     m_perf.limiterMs=(perfStart.QuadPart-perfEnd.QuadPart)*1000.0/m_qpcFreq.QuadPart;
     RecordPerformance();
+    TickGpuBench();
     {
         // Spike log, render side: a frame of this thread over 15 ms (the game side is in csmt_device.cpp).
         static LARGE_INTEGER last = {};

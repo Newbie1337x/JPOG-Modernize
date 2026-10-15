@@ -22,6 +22,7 @@ void Performance::Poll(ID3D11DeviceContext* c)
             double times[Count]={};
             for(int i=0;i<s.used;i++)times[s.events[i].stage]+=(ends[i]-starts[i])*1000.0/dis.Frequency;
             for(int i=0;i<Count;i++)gpu[i]=times[i];
+            if(everyFrame){for(int i=0;i<Count;i++)benchSum[i]+=times[i];++benchCount;}
             // Spike log, GPU side (every frame is timed): where a slow frame's GPU time went.
             if(times[Frame]>12 && spikesLogged<300){
                 ++spikesLogged;
@@ -38,7 +39,7 @@ void Performance::Begin(ID3D11Device* d,ID3D11DeviceContext* c)
     if(attempted)return;
     attempted=true;
     Poll(c);
-    if(!enabled || failed || serial%30)return;
+    if(!enabled || failed || (serial%30 && !everyFrame))return;
     for(int i=0;i<Slots;i++)if(!slots[i].pending){current=i;break;}
     if(current<0){++skipped;return;}
     auto& s=slots[current];

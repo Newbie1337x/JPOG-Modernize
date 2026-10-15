@@ -557,7 +557,7 @@ std::string SunPixelCodeBase() {
         // physically summed and gets a sky/ground tinted ambient. Output goes through exposure and
         // a highlight-only shoulder so values the game kept below 1 are not changed.
         // Night point lights (lights.cpp): count.y = inverse-square knee.
-        "cbuffer PointLights : register(b5) { float4 lightCount; };\n"
+        "cbuffer PointLights : register(b5) { float4 lightCount; float4 lightSlices; };\n"
         // Lamp light in output space, added after the night grade so lamps keep their warm colour.
         "static float3 pointExtra = 0;\n"
         // Per lamp two texels: position + radius, colour.
@@ -578,7 +578,9 @@ std::string SunPixelCodeBase() {
         "    [loop] for (uint k = 0; k < (uint)lightCount.x; k++) { float2 d = lightData.Load(k * 2).xz - P.xz; if (dot(d, d) < 0.36) return float3(0, 6, 0); sum += PointLight(k, N, P, flat); }\n"
         "    return sum * 0.2; }\n"
         "  uint2 t = (uint2)px / 32;\n"
-        "  uint e = lightTiles.Load(t.y * (uint)lightCount.z + t.x);\n"
+        // The pixel's distance shell (lights.cpp BuildLightTiles: logarithmic from lightSlices.x).
+        "  uint s = (uint)clamp(log2(max(length(P - sunCamera.xyz), lightSlices.x) / lightSlices.x) * lightSlices.y, 0, lightSlices.z - 1);\n"
+        "  uint e = lightTiles.Load((s * (uint)lightSlices.w + t.y) * (uint)lightCount.z + t.x);\n"
         "  uint o = e >> 8, c = e & 255;\n"
         "  [loop] for (uint j = 0; j < c; j++) sum += PointLight(lightTiles.Load(o + j), N, P, flat);\n"
         // PointLightDebug: lamps in this tile as colour (blue few .. red full) and a green column
@@ -694,7 +696,9 @@ std::string SunPixelCodeBase() {
         // The tips (t7.x = blade height) catch the moon (rimColor.w).
         "    light += GameSun() * saturate(i.t7.x * 1.5) * rimColor.w;\n"
         "    float3 outRgb = LinearToOutput(ToLinear(color.rgb) * light / max(base, 0.05));\n"
-        "    pointExtra = LinearToOutput(ToLinear(color.rgb) * (light / max(base, 0.05) + PointLights(N, i.world, true, i.pos.xy))) - outRgb;\n"
+        // Lamps come lit from the vertex shader (t7.yzw, GrassLamps); the debug views stay per pixel.
+        "    float3 lamps = lightCount.w > 1.5 ? PointLights(N, i.world, true, i.pos.xy) : i.t7.yzw;\n"
+        "    pointExtra = LinearToOutput(ToLinear(color.rgb) * (light / max(base, 0.05) + lamps)) - outRgb;\n"
         "    return float4(outRgb, color.a);\n"
         "  }\n"
         // Terrain: the game's per-vertex sun factor (v0.w, passed in t7.x) keeps its smooth slopes.
@@ -950,7 +954,27 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
              "  float2 patch = c[4].xz;\n"
              "  uint h = (grassVid >> 3) * 0x9E3779B1u ^ asuint(patch.x) * 0x85EBCA77u ^ asuint(patch.y) * 0xC2B2AE3Du;\n"
              "  h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12;\n"
-             "  return (h & 0xFFFF) / 65536.0 < GrassKeep(patch) ? p : float4(patch.x, 0, patch.y, 1); }\n";
+             "  return (h & 0xFFFF) / 65536.0 < GrassKeep(patch) ? p : float4(patch.x, 0, patch.y, 1); }\n"
+             // Night lamps at the vertex, from the pixel shader's clusters (lights.cpp BuildLightTiles):
+             // blades are a few pixels wide, so per vertex looks the same and costs a fraction.
+             "cbuffer PointLights : register(b5) { float4 lightCount; float4 lightSlices; };\n"
+             "Buffer<uint> lightTiles : register(t17);\n"
+             "Buffer<float4> lightData : register(t18);\n"
+             "float3 GrassLamps(float3 P, float4 clip) {\n"
+             "  float3 sum = 0;\n"
+             "  if (lightCount.w < 0.5 || lightCount.w > 1.5 || sunFlags.y > 0.5 || clip.w <= 0) return sum;\n"
+             "  float2 px = (float2(clip.x, -clip.y) / clip.w * 0.5 + 0.5) * float2(-1 / pixelOffset.x, 1 / pixelOffset.y);\n"
+             "  uint2 t = (uint2)clamp(px / 32, 0, float2(lightCount.z, lightSlices.w) - 1);\n"
+             "  uint s = (uint)clamp(log2(max(length(P - sunCamera.xyz), lightSlices.x) / lightSlices.x) * lightSlices.y, 0, lightSlices.z - 1);\n"
+             "  uint e = lightTiles.Load((s * (uint)lightSlices.w + t.y) * (uint)lightCount.z + t.x);\n"
+             "  [loop] for (uint j = 0; j < (e & 255); j++) {\n"
+             "    uint k = lightTiles.Load((e >> 8) + j);\n"
+             "    float4 lp = lightData.Load(k * 2); float3 L = lp.xyz - P; float d2 = dot(L, L), r2 = lp.w * lp.w;\n"
+             "    if (d2 >= r2) continue;\n"
+             "    float f = saturate(1 - d2 / r2); f *= f;\n"
+             "    sum += lightData.Load(k * 2 + 1).rgb * f / (1 + d2 * lightCount.y);\n"
+             "  }\n"
+             "  return sum; }\n";
     }
     s += "float4 C(int i) { return (i >= 0 && i < 256) ? c[i] : float4(0, 0, 0, 0); }\n";
     s += kHelpers;
@@ -1137,7 +1161,7 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
     // Terrain: r9 = v0.w * c7 + c6 is the game's light; v0.w is its baked sun factor (relighting).
     if (WorldShaderKind(decl) == 2) s += "  o.t7 = float4(v0.w, 0, 0, 1);\n";
     // Grass: blade-local height (v0.y, also the game's wind sway factor) for moonlit tips.
-    if (WorldShaderKind(decl) == 4) s += "  o.t7 = float4(abs(v0.y), 0, 0, 1);\n";
+    if (WorldShaderKind(decl) == 4) s += "  o.t7 = float4(abs(v0.y), GrassLamps(worldPosition.xyz, o.pos));\n";
     s += "  o.fog = oFog.x;\n";
     s += "  return o;\n}\n";
     if (instanced) InstanceConstants(s, bodyStart);
