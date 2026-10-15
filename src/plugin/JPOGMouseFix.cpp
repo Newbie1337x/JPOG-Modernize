@@ -43,6 +43,9 @@ static float g_drawDistanceScale = 2.0f;  // [Performance] DrawDistance: camera 
 static float g_objectDistanceScale = 1.5f; // [Performance] ObjectDistance: model fade distances
 static bool g_fullTreeView = true;          // [Performance] FullTreeView: trees past the 512-unit square
 static float g_treeDistanceScale = 2.5f;   // [Performance] TreeDistance: tree fade distance
+static float g_grassDistanceScale = 1.0f;  // [Performance] GrassDistance: grass thinning/fade distance
+static float g_grassPoolScale = 1.0f;      // the GrassDistance the grass mesh pool was sized for
+static volatile LONG g_grassPending;       // JPOGGrass_Set: rescale the draw distance table on the game thread
 static float g_fenceDistanceScale = 2.5f;  // [Performance] FenceDistance: fence and wall fade distance
 static float g_minFadeDistance = 2000.0f;  // [Performance] MinFadeDistance: no model fades out closer (0 = off)
 static float g_cameraResponse = 0.12f;
@@ -211,7 +214,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI JPOGCamera_RightButton(BOOL down)
 // Raw DirectInput feed from our proxy: no Windows cursor warping or edge clamp.
 // Return TRUE only for a camera drag; the proxy then removes the axes and the middle button.
 // Middle drag orbits and tilts (Shift + middle pans, Alt + middle changes height); a right
-// drag pans.
+// drag pans. The middle drag keeps the mode it started with until the button is released, so
+// Shift pressed during an orbit (fast W/A/S/D) does not turn it into a pan; Shift held with a
+// movement key when the drag starts is that same fast movement, not a pan either.
+static LONG g_middleMode = 0; // 0 middle up, else the latched mode (1 pan, 2 orbit, 3 height)
 extern "C" __declspec(dllexport) BOOL WINAPI JPOGCamera_MouseInput(LONG dx, LONG dy, LONG /*wheel*/, DWORD buttons)
 {
     if (g_rightState == 1 && (buttons & 2)) {
@@ -220,9 +226,15 @@ extern "C" __declspec(dllexport) BOOL WINAPI JPOGCamera_MouseInput(LONG dx, LONG
     }
     const bool rightDrag = g_rightState == 2 && (buttons & 2);
     const bool middle = (buttons & 4) != 0;
-    const bool height = middle && g_worldUpdateTramp && (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
-    const bool shiftPan = middle && !height && (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-    const bool rotate = middle && !height && !shiftPan && !rightDrag;
+    if (!middle) g_middleMode = 0;
+    else if (!g_middleMode) {
+        auto held = [](int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; };
+        const bool moving = held('W') || held('A') || held('S') || held('D') ||
+                            held(VK_UP) || held(VK_DOWN) || held(VK_LEFT) || held(VK_RIGHT);
+        g_middleMode = g_worldUpdateTramp && held(VK_MENU) ? 3 : held(VK_SHIFT) && !moving ? 1 : 2;
+    }
+    const bool height = middle && g_middleMode == 3;
+    const bool rotate = middle && g_middleMode == 2 && !rightDrag;
     const LONG mode = height ? 3 : rotate ? 2 : 1;
     if (!CameraGesturesReady() || !(middle || rightDrag) ||
         !(rotate ? g_cameraRotateAllowed : g_cameraPanAllowed)) {
@@ -244,10 +256,28 @@ extern "C" __declspec(dllexport) BOOL WINAPI JPOGCamera_MouseInput(LONG dx, LONG
 }
 
 static void InstallSkinFastPath();
+static void ApplyGrassDistance();
+
+extern "C" __declspec(dllexport) BOOL WINAPI JPOGGrass_Get(float* scale, float* poolScale)
+{
+    if (scale) *scale = g_grassDistanceScale;
+    if (poolScale) *poolScale = g_grassPoolScale;
+    return TRUE;
+}
+extern "C" __declspec(dllexport) BOOL WINAPI JPOGGrass_Set(float scale, BOOL save)
+{
+    if (!_finite(scale)) return FALSE;
+    g_grassDistanceScale = CameraMath::Clamp(scale, 1, 6);
+    InterlockedExchange(&g_grassPending, 1);
+    if (!save) return TRUE;
+    char value[32]; sprintf_s(value, "%.6g", g_grassDistanceScale);
+    return WritePrivateProfileStringA("Performance", "GrassDistance", value, g_cameraConfigPath);
+}
 
 static bool __fastcall ScrollingUpdate_Hook(BYTE* state, void*, float dt)
 {
     InstallSkinFastPath();
+    if (InterlockedExchange(&g_grassPending, 0)) ApplyGrassDistance();
     BYTE* camera = ActiveWorldCamera();
     BYTE* inputMap = g_cameraInputMap ? *g_cameraInputMap : nullptr;
     const bool allowed = g_modernCamera && camera && inputMap &&
@@ -1637,6 +1667,9 @@ static void LoadConfig(HMODULE self)
     GetPrivateProfileStringA("Performance", "TreeDistance", "2.5", buf, sizeof(buf), path);
     g_treeDistanceScale = (float)atof(buf);
     if (!(g_treeDistanceScale >= 1.0f && g_treeDistanceScale <= 8.0f)) g_treeDistanceScale = 2.5f;
+    GetPrivateProfileStringA("Performance", "GrassDistance", "1.0", buf, sizeof(buf), path);
+    g_grassDistanceScale = (float)atof(buf);
+    if (!(g_grassDistanceScale >= 1.0f && g_grassDistanceScale <= 6.0f)) g_grassDistanceScale = 1.0f;
     GetPrivateProfileStringA("Performance", "FenceDistance", "2.5", buf, sizeof(buf), path);
     g_fenceDistanceScale = (float)atof(buf);
     if (!(g_fenceDistanceScale >= 1.0f && g_fenceDistanceScale <= 8.0f)) g_fenceDistanceScale = 2.5f;
@@ -2441,7 +2474,8 @@ constexpr int kLevels = 3, kRow = 0x58 / 4;
 constexpr int kFadeEnd = 14;   // floats 0..13: near/far fade pairs of the model categories
 constexpr int kTreeNear = 4, kTreeFar = 5;   // AFadeDist type 0 (LoadFadeData)
 constexpr int kFenceNear = 10, kFenceFar = 11; // AFadeDist type 1 (ReinitWallFadeDists)
-constexpr int kFarClip = 16;   // 14, 15: grass (left alone); 17..21: sky and water tessellation
+constexpr int kGrassNear = 14, kGrassFar = 15; // TGrassShaderHAL::SetAlphaNear/SetAlphaFar: blades thin out between them
+constexpr int kFarClip = 16;   // 17..21: sky and water tessellation
 float* const kTable = (float*)0x8c5338;
 static float g_original[kLevels][kRow], g_written[kLevels][kRow];
 
@@ -2449,10 +2483,10 @@ static void Scale()
 {
     for (int level = 0; level < kLevels; level++)
         for (int i = 0; i <= kFarClip; i++) {
-            if (i >= kFadeEnd && i < kFarClip) continue;
             float& v = kTable[level * kRow + i];
             if (v != g_written[level][i]) g_original[level][i] = v;
             const float scale = i == kFarClip ? g_drawDistanceScale
+                              : i == kGrassNear || i == kGrassFar ? g_grassDistanceScale
                               : (i == kTreeNear || i == kTreeFar) && g_fullTreeView ? g_treeDistanceScale
                               : (i == kFenceNear || i == kFenceFar) && g_fullWallView ? g_fenceDistanceScale : g_objectDistanceScale;
             v = g_written[level][i] = g_original[level][i] * scale;
@@ -2477,9 +2511,10 @@ static void Scale()
         for (int level = 0; level < kLevels; level++) {
             const float* o = g_original[level];
             const float* w = g_written[level];
-            PluginLog("draw distance level %d: far clip %.0f -> %.0f, trees %.0f-%.0f -> %.0f-%.0f, fences %.0f-%.0f -> %.0f-%.0f",
+            PluginLog("draw distance level %d: far clip %.0f -> %.0f, trees %.0f-%.0f -> %.0f-%.0f, fences %.0f-%.0f -> %.0f-%.0f, "
+                "grass %.0f-%.0f -> %.0f-%.0f",
                 level, o[kFarClip], w[kFarClip], o[kTreeNear], o[kTreeFar], w[kTreeNear], w[kTreeFar],
-                o[kFenceNear], o[kFenceFar], w[kFenceNear], w[kFenceFar]);
+                o[kFenceNear], o[kFenceFar], w[kFenceNear], w[kFenceFar], o[kGrassNear], o[kGrassFar], w[kGrassNear], w[kGrassFar]);
         }
 }
 }
@@ -2508,6 +2543,13 @@ static void __stdcall ResetOptions_Hook()
 {
     drawdist::Scale();
     g_origResetOptions();
+}
+
+// The game pushes the table's grass distances to the grass shader in ResetOptions, as when its
+// detail level changes. Called on the game thread.
+static void ApplyGrassDistance()
+{
+    if (g_origResetOptions) ResetOptions_Hook();
 }
 
 // Trees (FullTreeView). ATreeManager keeps the trees of 16x16-unit cells in a cache ring of 32x32
@@ -2592,7 +2634,6 @@ static void InstallFullTreeView()
 
 static void InstallDrawDistance()
 {
-    if (g_drawDistanceScale == 1.0f && g_objectDistanceScale == 1.0f && !g_fullTreeView && g_minFadeDistance <= 0.0f) return;
     BYTE* reset = (BYTE*)0x47bce0;
     static const unsigned char resetSig[] = { 0x83, 0xEC, 0x34, 0xB9, 0x80, 0x85, 0x8B, 0x00, 0xC7, 0x04, 0x24, 0x02, 0x00, 0x00, 0x00 };
     if (!BytesMatch(reset, resetSig, sizeof(resetSig))) {
@@ -2609,6 +2650,35 @@ static void InstallDrawDistance()
     sprintf_s(line, "JPOG: draw distance x%.2f, object distance x%.2f, reflection at the game's distance %s\n",
         g_drawDistanceScale, g_objectDistanceScale, reflectionFar ? "on" : "off");
     OutputDebugStringA(line);
+}
+
+// TTerrainInterface::Create builds a fixed pool of grass meshes, one per terrain section with grass
+// (s_ui32DefaultGrassMeshCacheSize = 350). With a longer grass distance the sections around the
+// camera outnumber it: looking toward the horizon, sections get no grass once the pool is empty.
+// The pool grows with the covered area. TTerrainInterface.dll is imported by SimJP.exe, so it is
+// loaded before this plugin and before any park is created.
+static void InstallGrassPool()
+{
+    if (g_grassDistanceScale <= 1.0f) return;
+    HMODULE terrain = GetModuleHandleA("TTerrainInterface.dll");
+    if (!terrain) return;
+    // The three MOV [s_ui32DefaultGrassMeshCacheSize],350 of the module (one is in Create).
+    static const DWORD sites[] = { 0x80fa, 0x8a30, 0x8fb8 };
+    const DWORD cache = (DWORD)terrain + 0x1e38c;
+    unsigned char sig[10] = { 0xC7, 0x05 };
+    memcpy(sig + 2, &cache, 4);
+    const DWORD original = 350;
+    memcpy(sig + 6, &original, 4);
+    for (DWORD rva : sites)
+        if (!BytesMatch((BYTE*)terrain + rva - 6, sig, sizeof(sig))) {
+            PluginLog("grass pool: unknown TTerrainInterface.dll, left alone");
+            return;
+        }
+    const float scale = g_grassDistanceScale;
+    const DWORD size = (DWORD)(original * scale * scale) < 4096 ? (DWORD)(original * scale * scale) : 4096;
+    for (DWORD rva : sites) PatchBytes((BYTE*)terrain + rva, &size, 4);
+    g_grassPoolScale = sqrtf((float)size / original);
+    PluginLog("grass pool: %u -> %u meshes", original, size);
 }
 
 static void InstallGameFastPaths()
@@ -2663,6 +2733,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
         InstallTextureMods();
         InstallGameFastPaths();
         InstallDrawDistance();
+        InstallGrassPool();
         InstallFullTreeView();
         if (g_borderless) {
             HANDLE t = CreateThread(nullptr, 0, BorderlessThread, nullptr, 0, nullptr);
