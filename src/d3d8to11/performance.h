@@ -34,6 +34,7 @@ struct Performance {
     UINT64 duplicateConstants=0, vsUploads=0, psUploads=0, geometryUploads=0, geometryUploadBytes=0;
     UINT64 redundantRenderStates=0,redundantTextureStates=0,samplerSelectionHits=0,samplerSelectionLookups=0;
     UINT64 redundantBinds=0,constantBytes=0;
+    UINT64 pendingShaderDraws=0; // draws skipped while their pixel shader compiled in the background
     bool cpuMeasured=false; unsigned cpuSamples=0;
     ~Performance(){if(csv)fclose(csv);}
     void Begin(ID3D11Device*,ID3D11DeviceContext*);

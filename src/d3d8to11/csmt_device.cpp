@@ -8,6 +8,7 @@
 // alive (AddRef) until it runs.
 #include "csmt.h"
 #include "device.h"
+#include "hitch_sampler.h"
 #include <xmmintrin.h>
 
 namespace {
@@ -170,6 +171,7 @@ public:
         });
         q->FramePosted();
         LogGameSpike(q);
+        hitch_sampler::FramePresented();
         return S_OK;
     }
 

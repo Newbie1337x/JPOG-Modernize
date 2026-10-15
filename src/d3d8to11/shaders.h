@@ -84,6 +84,8 @@ struct TessConstants {
 };
 // optimize = false compiles with D3DCOMPILE_SKIP_OPTIMIZATION (see the tessellation hull shader).
 ComPtr<ID3DBlob> CompileHLSL(const std::string& source, const char* profile, const std::string& debugName, bool optimize = true);
+// The compiled code from the disk cache (d3d8to11_shadercache), nullptr when it is not there.
+ComPtr<ID3DBlob> CachedHLSL(const std::string& source, const char* profile, bool optimize = true);
 
 // Pixel shader constant buffer layout (b0), shared by translated and fixed-function shaders.
 struct PSConstants {

@@ -238,6 +238,11 @@ void LoadConfig()
     g_config.performanceGPU=GetPrivateProfileIntA("Performance","MeasureGPU",1,ini.c_str())!=0;
     g_config.constantRing=GetPrivateProfileIntA("Performance","ConstantRing",1,ini.c_str())!=0;
     g_config.terrainBatching=GetPrivateProfileIntA("Performance","TerrainBatching",1,ini.c_str())!=0;
+    g_config.hitchSampler=GetPrivateProfileIntA("Performance","HitchSampler",0,ini.c_str())!=0;
+    g_config.hitchThresholdMs=GetPrivateProfileIntA("Performance","HitchThresholdMs",60,ini.c_str());
+    if(g_config.hitchThresholdMs<20)g_config.hitchThresholdMs=20;
+    g_config.asyncShaders=GetPrivateProfileIntA("Performance","AsyncShaders",1,ini.c_str())!=0;
+    g_config.prewarmShaders=GetPrivateProfileIntA("Performance","PrewarmShaders",1,ini.c_str())!=0;
     g_config.threaded=GetPrivateProfileIntA("Performance","Threaded",0,ini.c_str())!=0;
     g_config.taa=GetPrivateProfileIntA("Antialiasing","TAA",1,ini.c_str())!=0;
     g_config.fsr31=GetPrivateProfileIntA("Antialiasing","FSR31",1,ini.c_str())!=0;
@@ -421,6 +426,10 @@ void SaveConfig()
     putInt("Performance","MeasureGPU",g_config.performanceGPU);
     putInt("Performance","ConstantRing",g_config.constantRing);
     putInt("Performance","TerrainBatching",g_config.terrainBatching);
+    putInt("Performance","HitchSampler",g_config.hitchSampler);
+    putInt("Performance","HitchThresholdMs",g_config.hitchThresholdMs);
+    putInt("Performance","AsyncShaders",g_config.asyncShaders);
+    putInt("Performance","PrewarmShaders",g_config.prewarmShaders);
     putInt("Performance","Threaded",g_config.threaded);
     putInt("Antialiasing","TAA",g_config.taa);
     putInt("Antialiasing","FSR31",g_config.fsr31);

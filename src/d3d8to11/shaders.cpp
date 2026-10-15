@@ -1554,14 +1554,67 @@ std::string TessellationDS()
 typedef HRESULT(WINAPI* D3DCompile_t)(const void*, SIZE_T, const char*, const D3D_SHADER_MACRO*,
                                        ID3DInclude*, const char*, const char*, UINT, UINT, ID3DBlob**, ID3DBlob**);
 
-ComPtr<ID3DBlob> CompileHLSL(const std::string& source, const char* profile, const std::string& debugName, bool optimize)
+typedef HRESULT(WINAPI* D3DCreateBlob_t)(SIZE_T, ID3DBlob**);
+
+// Compiled shaders are kept in d3d8to11_shadercache\, named by a hash of the source, profile and
+// flags: a variant first needed in the middle of play (night, a material, water...) would
+// otherwise stop the game for the 0.2 - 1.5 s D3DCompile takes, every session.
+static std::string ShaderCachePath(const std::string& source, const char* profile, bool optimize)
 {
-    static D3DCompile_t compile = nullptr;
-    if (!compile) {
+    unsigned long long h = 1469598103934665603ull;
+    auto mix = [&](const void* p, size_t n) { for (size_t i = 0; i < n; i++) { h ^= ((const BYTE*)p)[i]; h *= 1099511628211ull; } };
+    static const char kVersion[] = "d3d8to11-cache-1";
+    mix(kVersion, sizeof(kVersion));
+    mix(profile, strlen(profile));
+    mix(&optimize, 1);
+    mix(source.data(), source.size());
+    char name[64];
+    sprintf_s(name, "%016llx.cso", h);
+    return g_gameDir + "d3d8to11_shadercache\\" + name;
+}
+
+namespace {
+// Loaded once; D3DCompile may run on several threads at once (shader_jobs.cpp).
+struct Compiler {
+    D3DCompile_t compile = nullptr;
+    D3DCreateBlob_t createBlob = nullptr;
+    Compiler()
+    {
         HMODULE m = LoadLibraryA("d3dcompiler_47.dll");
         if (m) compile = (D3DCompile_t)GetProcAddress(m, "D3DCompile");
-        if (!compile) { Log("ERROR: d3dcompiler_47.dll not available"); return nullptr; }
+        if (m) createBlob = (D3DCreateBlob_t)GetProcAddress(m, "D3DCreateBlob");
+        if (!compile) Log("ERROR: d3dcompiler_47.dll not available");
     }
+};
+const Compiler& GetCompiler() { static Compiler c; return c; }
+
+ComPtr<ID3DBlob> ReadCache(const std::string& cachePath)
+{
+    const Compiler& c = GetCompiler();
+    if (!c.createBlob) return nullptr;
+    HANDLE f = CreateFileA(cachePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return nullptr;
+    ComPtr<ID3DBlob> cached;
+    const DWORD size = GetFileSize(f, nullptr);
+    DWORD read = 0;
+    const bool ok = size && size != INVALID_FILE_SIZE && SUCCEEDED(c.createBlob(size, &cached)) &&
+                    ReadFile(f, cached->GetBufferPointer(), size, &read, nullptr) && read == size;
+    CloseHandle(f);
+    return ok ? cached : nullptr;
+}
+}
+
+ComPtr<ID3DBlob> CachedHLSL(const std::string& source, const char* profile, bool optimize)
+{
+    return ReadCache(ShaderCachePath(source, profile, optimize));
+}
+
+ComPtr<ID3DBlob> CompileHLSL(const std::string& source, const char* profile, const std::string& debugName, bool optimize)
+{
+    const D3DCompile_t compile = GetCompiler().compile;
+    if (!compile) return nullptr;
+    const std::string cachePath = ShaderCachePath(source, profile, optimize);
+    if (ComPtr<ID3DBlob> cached = ReadCache(cachePath)) return cached;
     if (g_config.dumpShaders) {
         std::string dir = g_gameDir + "d3d8to11_shaders\\";
         CreateDirectoryA(dir.c_str(), nullptr);
@@ -1575,6 +1628,17 @@ ComPtr<ID3DBlob> CompileHLSL(const std::string& source, const char* profile, con
         Log("ERROR compiling %s (%s):\n%s\n--- source ---\n%s", debugName.c_str(), profile,
             errors ? (const char*)errors->GetBufferPointer() : "?", source.c_str());
         return nullptr;
+    }
+    // Written under a temporary name and renamed, so a cut write is never read back.
+    CreateDirectoryA((g_gameDir + "d3d8to11_shadercache").c_str(), nullptr);
+    const std::string temp = cachePath + Fmt(".%lu.tmp", GetCurrentThreadId());
+    HANDLE f = CreateFileA(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (f != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        const bool ok = WriteFile(f, code->GetBufferPointer(), (DWORD)code->GetBufferSize(), &written, nullptr) &&
+                        written == code->GetBufferSize();
+        CloseHandle(f);
+        if (!ok || !MoveFileExA(temp.c_str(), cachePath.c_str(), MOVEFILE_REPLACE_EXISTING)) DeleteFileA(temp.c_str());
     }
     return code;
 }

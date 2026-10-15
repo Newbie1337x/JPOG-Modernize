@@ -1,6 +1,7 @@
 // device.cpp - IDirect3DDevice8 on D3D11: state tracking, draws, clears and presentation.
 #include "device.h"
 #include "constant_update.h"
+#include "hitch_sampler.h"
 #include <math.h>
 #include <d3d11sdklayers.h>
 #include <dxgi1_5.h>
@@ -172,6 +173,7 @@ bool Device::Init()
     if (!CreateSunResources()) { Log("Sun resource creation failed"); return false; }
     if (!CreateWaterResources()) { Log("Water resource creation failed"); return false; }
     if (!CreateSwapChainAndBackBuffer()) return false;
+    PrewarmFF();
     return true;
 }
 
@@ -951,6 +953,18 @@ HRESULT Device::CreatePixelShader(const DWORD* func, DWORD* handle)
     ps->func.assign(func, func + ShaderTokenCount(func));
     ps->samplesStage1=PixelShaderSamplesStage(func,1);
     ps->water=IsWaterPixelShader(func);
+    ps->hash = shader_jobs::FunctionHash(ps->func);
+    // The variants drawn with this shader in earlier sessions start compiling now, during the load.
+    if (g_config.asyncShaders && g_config.prewarmShaders) {
+        for (const PSVariant& v : shader_jobs::KnownVariants(ps->hash)) {
+            std::string error;
+            std::string hlsl = TranslatePS(ps->func.data(), v, error);
+            if (hlsl.empty()) continue;
+            char name[64];
+            sprintf_s(name, "ps_%04zx_%08x", m_pixelShaders.size() + 1, (unsigned)std::hash<std::string>()(hlsl));
+            ps->variants.push_back({ v, nullptr, shader_jobs::Submit(m_device.Get(), std::move(hlsl), name, true) });
+        }
+    }
     m_pixelShaders.push_back(ps);
     *handle = (DWORD)m_pixelShaders.size();
     return S_OK;
@@ -1196,23 +1210,34 @@ ID3D11PixelShader* Device::GetPixelShader()
         if (v.normalMap && m_drawDiagnostics.First(m_vsHandle,m_psHandle,DrawDiagnostics::NormalMap)) Log(
                                  "normal map draw: VS 0x%lx PS 0x%lx kind %d", m_vsHandle, m_psHandle, m_worldKind);
         if (ps->lastShader && ps->lastVariant == v) return ps->lastShader;
-        for (auto& e : ps->variants) if (e.first == v) { ps->lastVariant = v; return ps->lastShader = e.second.Get(); }
+        for (auto& e : ps->variants) {
+            if (!(e.key == v)) continue;
+            ID3D11PixelShader* shader = ShaderOf(e.shader, e.job);
+            if (shader) { ps->lastVariant = v; ps->lastShader = shader; }
+            return shader;
+        }
+        shader_jobs::RecordVariant(ps->hash, v);
         std::string error;
         std::string hlsl = TranslatePS(ps->func.data(), v, error);
-        ComPtr<ID3D11PixelShader> shader;
+        ps->variants.push_back({ v, nullptr, nullptr });
+        PixelShader8::Variant& e = ps->variants.back();
         if (hlsl.empty()) {
             Log("pixel shader %lu translation failed: %s", m_psHandle, error.c_str());
-        } else {
-            char name[64];
-            sprintf_s(name, "ps_%04lx_%08x", m_psHandle, (unsigned)std::hash<std::string>()(hlsl));
-            ComPtr<ID3DBlob> blob = CompileHLSL(hlsl, "ps_4_0", name);
-            if (blob) {
-                HRESULT hr = m_device->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &shader);
-                if (FAILED(hr)) Log("pixel shader %lu CreatePixelShader failed 0x%08lx", m_psHandle, hr);
-            }
+            return nullptr;
         }
-        ps->variants.push_back({ v, shader });
-        return shader.Get();
+        char name[64];
+        sprintf_s(name, "ps_%04lx_%08x", m_psHandle, (unsigned)std::hash<std::string>()(hlsl));
+        ComPtr<ID3DBlob> blob = g_config.asyncShaders ? CachedHLSL(hlsl, "ps_4_0") : CompileHLSL(hlsl, "ps_4_0", name);
+        if (!blob && g_config.asyncShaders) {
+            e.job = shader_jobs::Submit(m_device.Get(), std::move(hlsl), name, false);
+            m_psPending = true;
+            return nullptr;
+        }
+        if (blob) {
+            HRESULT hr = m_device->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &e.shader);
+            if (FAILED(hr)) Log("pixel shader %lu CreatePixelShader failed 0x%08lx", m_psHandle, hr);
+        }
+        return e.shader.Get();
     }
     FFKey k = {};
     for (int s = 0; s < kMaxStages; s++) {
@@ -1235,15 +1260,46 @@ ID3D11PixelShader* Device::GetPixelShader()
     k.material = ActiveMaterial() ? BYTE(MaterialTextureStage()+1):0;
     std::string key((const char*)&k, sizeof(k));
     auto it = m_ffShaders.find(key);
-    if (it != m_ffShaders.end()) return it->second.Get();
+    if (it != m_ffShaders.end()) return ShaderOf(it->second.shader, it->second.job);
+    shader_jobs::RecordFF(k);
     std::string hlsl = GenerateFFPS(k);
     char name[64];
     sprintf_s(name, "ff_%08x", (unsigned)std::hash<std::string>()(hlsl));
-    ComPtr<ID3DBlob> blob = CompileHLSL(hlsl, "ps_4_0", name);
-    ComPtr<ID3D11PixelShader> shader;
-    if (blob) m_device->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &shader);
-    m_ffShaders[key] = shader;
+    FFShader& e = m_ffShaders[key];
+    ComPtr<ID3DBlob> blob = g_config.asyncShaders ? CachedHLSL(hlsl, "ps_4_0") : CompileHLSL(hlsl, "ps_4_0", name);
+    if (!blob && g_config.asyncShaders) {
+        e.job = shader_jobs::Submit(m_device.Get(), std::move(hlsl), name, false);
+        m_psPending = true;
+        return nullptr;
+    }
+    if (blob) m_device->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &e.shader);
+    return e.shader.Get();
+}
+
+// The shader of a variant entry; null while its background job is still running (the draw is skipped).
+ID3D11PixelShader* Device::ShaderOf(ComPtr<ID3D11PixelShader>& shader, std::shared_ptr<shader_jobs::Job>& job)
+{
+    if (job) {
+        if (!job->done.load(std::memory_order_acquire)) {
+            if (job->prewarm) shader_jobs::Promote(job); // no-op once it is running
+            m_psPending = true;
+            return nullptr;
+        }
+        shader = job->shader;
+        job.reset();
+    }
     return shader.Get();
+}
+
+void Device::PrewarmFF()
+{
+    if (!g_config.asyncShaders || !g_config.prewarmShaders) return;
+    for (const FFKey& k : shader_jobs::KnownFF()) {
+        std::string hlsl = GenerateFFPS(k);
+        char name[64];
+        sprintf_s(name, "ff_%08x", (unsigned)std::hash<std::string>()(hlsl));
+        m_ffShaders[std::string((const char*)&k, sizeof(k))] = { nullptr, shader_jobs::Submit(m_device.Get(), std::move(hlsl), name, true) };
+    }
 }
 
 namespace {
@@ -1479,8 +1535,10 @@ bool Device::PrepareDraw()
     BindPSSamplers(0, kMaxStages, samplers);
 
     detail.Next(Performance::CpuPipeline);
+    m_psPending = false;
     ID3D11PixelShader* ps = GetPixelShader();
     if (!ps) {
+        if (m_psPending) { ++m_perf.pendingShaderDraws; return false; }
         LogOnce(std::string("ps-null-") + std::to_string(m_psHandle) + "-vs-" + std::to_string(m_vsHandle),
                 "draw rejected: no pixel shader for VS 0x%lx PS 0x%lx", m_vsHandle, m_psHandle);
         return false;
@@ -1775,6 +1833,7 @@ void Device::LimitFrameRate()
 
 HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
 {
+    if (!m_csmt.OnWorker()) hitch_sampler::FramePresented(); // threaded: the game thread reports in csmt_device.cpp
     FlushTerrainBatch();
     m_perf.enabled=g_config.performanceGPU;
     m_perf.Begin(m_device.Get(),m_ctx.Get());

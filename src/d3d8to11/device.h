@@ -8,6 +8,7 @@
 #include "descriptor_reuse.h"
 #include "water_regions.h"
 #include "csmt.h"
+#include "shader_jobs.h"
 #include <map>
 #include <tuple>
 
@@ -27,7 +28,13 @@ struct PixelShader8 {
     std::vector<DWORD> func;
     bool samplesStage1=false;
     bool water=false; // immutable bytecode classification, computed at creation
-    std::vector<std::pair<PSVariant, ComPtr<ID3D11PixelShader>>> variants;
+    UINT64 hash = 0; // shader_jobs::FunctionHash of func
+    struct Variant {
+        PSVariant key;
+        ComPtr<ID3D11PixelShader> shader;
+        std::shared_ptr<shader_jobs::Job> job; // compiling in the background (AsyncShaders)
+    };
+    std::vector<Variant> variants;
     PSVariant lastVariant; ID3D11PixelShader* lastShader = nullptr; // most recent lookup
 };
 
@@ -238,7 +245,11 @@ private:
     std::unordered_map<uint64_t, ComPtr<ID3D11RasterizerState>> m_rasterStates;
     std::unordered_map<std::string, ComPtr<ID3D11SamplerState>> m_samplers;
     DescriptorReuse<DWORD,ID3D11SamplerState*> m_samplerSelections[kMaxStages];
-    std::unordered_map<std::string, ComPtr<ID3D11PixelShader>> m_ffShaders;
+    struct FFShader { ComPtr<ID3D11PixelShader> shader; std::shared_ptr<shader_jobs::Job> job; };
+    std::unordered_map<std::string, FFShader> m_ffShaders;
+    bool m_psPending = false; // GetPixelShader returned null because the variant is still compiling
+    ID3D11PixelShader* ShaderOf(ComPtr<ID3D11PixelShader>& shader, std::shared_ptr<shader_jobs::Job>& job);
+    void PrewarmFF();
     ComPtr<ID3D11Buffer> m_vsCB, m_vsExtraCB, m_psCB;
     UINT m_swapFlags = 0; // DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING when supported
     UINT m_samplerDirty = ~0u;            // bit per stage: a sampler texture-stage state changed
