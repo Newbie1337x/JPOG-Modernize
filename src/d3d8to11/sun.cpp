@@ -342,6 +342,80 @@ bool Device::EnsureShadowMap()
     return true;
 }
 
+// The two shadow cache maps, like the live map (CopyResource copies one into it).
+bool Device::EnsureShadowCache()
+{
+    if (!m_sunMap) return false;
+    if (m_sunCacheMap[0] && m_sunCacheMap[1] && m_sunCacheSize == m_sunMapSize) return true;
+    m_sunCacheReady = m_sunCacheBuild = -1;
+    m_sunCacheSize = 0;
+    D3D11_TEXTURE2D_DESC td;
+    m_sunMap->GetDesc(&td);
+    td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
+    dd.Format = DXGI_FORMAT_D32_FLOAT; dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+    for (int k = 0; k < 2; k++) {
+        m_sunCacheDSV[k].Reset(); m_sunCacheMap[k].Reset();
+        if (FAILED(m_device->CreateTexture2D(&td, nullptr, &m_sunCacheMap[k])) ||
+            FAILED(m_device->CreateDepthStencilView(m_sunCacheMap[k].Get(), &dd, &m_sunCacheDSV[k]))) {
+            Log("Shadow cache: maps failed, disabled");
+            m_sunCacheDSV[0].Reset(); m_sunCacheMap[0].Reset(); m_sunCacheDSV[1].Reset(); m_sunCacheMap[1].Reset();
+            g_config.shadowCache = false;
+            return false;
+        }
+    }
+    m_sunCacheSize = m_sunMapSize;
+    Log("Shadow cache: 2 maps of %ux%u, %d frames per build, live within %.0f units", m_sunMapSize, m_sunMapSize,
+        g_config.shadowCacheFrames, g_config.shadowCacheNear);
+    return true;
+}
+
+// Where a batched caster goes while the shadow cache is on. Animals and casters other than
+// skinned meshes are live (drawn every frame). The others go into the cache map being built in
+// their mesh's frame of the cycle (all draws of one mesh the same frame, so every object of it is
+// in), and into the live map too when the cache did not serve this frame or one of the objects is
+// near the camera (just come into view, or swaying close up).
+BYTE Device::ShadowTargets(const float* instanceConsts, UINT instances, const UINT* instanceInfo, const ShadowDraw& d, int bones)
+{
+    if (m_worldKind != 1 || bones < 0 || bones >= g_config.grassMinBones) { ++m_cacheLive; return kShadowLive; }
+    UINT64 key = (UINT64)(uintptr_t)d.vb[0] * 0x9E3779B97F4A7C15ull ^ (UINT64)(uintptr_t)d.ib * 0xC2B2AE3D27D4EB4Full ^
+                 ((UINT64)d.start << 20) ^ d.count ^ ((UINT64)(UINT)d.base << 40);
+    key ^= key >> 31;
+    BYTE targets = 0;
+    if (m_sunCacheBuild >= 0 && (UINT)(key % (UINT64)g_config.shadowCacheFrames) == m_sunCacheSlot) targets |= kShadowBuild;
+    bool live = !m_sunCacheUse;
+    // An object's root: bone 0's origin through c0..c3 to clip, then to the world.
+    auto nearRoot = [&](const float (*c)[4]) {
+        const float origin[4] = { c[5][3], c[6][3], c[7][3], 1 };
+        float clip[4], world[4];
+        for (int r = 0; r < 4; r++) clip[r] = origin[0] * c[r][0] + origin[1] * c[r][1] + origin[2] * c[r][2] + origin[3] * c[r][3];
+        for (int r = 0; r < 4; r++)
+            world[r] = clip[0] * m_sun.clipToWorld[r][0] + clip[1] * m_sun.clipToWorld[r][1] +
+                       clip[2] * m_sun.clipToWorld[r][2] + clip[3] * m_sun.clipToWorld[r][3];
+        if (!(std::fabs(world[3]) > 1e-8f)) return true;
+        float d2 = 0;
+        for (int k = 0; k < 3; k++) { const float e = world[k] / world[3] - m_sun.camera[k]; d2 += e * e; }
+        return !(d2 >= g_config.shadowCacheNear * g_config.shadowCacheNear);
+    };
+    if (!live) {
+        if (instances > 1 && instanceConsts && instanceInfo) {
+            const UINT lo = instanceInfo[1], window = instanceInfo[2];
+            float regs[8][4];
+            for (UINT i = 0; i < instances && !live; i++) {
+                for (UINT r = 0; r < 8; r++)
+                    memcpy(regs[r], r >= lo && r < lo + window ? instanceConsts + ((size_t)i * window + r - lo) * 4 : m_vsConst[r], 16);
+                live = nearRoot(regs);
+            }
+        } else {
+            live = nearRoot(m_vsConst);
+        }
+    }
+    if (live) { targets |= kShadowLive; ++m_cacheLive; }
+    if (targets & kShadowBuild) ++m_cacheBuilt;
+    if (!targets) ++m_cacheSkipped;
+    return targets;
+}
+
 // Time-of-day preview (Insert panel): the sun crosses a tilted arc from east (6 h) through a 70
 // degree noon to west (18 h); below the horizon the moon (opposite direction) lights the scene.
 // Colours are multipliers on the game's own light, 1 at noon. Y-up here.
@@ -477,25 +551,71 @@ void Device::StartSunFrame()
     XMStoreFloat3(&l, lo); XMStoreFloat3(&h, hi);
     if (!(l.x < h.x) || !std::isfinite(l.x + l.y + l.z + h.x + h.y + h.z)) return;
     const float res = (float)(m_sunMapSize ? m_sunMapSize : 4096);
-    float size = (h.x - l.x > h.y - l.y ? h.x - l.x : h.y - l.y) * 1.15f + 16.0f;
-    size = std::ceil(size / 32.0f) * 32.0f; // stable texel size while the camera pans
-    const float texel = size / res;
-    float cx = std::floor((l.x + h.x) * 0.5f / texel) * texel;
-    float cy = std::floor((l.y + h.y) * 0.5f / texel) * texel;
+    const float extent = h.x - l.x > h.y - l.y ? h.x - l.x : h.y - l.y;
     // Casters toward the sun (trees, buildings, hills off screen) sit well in front of the ground.
-    float zNear = l.z - maxDist * 0.5f - 200.0f, zFar = h.z + 100.0f;
-    XMMATRIX proj = XMMatrixOrthographicOffCenterLH(cx - size / 2, cx + size / 2, cy - size / 2, cy + size / 2, zNear, zFar);
-    StoreRows(lightView * proj, m_sun.writeRows);
-    memcpy(m_sun.readRows, m_sun.writeRows, sizeof(m_sun.readRows));
-    m_sunDepthRange = zFar - zNear;
+    const float zNear = l.z - maxDist * 0.5f - 200.0f, zFar = h.z + 100.0f;
+    // The light box around this view. A cache map's box is wider (margin, zExtra): it keeps
+    // serving while the view stays inside it.
+    auto makeBox = [&](float margin, float zExtra, ShadowCache& c) {
+        float size = extent * 1.15f * margin + 16.0f;
+        size = std::ceil(size / 32.0f) * 32.0f; // stable texel size while the camera pans
+        const float texel = size / res;
+        const float cx = std::floor((l.x + h.x) * 0.5f / texel) * texel;
+        const float cy = std::floor((l.y + h.y) * 0.5f / texel) * texel;
+        const float box[6] = { cx - size / 2, cx + size / 2, cy - size / 2, cy + size / 2, zNear - zExtra, zFar + zExtra };
+        memcpy(c.box, box, sizeof(box));
+        XMMATRIX proj = XMMatrixOrthographicOffCenterLH(box[0], box[1], box[2], box[3], box[4], box[5]);
+        StoreRows(lightView * proj, c.rows);
+        c.texel = texel;
+        c.depthRange = box[5] - box[4];
+        XMStoreFloat3(reinterpret_cast<XMFLOAT3*>(c.dir), sun);
+    };
+    FlushShadowBatch(); // a segment that never resolved
+    const bool cache = g_config.sunLighting && m_sunDSV && g_config.shadowCache && EnsureShadowCache();
+    if (!cache) m_sunCacheReady = m_sunCacheBuild = -1;
+    if (cache && m_sunCacheBuild < 0) {
+        // A new build cycle, centred on this view.
+        const int b = m_sunCacheReady == 0 ? 1 : 0;
+        makeBox(1.3f, 150.0f, m_sunCache[b]);
+        m_ctx->ClearDepthStencilView(m_sunCacheDSV[b].Get(), D3D11_CLEAR_DEPTH, 1, 0);
+        m_sunCacheBuild = b;
+        m_sunCacheSlot = 0;
+    }
+    m_sunCacheUse = false;
+    if (cache && m_sunCacheReady >= 0) {
+        // The complete cache serves while this view fits in its box, its texels are not much
+        // coarser than this view's own box would give, and the sun has turned under half a degree.
+        const ShadowCache& c = m_sunCache[m_sunCacheReady];
+        const float facing = c.dir[0] * XMVectorGetX(sun) + c.dir[1] * XMVectorGetY(sun) + c.dir[2] * XMVectorGetZ(sun);
+        m_sunCacheUse = l.x >= c.box[0] && h.x <= c.box[1] && l.y >= c.box[2] && h.y <= c.box[3] &&
+                        zNear >= c.box[4] && zFar <= c.box[5] && (extent * 1.15f + 16.0f) * 1.8f >= c.box[1] - c.box[0] &&
+                        facing > 0.99996f;
+    }
+    ShadowCache own;
+    if (!m_sunCacheUse) makeBox(1.0f, 0.0f, own);
+    const ShadowCache& light = m_sunCacheUse ? m_sunCache[m_sunCacheReady] : own;
+    // The cache's sun can lag the current one by up to half a degree: lighting follows the
+    // direction the shadows were cast with, so shadow edges and N.L agree.
+    memcpy(m_sun.direction, light.dir, sizeof(light.dir));
+    const float size = light.box[1] - light.box[0], texel = light.texel;
+    memcpy(m_sun.writeRows, light.rows, sizeof(m_sun.writeRows));
+    memcpy(m_sun.readRows, light.rows, sizeof(m_sun.readRows));
+    m_sunDepthRange = light.depthRange;
     m_sunTexelWorld = texel;
     m_sun.settings[0] = g_config.sunAmbient; m_sun.settings[1] = g_config.sunDirect;
     m_sun.settings[2] = g_config.shadowStrength; m_sun.settings[3] = 1.0f / res;
-    FlushShadowBatch(); // a segment that never resolved
-    if (g_config.sunLighting && m_sunDSV) m_ctx->ClearDepthStencilView(m_sunDSV.Get(), D3D11_CLEAR_DEPTH, 1, 0);
+    if (g_config.sunLighting && m_sunDSV) {
+        // The live map starts as the cached casters, or empty.
+        if (m_sunCacheUse) m_ctx->CopyResource(m_sunMap.Get(), m_sunCacheMap[m_sunCacheReady].Get());
+        else m_ctx->ClearDepthStencilView(m_sunDSV.Get(), D3D11_CLEAR_DEPTH, 1, 0);
+    }
+    if (cache) ++(m_sunCacheUse ? m_cacheUsedFrames : m_cacheFullFrames);
     m_sunStarted = true;
     m_pusherCount = 0;
     m_grassUploaded = false;
+    // Grass thinning follows the grass distance the game used last frame.
+    m_grassFar = m_grassFar > 0 ? m_grassFar + (m_grassFarNext - m_grassFar) * 0.2f : m_grassFarNext;
+    m_grassFarNext = 0;
     LogOnce("sun-viewport", "Sun camera viewport %lu,%lu %lux%lu depth %.3f..%.3f; camera rows z %g %g %g %g w %g %g %g %g",
             m_viewport.X, m_viewport.Y, m_viewport.Width, m_viewport.Height, m_viewport.MinZ, m_viewport.MaxZ,
             rows[2][0], rows[2][1], rows[2][2], rows[2][3], rows[3][0], rows[3][1], rows[3][2], rows[3][3]);
@@ -720,6 +840,16 @@ void Device::UpdateSun(bool shadowPass)
     // Grass (vs_010, oD0 = c5) is relit the same way, over the height field's normal.
     m_sun.flags[2] = m_terrainLightValid && (m_worldKind == 3 || (m_worldKind == 4 && g_config.relightGrass)) ? 1.0f : 0.0f;
     m_sun.flags[3] = (float)m_worldKind;
+    const bool thin = m_worldKind == 4 && g_config.grassThin && m_worldDraw && m_grassFar > 1;
+    if (m_worldKind == 4) {
+        const float dx = m_vsConst[4][0] - m_sun.camera[0], dz = m_vsConst[4][2] - m_sun.camera[2];
+        const float d = std::sqrt(dx * dx + dz * dz);
+        if (d > m_grassFarNext) m_grassFarNext = d;
+    }
+    m_sun.grassThin[0] = thin ? m_grassFar * g_config.grassThinStart : 0;
+    m_sun.grassThin[1] = thin ? m_grassFar : 0;
+    m_sun.grassThin[2] = g_config.grassThinKeep;
+    m_sun.grassThin[3] = thin ? 1 + g_config.grassThinFill : 0;
     m_sun.control[0] = g_config.replaceLighting || ActiveMaterial() ? 1.0f : 0.0f;
     m_sun.control[1] = (float)g_config.lightingDebug;
     m_sun.control[2] = m_tessCandidate && !shadowPass ? 1.0f : 0.0f; // VS emits normals for the hull shader
@@ -790,10 +920,17 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base, UINT 
                            const float* instanceConsts)
 {
     CpuPerformanceScope cpu(m_perf,2);
+    const int bones = m_drawBones; // set by the caller for this draw only
+    m_drawBones = -1;
     if (!g_config.effectsEnabled || !g_config.sunLighting || !m_worldCaster || !m_sunStarted || m_sunResolved || !m_sunDSV) return;
-    UpdateSun(true);
+    // The depth-only variant of the draw's pixel shader. The sun constants are not uploaded here:
+    // a batched caster records them for FlushShadowBatch, and uploading the shadow pass state
+    // (then the camera pass state again at the next draw) cost two buffer maps per caster.
+    const float pass = m_sun.flags[1];
+    m_sun.flags[1] = 1.0f;
     ID3D11PixelShader* depthPixel = GetPixelShader();
-    if (!depthPixel) { UpdateSun(false); return; }
+    m_sun.flags[1] = pass;
+    if (!depthPixel) return;
     ++m_shadowDraws;
     ++m_perfShadowDraws;
     ++m_segmentCasters;
@@ -827,6 +964,7 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base, UINT 
         if (d.vb[s] && d.vb[s] == m_dynVB.Get()) batch = false;
     if (!batch) {
         FlushShadowBatch();
+        UpdateSun(true);
         m_ctx->PSSetShader(depthPixel, nullptr, 0);
         m_lastPS = nullptr;
         m_ctx->OMSetRenderTargets(0, nullptr, m_sunDSV.Get());
@@ -842,6 +980,11 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base, UINT 
         m_rtDirty = m_viewportDirty = true;
         m_lastBlend = nullptr; m_lastDepth = nullptr; m_lastRaster = nullptr;
         return;
+    }
+    d.targets = kShadowLive;
+    if (m_sunCacheBuild >= 0 || m_sunCacheUse) {
+        d.targets = ShadowTargets(instanceConsts, instances, instanceInfo, d, bones);
+        if (!d.targets) return; // in the cache already
     }
     int slot = 0;
     KeepForShadow(slot++, d.ib);
@@ -868,7 +1011,16 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base, UINT 
     if (cached)
         for (int s = 0; s < kMaxStages; s++) { KeepForShadow(slot + s, d.srv[s]); KeepForShadow(slot + kMaxStages + s, d.sampler[s]); }
     d.vsFirst = m_vsRingFirst;
-    if (m_shadowSuns.empty() || memcmp(&m_shadowSuns.back(), &m_sun, sizeof(m_sun))) m_shadowSuns.push_back(m_sun);
+    // The shadow pass reads the light rows, flags and controls; the draw's own light colours only
+    // shade the camera pass, and dropping them lets consecutive casters share one upload.
+    SunConstants shadowSun = m_sun;
+    shadowSun.flags[1] = 1.0f;
+    shadowSun.control[2] = 0.0f;
+    shadowSun.todNight[3] = 0.0f;
+    memset(shadowSun.gameAmbient, 0, sizeof(shadowSun.gameAmbient));
+    memset(shadowSun.gameSun, 0, sizeof(shadowSun.gameSun));
+    memset(shadowSun.emissiveGlow, 0, sizeof(shadowSun.emissiveGlow));
+    if (m_shadowSuns.empty() || memcmp(&m_shadowSuns.back(), &shadowSun, sizeof(shadowSun))) m_shadowSuns.push_back(shadowSun);
     d.sun = (UINT)m_shadowSuns.size() - 1;
     if (m_shadowPS.empty() || memcmp(&m_shadowPS.back(), &m_psConst, sizeof(m_psConst))) m_shadowPS.push_back(m_psConst);
     d.psc = (UINT)m_shadowPS.size() - 1;
@@ -917,7 +1069,6 @@ void Device::FlushShadowBatch()
             m_ctx->UpdateSubresource(m_shadowInstBuf.Get(), 0, &box, m_shadowInstConsts.data(), 0, 0);
         } else instancesReady = false;
     }
-    m_ctx->OMSetRenderTargets(0, nullptr, m_sunDSV.Get());
     D3D11_VIEWPORT vp = { 0, 0, (float)m_sunMapSize, (float)m_sunMapSize, 0, 1 };
     m_ctx->RSSetViewports(1, &vp);
     m_ctx->RSSetState(m_sunRaster.Get());
@@ -928,6 +1079,13 @@ void Device::FlushShadowBatch()
     m_ctx->PSSetConstantBuffers(0, 1, m_shadowPSCB.GetAddressOf());
     m_ctx->VSSetConstantBuffers(2, 1, m_sunCB.GetAddressOf());
     m_ctx->PSSetConstantBuffers(1, 1, m_sunCB.GetAddressOf());
+    // The shadow cache map being built (with its own light rows), then the live map.
+    BYTE present = 0;
+    for (const ShadowDraw& d : m_shadowBatch) present |= d.targets;
+    for (const BYTE target : { kShadowBuild, kShadowLive }) {
+    if (!(present & target) || (target == kShadowBuild && m_sunCacheBuild < 0)) continue;
+    const float (*rows)[4] = target == kShadowBuild ? m_sunCache[m_sunCacheBuild].rows : nullptr;
+    m_ctx->OMSetRenderTargets(0, nullptr, target == kShadowBuild ? m_sunCacheDSV[m_sunCacheBuild].Get() : m_sunDSV.Get());
     UINT sun = ~0u, psc = ~0u, first = ~0u;
     ID3D11VertexShader* vs = nullptr; ID3D11PixelShader* ps = nullptr; ID3D11InputLayout* layout = nullptr;
     D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
@@ -936,11 +1094,15 @@ void Device::FlushShadowBatch()
     const ShadowDraw* prev = nullptr;
     const UINT* lastInfo = nullptr;
     for (const ShadowDraw& d : m_shadowBatch) {
+        if (!(d.targets & target)) continue;
         if (d.sun != sun) {
             sun = d.sun;
             D3D11_MAPPED_SUBRESOURCE map;
             if (SUCCEEDED(m_ctx->Map(m_sunCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
-                memcpy(map.pData, &m_shadowSuns[sun], sizeof(m_sun)); m_ctx->Unmap(m_sunCB.Get(), 0);
+                SunConstants* out = static_cast<SunConstants*>(map.pData);
+                memcpy(out, &m_shadowSuns[sun], sizeof(m_sun));
+                if (rows) memcpy(out->writeRows, rows, sizeof(out->writeRows));
+                m_ctx->Unmap(m_sunCB.Get(), 0);
             }
         }
         if (d.psc != psc) {
@@ -973,6 +1135,7 @@ void Device::FlushShadowBatch()
             m_ctx->DrawIndexedInstanced(d.count, d.instances, d.start, d.base, 0);
         } else if (d.indexed) m_ctx->DrawIndexed(d.count, d.start, d.base); else m_ctx->Draw(d.count, d.start);
     }
+    }
     m_shadowBatch.clear();
     m_shadowKeep.clear();
     memset(m_shadowKept, 0, sizeof(m_shadowKept));
@@ -994,6 +1157,12 @@ void Device::ResolveSun(const char* reason)
 {
     if (!m_sunStarted || m_sunResolved) return;
     FlushShadowBatch(); // the shadow map is complete before anything reads it
+    // This segment's share of the shadow cache build is drawn (the game ends the world segment
+    // with a depth clear, before Present).
+    if (m_sunCacheBuild >= 0 && ++m_sunCacheSlot >= (UINT)g_config.shadowCacheFrames) {
+        m_sunCacheReady = m_sunCacheBuild; // complete: serves from the next segment
+        m_sunCacheBuild = -1;
+    }
     // JPOG clears depth at the end of the world, before Present. Capture the
     // current scene's footprints while its camera and pusher list are valid.
     UpdateWaterInteractions();
@@ -1243,6 +1412,15 @@ void Device::EndSunFrame()
         LogOnce("sun-order", "Sun frame order: %u caster draws before the terrain, %u world draws after the resolve",
                 m_earlyCasters, m_lateWorldDraws);
     m_lastCasters = m_shadowDraws;
+    if (m_cacheStatsFrame + 600 <= m_frame) {
+        if ((m_cacheUsedFrames || m_cacheFullFrames) && m_cacheLogged < 30) {
+            ++m_cacheLogged;
+            Log("Shadow cache: %u frames from the cache, %u without; casters %u live, %u into the cache, %u skipped (last 600 frames)",
+                m_cacheUsedFrames, m_cacheFullFrames, m_cacheLive, m_cacheBuilt, m_cacheSkipped);
+        }
+        m_cacheStatsFrame = (UINT)m_frame;
+        m_cacheUsedFrames = m_cacheFullFrames = m_cacheLive = m_cacheBuilt = m_cacheSkipped = 0;
+    }
     m_sunStarted = m_sunResolved = false;
     m_waterSnapshotReady = false;
     m_shadowDraws = m_earlyCasters = m_lateWorldDraws = 0;

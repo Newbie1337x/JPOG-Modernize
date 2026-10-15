@@ -72,6 +72,7 @@ bool Device::StartSkinBatch(DWORD type, UINT minIndex, UINT numVertices, UINT st
     }
     if (!CreateSkinBatchResources()) return false;
     m_skinVS = vs;
+    m_skinBones = m_drawBones;
     m_skinType = type; m_skinMinIndex = minIndex; m_skinNumVertices = numVertices;
     m_skinStart = startIndex; m_skinPrims = primCount; m_skinCount = count; m_skinTopo = topo;
     m_skinBase = (INT)m_baseVertex;
@@ -98,6 +99,7 @@ bool Device::AppendSkinBatch(DWORD type, UINT minIndex, UINT numVertices, UINT s
     m_skinConsts.insert(m_skinConsts.end(), &m_vsConst[m_skinLo][0], &m_vsConst[m_skinHi][0]);
     ++m_skinInstances;
     if (GrassCaptureActive()) CapturePusher(m_baseVertex + minIndex, numVertices);
+    RecordMotion(m_skinCount, startIndex, (INT)m_baseVertex, m_skinBones, m_skinTopo);
     m_vsWriteLo = kMaxVSConst; m_vsWriteHi = 0;
     ++m_skinAppended;
     return true;
@@ -134,6 +136,7 @@ void Device::DrawSkinBatch()
         // The constant ring still holds this draw's constants (uploaded by its PrepareDraw).
         m_ctx->DrawIndexed(m_skinCount, m_skinStart, m_skinBase);
         m_shadowInput = shadowInput();
+        m_drawBones = m_skinBones;
         DrawSunShadow(true, m_skinCount, m_skinStart, m_skinBase);
         m_shadowInput = nullptr;
         return;
@@ -152,6 +155,7 @@ void Device::DrawSkinBatch()
     m_lastVS = vs; // the next draw binds its own shader
     m_ctx->DrawIndexedInstanced(m_skinCount, n, m_skinStart, m_skinBase, 0);
     m_shadowInput = shadowInput();
+    m_drawBones = m_skinBones;
     DrawSunShadow(true, m_skinCount, m_skinStart, m_skinBase, n, info, m_skinConsts.data());
     m_shadowInput = nullptr;
     ++m_skinBatches;

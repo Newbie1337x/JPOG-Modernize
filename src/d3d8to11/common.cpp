@@ -91,6 +91,9 @@ void LoadConfig()
         return f >= lo && f <= hi ? f : fallback;
     };
     g_config.shadowDistance = readFloat("ShadowDistance", 250, 32, 16384);
+    g_config.shadowCache = GetPrivateProfileIntA("Lighting", "ShadowCache", 1, ini.c_str()) != 0;
+    g_config.shadowCacheFrames = (std::max)(1, (std::min)(16, (int)GetPrivateProfileIntA("Lighting", "ShadowCacheFrames", 4, ini.c_str())));
+    g_config.shadowCacheNear = readFloat("ShadowCacheNear", 100, 0, 16384);
     g_config.sunAmbient = readFloat("Ambient", 0.60f, 0.1f, 2);
     g_config.sunDirect = readFloat("SunIntensity", 0.55f, 0, 2);
     g_config.relightSun = readFloat("RelightSun", 1.35f, 0, 4);
@@ -255,6 +258,7 @@ void LoadConfig()
     g_config.threaded=GetPrivateProfileIntA("Performance","Threaded",0,ini.c_str())!=0;
     g_config.taa=GetPrivateProfileIntA("Antialiasing","TAA",1,ini.c_str())!=0;
     g_config.fsr31=GetPrivateProfileIntA("Antialiasing","FSR31",1,ini.c_str())!=0;
+    g_config.objectMotion=GetPrivateProfileIntA("Antialiasing","ObjectMotion",1,ini.c_str())!=0;
     g_config.frameGeneration=GetPrivateProfileIntA("Antialiasing","FrameGeneration",0,ini.c_str())!=0;
     g_config.frameGenerationDebug=GetPrivateProfileIntA("Antialiasing","FrameGenerationDebug",0,ini.c_str())!=0;
     g_config.fsr1=GetPrivateProfileIntA("Antialiasing","FSR1",1,ini.c_str())!=0;
@@ -291,6 +295,10 @@ void LoadConfig()
     g_config.grassFlatten = readGrass("Flatten", 0.5f, 0, 1);
     g_config.grassRadius = readGrass("RadiusScale", 1.0f, 0.2f, 4);
     g_config.grassMinBones = GetPrivateProfileIntA("Grass", "MinBones", 6, ini.c_str());
+    g_config.grassThin = GetPrivateProfileIntA("Grass", "Thin", 1, ini.c_str()) != 0;
+    g_config.grassThinStart = readGrass("ThinStart", 0.45f, 0, 0.95f);
+    g_config.grassThinKeep = readGrass("ThinKeep", 0.35f, 0.05f, 1);
+    g_config.grassThinFill = readGrass("ThinFill", 0.6f, 0, 1);
     g_config.overlayKey = GetPrivateProfileIntA("Overlay", "Key", VK_INSERT, ini.c_str());
     g_config.showFps = GetPrivateProfileIntA("Overlay", "ShowFPS", 0, ini.c_str()) != 0;
     GetPrivateProfileStringA("Overlay", "Scale", "1.0", buf, sizeof(buf), ini.c_str());
@@ -321,6 +329,9 @@ void SaveConfig()
     putInt("Lighting", "Enabled", g_config.sunLighting);
     putInt("Lighting", "ShadowResolution", g_config.shadowResolution);
     putFloat("Lighting", "ShadowDistance", g_config.shadowDistance);
+    putInt("Lighting", "ShadowCache", g_config.shadowCache);
+    putInt("Lighting", "ShadowCacheFrames", g_config.shadowCacheFrames);
+    putFloat("Lighting", "ShadowCacheNear", g_config.shadowCacheNear);
     putFloat("Lighting", "ShadowStrength", g_config.shadowStrength);
     put("Lighting", "SunSource", g_config.sunFromGame ? "game" : "fixed");
     putFloat("Lighting", "SunX", g_config.sunDirection[0]);
@@ -445,6 +456,7 @@ void SaveConfig()
     putInt("Performance","Threaded",g_config.threaded);
     putInt("Antialiasing","TAA",g_config.taa);
     putInt("Antialiasing","FSR31",g_config.fsr31);
+    putInt("Antialiasing","ObjectMotion",g_config.objectMotion);
     putInt("Antialiasing","FrameGeneration",g_config.frameGeneration);
     putInt("Antialiasing","FrameGenerationDebug",g_config.frameGenerationDebug);
     putInt("Antialiasing","FSR1",g_config.fsr1);
@@ -474,6 +486,10 @@ void SaveConfig()
     putFloat("Grass", "Flatten", g_config.grassFlatten);
     putFloat("Grass", "RadiusScale", g_config.grassRadius);
     putInt("Grass", "MinBones", g_config.grassMinBones);
+    putInt("Grass", "Thin", g_config.grassThin);
+    putFloat("Grass", "ThinStart", g_config.grassThinStart);
+    putFloat("Grass", "ThinKeep", g_config.grassThinKeep);
+    putFloat("Grass", "ThinFill", g_config.grassThinFill);
     putInt("Overlay", "Key", g_config.overlayKey);
     putInt("Overlay", "ShowFPS", g_config.showFps);
     putFloat("Overlay", "Scale", g_config.overlayScale);

@@ -1216,11 +1216,12 @@ ID3D11PixelShader* Device::GetPixelShader()
         v.waterSamples = m_waterDraw && m_waterSamples>1 ? (BYTE)m_waterSamples : 0;
         if (v.normalMap && m_drawDiagnostics.First(m_vsHandle,m_psHandle,DrawDiagnostics::NormalMap)) Log(
                                  "normal map draw: VS 0x%lx PS 0x%lx kind %d", m_vsHandle, m_psHandle, m_worldKind);
-        if (ps->lastShader && ps->lastVariant == v) return ps->lastShader;
+        const int last = v.shadowOnly ? 1 : 0;
+        if (ps->lastShader[last] && ps->lastVariant[last] == v) return ps->lastShader[last];
         for (auto& e : ps->variants) {
             if (!(e.key == v)) continue;
             ID3D11PixelShader* shader = ShaderOf(e.shader, e.job);
-            if (shader) { ps->lastVariant = v; ps->lastShader = shader; }
+            if (shader) { ps->lastVariant[last] = v; ps->lastShader[last] = shader; }
             return shader;
         }
         shader_jobs::RecordVariant(ps->hash, v);
@@ -1721,6 +1722,10 @@ HRESULT Device::DrawIndexedPrimitive(DWORD type, UINT minIndex, UINT numVertices
     UINT count;
     D3D11_PRIMITIVE_TOPOLOGY topo;
     if (!DrawWithTopology(type, primCount, count, topo)) return D8ERR_INVALIDCALL;
+    // Distinct bones of a skinned world draw: animals get motion vectors and live shadows.
+    m_drawBones = m_worldKind == 1 && m_worldDraw && (ObjectMotionActive() || (g_config.shadowCache && g_config.sunLighting))
+        ? DrawBoneCount(m_drawFirstVertex, numVertices) : -1;
+    RecordMotion(count, startIndex, (INT)m_baseVertex, m_drawBones, topo);
     if (StartSkinBatch(type, minIndex, numVertices, startIndex, primCount, writeLo, writeHi, count, topo)) return S_OK;
     const bool tess = BeginTessellation(type, topo);
     m_ctx->IASetPrimitiveTopology(topo);
@@ -1971,6 +1976,7 @@ HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
     ApplyMsaa(); // after the frame is shown: the rebuilt back buffer starts empty
     m_frame++;
     BuildPointLights();
+    EndMotionFrame();
     m_pointLightsDirty = true;
 
     // Everything bound above has to be rebound by the next draw.

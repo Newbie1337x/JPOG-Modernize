@@ -24,6 +24,8 @@ struct VertexShader8 {
     int pulledState = 0;               // 0 not tried, 1 ready, -1 not batchable
     ComPtr<ID3D11VertexShader> instanced; // instanced skinned variant (skin_batch.cpp), built on first use
     int instancedState = 0;
+    ComPtr<ID3D11VertexShader> motion; // object motion variant (motion.cpp), built on first use
+    int motionState = 0;
 };
 
 struct PixelShader8 {
@@ -37,7 +39,8 @@ struct PixelShader8 {
         std::shared_ptr<shader_jobs::Job> job; // compiling in the background (AsyncShaders)
     };
     std::vector<Variant> variants;
-    PSVariant lastVariant; ID3D11PixelShader* lastShader = nullptr; // most recent lookup
+    // Most recent lookup, camera pass [0] and shadow pass [1]: each caster looks up both.
+    PSVariant lastVariant[2]; ID3D11PixelShader* lastShader[2] = {};
 };
 
 class Device;
@@ -520,7 +523,30 @@ private:
         ID3D11ShaderResourceView* srv[kMaxStages]; ID3D11SamplerState* sampler[kMaxStages];
         UINT vsFirst, sun, psc; bool indexed; UINT count, start; INT base;
         UINT instances, instanceInfo[4]; // skin_batch.cpp: instanced casters
+        BYTE targets; // kShadowLive: the live map; kShadowBuild: the shadow cache map being built
     };
+    static const BYTE kShadowLive = 1, kShadowBuild = 2;
+    // Shadow cache ([Lighting] ShadowCache): two maps holding the casters away from the camera,
+    // one complete (copied into the live map at the start of each frame) and one being built,
+    // a share of the meshes each frame, over ShadowCacheFrames frames.
+    struct ShadowCache {
+        float rows[4][4];  // light rows the map is drawn with
+        float box[6];      // light space x0, x1, y0, y1, z0, z1
+        float dir[3];      // sun direction
+        float texel, depthRange;
+    };
+    ComPtr<ID3D11Texture2D> m_sunCacheMap[2];
+    ComPtr<ID3D11DepthStencilView> m_sunCacheDSV[2];
+    ShadowCache m_sunCache[2] = {};
+    UINT m_sunCacheSize = 0;
+    int m_sunCacheReady = -1, m_sunCacheBuild = -1; // map indices, -1 none
+    UINT m_sunCacheSlot = 0;                         // frame of the build cycle
+    bool m_sunCacheUse = false;                      // this frame's live map started from the cache
+    int m_drawBones = -1;                            // distinct bones of the current skinned draw (DrawBoneCount), -1 unknown
+    UINT m_cacheUsedFrames = 0, m_cacheFullFrames = 0, m_cacheLive = 0, m_cacheBuilt = 0, m_cacheSkipped = 0;
+    UINT m_cacheStatsFrame = 0, m_cacheLogged = 0;
+    bool EnsureShadowCache();
+    BYTE ShadowTargets(const float* instanceConsts, UINT instances, const UINT* instanceInfo, const ShadowDraw& d, int bones);
     std::vector<ShadowDraw> m_shadowBatch;
     std::vector<ComPtr<IUnknown>> m_shadowKeep;
     IUnknown* m_shadowKept[3 + kMaxStreams + 2 * kMaxStages] = {};
@@ -564,6 +590,38 @@ private:
     struct BoneCount { UINT64 identity, revision; UINT first, count; float c4[4]; DWORD vs; UINT distinct; };
     static const UINT kBoneCounts = 4096;
     std::vector<BoneCount> m_boneCounts;
+    // Object motion vectors for FSR (motion.cpp): animal draws of this and the previous frame.
+    struct MotionEntry { UINT64 key; float anchor[3]; UINT offset; bool used; };
+    struct MotionDraw {
+        ComPtr<ID3D11Buffer> ib, vb[kMaxStreams];
+        ComPtr<ID3D11InputLayout> layout;
+        ComPtr<ID3D11VertexShader> vs;
+        UINT stride[kMaxStreams], offset[kMaxStreams];
+        DXGI_FORMAT ibFormat; UINT ibOffset;
+        D3D11_PRIMITIVE_TOPOLOGY topo;
+        UINT count, start; INT base;
+        UINT current, previous, regs; // register windows in m_motionCurRegs/m_motionPrevRegs, then in the upload
+    };
+    std::vector<MotionEntry> m_motionPrev, m_motionCur;
+    std::vector<float> m_motionPrevRegs, m_motionCurRegs, m_motionUpload;
+    std::vector<MotionDraw> m_motionDraws;
+    ComPtr<ID3D11Buffer> m_motionBuf, m_motionCB;
+    ComPtr<ID3D11ShaderResourceView> m_motionSRV;
+    UINT m_motionBufElements = 0;
+    ComPtr<ID3D11Texture2D> m_objMotionTex;
+    ComPtr<ID3D11RenderTargetView> m_objMotionRTV;
+    ComPtr<ID3D11ShaderResourceView> m_objMotionSRV;
+    UINT m_objMotionW = 0, m_objMotionH = 0;
+    ComPtr<ID3D11PixelShader> m_motionPS;
+    UINT m_motionPSSamples = 0;
+    ComPtr<ID3D11RasterizerState> m_motionRaster;
+    ComPtr<ID3D11DepthStencilState> m_motionDepth;
+    UINT m_motionRecorded = 0, m_motionMatched = 0, m_motionDrawn = 0, m_motionStatsFrame = 0, m_motionLogged = 0;
+    int DrawBoneCount(UINT firstVertex, UINT numVertices);
+    bool ObjectMotionActive() const;
+    void RecordMotion(UINT count, UINT start, INT base, int bones, D3D11_PRIMITIVE_TOPOLOGY topo);
+    ID3D11ShaderResourceView* DrawObjectMotion(ID3D11ShaderResourceView* depth, UINT samples, UINT w, UINT h);
+    void EndMotionFrame();
     bool m_skinBatchOpen = false, m_skinUnavailable = false;
     DWORD m_skinType = 0;
     UINT m_skinMinIndex = 0, m_skinNumVertices = 0, m_skinStart = 0, m_skinPrims = 0, m_skinCount = 0;
@@ -571,6 +629,7 @@ private:
     D3D11_PRIMITIVE_TOPOLOGY m_skinTopo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
     UINT m_skinLo = 0, m_skinHi = 0, m_skinInstances = 0, m_skinBufUsed = 0;
     VertexShader8* m_skinVS = nullptr;
+    int m_skinBones = -1; // DrawBoneCount of the batch's mesh
     std::vector<float> m_skinConsts;
     ComPtr<ID3D11Buffer> m_skinBuf, m_skinCB;
     ComPtr<ID3D11ShaderResourceView> m_skinSRV;
@@ -639,6 +698,7 @@ private:
     UINT m_pusherCount = 0, m_lastBones = 0;
     bool m_grassUploaded = false;
     bool m_grassApplied = false;
+    float m_grassFar = 0, m_grassFarNext = 0; // farthest grass patch drawn (xz), last frame / this frame
     UINT m_vsWriteLo = 0, m_vsWriteHi = 0;
     size_t m_vsRingValid = 0; // bytes of the current ring window copied from m_vsConst
     UINT m_vsConstUsed = 0; // registers 0..used-1 have been written at least once: the upload copies only those

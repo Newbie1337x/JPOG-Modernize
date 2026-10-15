@@ -94,6 +94,12 @@ struct Config {
     bool terrainShadows = false;    // [Lighting] TerrainShadows (hills shadowing the ground; acne-prone)
     int lightingDebug = 0;          // 0 off, 1 albedo, 2 normals (replacement), 3 shadow mask, 4 resolve normals
     int shadowResolution = 4096;
+    // [Lighting] ShadowCache: casters away from the camera are drawn into a cached map over
+    // ShadowCacheFrames frames instead of every frame; animals and casters nearer than
+    // ShadowCacheNear stay live (sun.cpp).
+    bool shadowCache = true;
+    int shadowCacheFrames = 4;
+    float shadowCacheNear = 100.0f;
     float shadowDistance = 250.0f;  // farthest point from the camera that receives shadows
     float sunAmbient = 0.60f, sunDirect = 0.55f, shadowStrength = 0.25f;
     float sunMinElevation = 0.35f;  // minimum sun height (sin of elevation), avoids endless shadows
@@ -139,6 +145,7 @@ struct Config {
     bool skinInstancing=true; // [Performance] SkinInstancing (skin_batch.cpp)
     bool taa=true, fsr1=true;
     bool fsr31=true; // experimental native-resolution temporal AA, not frame generation
+    bool objectMotion=true; // [Antialiasing] ObjectMotion: animals' own motion vectors for FSR (motion.cpp)
     bool frameGeneration=false; // synchronous x2 prototype; requires native AA + VSync
     bool frameGenerationDebug=false; // show SDK intermediate instead of extra Present
     bool materialsEnabled=true;
@@ -171,6 +178,10 @@ struct Config {
     float grassFlatten = 0.5f;      // [Grass] Flatten: 0..1 of the blade height pressed down
     float grassRadius = 1.0f;       // [Grass] RadiusScale: multiplies the radius taken from the skeleton
     int grassMinBones = 6;          // [Grass] MinBones: skinned draws with fewer bones (props, trees) do not push
+    bool grassThin = true;          // [Grass] Thin: distant grass drops whole clumps, the rest drawn fuller
+    float grassThinStart = 0.45f;   // [Grass] ThinStart: share of the grass distance where thinning starts
+    float grassThinKeep = 0.35f;    // [Grass] ThinKeep: share of clumps left at the grass distance
+    float grassThinFill = 0.6f;     // [Grass] ThinFill: how much the clumps left lower their alpha reference
     int overlayKey = VK_INSERT;     // [Overlay] Key: virtual-key code that opens the settings panel
     bool showFps = false;           // [Overlay] ShowFPS: small counter while the panel is closed
     float overlayScale = 1.0f;      // [Overlay] Scale

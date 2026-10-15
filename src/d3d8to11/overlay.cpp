@@ -63,6 +63,16 @@ void DrawCameraSettings()
         SetStatus(set(&settings, TRUE) ? "Camara guardada en JPOGMouseFix.ini" : "No se pudo guardar la camara");
     }
     ImGui::TextWrapped("Cambios inmediatos. Guardar conserva estos valores para el proximo inicio. Ctrl+clic permite escribir un valor. Maxima hasta 2000; muy lejos puede aparecer el limite de dibujado.");
+
+    auto grassGet = (JPOGGrassGet)GetProcAddress(plugin, "_JPOGGrass_Get@8");
+    auto grassSet = (JPOGGrassSet)GetProcAddress(plugin, "_JPOGGrass_Set@8");
+    float grass = 1, pool = 1;
+    if (!grassGet || !grassSet || !grassGet(&grass, &pool)) return;
+    ImGui::SeparatorText("Pasto");
+    if (ImGui::SliderFloat("Distancia del pasto", &grass, 1, 6, "x%.2f")) grassSet(grass, FALSE);
+    if (ImGui::Button("Guardar distancia del pasto")) SetStatus(grassSet(grass, TRUE) ? "Pasto guardado en JPOGMouseFix.ini" : "No se pudo guardar el pasto");
+    if (grass > pool + 0.01f)
+        ImGui::TextWrapped("Las mallas de pasto alcanzan hasta x%.2f: mas lejos faltan secciones con la camara inclinada hasta guardar y reiniciar el juego.", pool);
 }
 
 // Y-up direction from azimuth/elevation (degrees) into [Lighting] SunX/Y/Z.
@@ -253,6 +263,7 @@ void Device::DrawOverlay()
             ImGui::Checkbox("Constantes en anillo (prueba A/B)",&g_config.constantRing);
             ImGui::Checkbox("Terreno agrupado (prueba A/B)",&g_config.terrainBatching);
             ImGui::Checkbox("Arboles instanciados (prueba A/B)",&g_config.skinInstancing);
+            ImGui::Checkbox("Sombras lejanas en cache (prueba A/B)",&g_config.shadowCache);
             ImGui::Checkbox("Guardar CSV de rendimiento (1/seg)",&g_config.performanceLog);
             if(m_perf.csvFailed)ImGui::TextColored(ImVec4(1,.4f,.3f,1),"No se pudo escribir el CSV.");
             else if(!m_perf.csvPath.empty()){ImGui::TextWrapped("CSV: %s",m_perf.csvPath.c_str());}
@@ -521,6 +532,14 @@ void Device::DrawOverlay()
             ImGui::SliderInt("Minimo de huesos", &g_config.grassMinBones, 1, 40);
             ImGui::SetItemTooltip("Modelos con menos huesos, como objetos y arboles, no mueven el pasto.");
             ImGui::Text("%u animales moviendo pasto este cuadro", m_pusherCount);
+            ImGui::EndDisabled();
+            ImGui::Checkbox("Pasto lejano mas liviano", &g_config.grassThin);
+            ImGui::SetItemTooltip("A distancia se dibuja una parte de las matas y las que quedan se ven mas llenas.");
+            ImGui::BeginDisabled(!g_config.grassThin);
+            ImGui::SliderFloat("Empieza a", &g_config.grassThinStart, 0, 0.95f, "%.2f de la distancia");
+            ImGui::SliderFloat("Matas al final", &g_config.grassThinKeep, 0.05f, 1, "%.2f");
+            ImGui::SliderFloat("Relleno", &g_config.grassThinFill, 0, 1, "%.2f");
+            ImGui::Text("Distancia del pasto: %.0f", m_grassFar);
             ImGui::EndDisabled();
         }
 

@@ -360,7 +360,11 @@ std::string WaterPixelCode(int samples) {
 }
 std::string SunBlock(int slot) {
     return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera;"
-               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; float4 specParams; float4 gameSunDir; float4 emissiveGlow; float4 nightGrade; };\n", slot);
+               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; float4 specParams; float4 gameSunDir; float4 emissiveGlow; float4 nightGrade; float4 grassThin; };\n"
+               // Distant grass keeps a share of its clumps (vertex shader); the rest are drawn fuller.
+               "float GrassKeep(float2 xz) {\n"
+               "  float t = saturate((length(xz - sunCamera.xz) - grassThin.x) / max(grassThin.y - grassThin.x, 1e-3));\n"
+               "  return lerp(1, grassThin.z, t); }\n", slot);
 }
 // Normal maps (stage 0, t9): relief relative to the sun on top of the game's own lighting. No
 // tangents in JPOG's meshes, so the frame comes from screen-space derivatives of the world position
@@ -542,6 +546,9 @@ std::string SunPixelCode(bool detail, bool rough) {
 }
 std::string SunPixelCodeBase() {
     return SunBlock(1) +
+        // Grass that kept fewer clumps lowers its alpha reference: the blades left look fuller.
+        "float GrassRef(VSOut i) {\n"
+        "  return grassThin.w > 0 ? 1 - (1 - GrassKeep(i.world.xz)) * (grassThin.w - 1) : 1; }\n" +
         // Shadows are applied after the world pass (sun.cpp resolve). In-pass work is only the
         // optional replacement lighting ([Lighting] ReplaceOriginal=1); otherwise colour is untouched.
         // Replacement starts from the game's own light colours (gameAmbient/gameSun, read per draw
@@ -884,12 +891,13 @@ static std::string PulledInput(const VSInput& in)
     }
 }
 
-// Every constant read of the body (c[n], C(a0 + n)) goes through IC(), which takes the registers of
-// the instance window from the instance buffer.
-static void InstanceConstants(std::string& s, size_t from)
+// Every constant read of the body (c[n], C(a0 + n)) goes through fn() (IC: the registers of the
+// instance window from the instance buffer; MC/MP: object motion, motion.cpp).
+static void InstanceConstants(std::string& s, size_t from, const char* fn = "IC")
 {
+    const std::string call = std::string(fn) + "(";
     for (size_t at = s.find("C(a0", from); at != std::string::npos; at = s.find("C(a0", at + 4))
-        if (at == 0 || !isalnum((unsigned char)s[at - 1])) { s.replace(at, 1, "IC"); at++; }
+        if (at == 0 || !isalnum((unsigned char)s[at - 1])) { s.replace(at, 1, fn); at += call.size() - 2; }
     for (size_t at = s.find("c[", from); at != std::string::npos; at = s.find("c[", at + 1)) {
         if (at > 0 && (isalnum((unsigned char)s[at - 1]) || s[at - 1] == '_')) continue;
         int depth = 0;
@@ -900,12 +908,13 @@ static void InstanceConstants(std::string& s, size_t from)
         }
         if (end >= s.size()) return;
         s[end] = ')';
-        s.replace(at, 2, "IC(");
+        s.replace(at, 2, call);
     }
 }
 
-std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& error, bool pulled, bool instanced)
+std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& error, bool pulled, bool instanced, bool motion)
 {
+    if (motion) pulled = instanced = false;
     if ((func[0] & 0xFFFF0000) != 0xFFFE0000) { error = "not a vertex shader"; return ""; }
     std::vector<Instr> code;
     DWORD minor;
@@ -933,7 +942,15 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
              "    p.xz += dir * (f * hh * grassParams.y);\n"
              "    p.y -= h * f * grassParams.z;\n"
              "  }\n"
-             "  return p; }\n";
+             "  return p; }\n"
+             // A clump is the 8 vertices of two crossed blades (TGrassShaderHAL::CreateMeshType1: 128
+             // per patch, the patch at c4). Dropped clumps collapse to one point.
+             "static uint grassVid;\n"
+             "float4 GrassThin(float4 p) {\n"
+             "  float2 patch = c[4].xz;\n"
+             "  uint h = (grassVid >> 3) * 0x9E3779B1u ^ asuint(patch.x) * 0x85EBCA77u ^ asuint(patch.y) * 0xC2B2AE3Du;\n"
+             "  h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12;\n"
+             "  return (h & 0xFFFF) / 65536.0 < GrassKeep(patch) ? p : float4(patch.x, 0, patch.y, 1); }\n";
     }
     s += "float4 C(int i) { return (i >= 0 && i < 256) ? c[i] : float4(0, 0, 0, 0); }\n";
     s += kHelpers;
@@ -967,13 +984,16 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
                  "static uint instanceId;\n"
                  "float4 IC(int i) { uint u = (uint)(i - (int)instanceInfo.y);\n"
                  "  return u < instanceInfo.z ? instanceConsts[instanceInfo.x + instanceId * instanceInfo.z + u] : C(i); }\n";
-            s += "VSOut main(VSIn i, uint iid : SV_InstanceID) {\n";
+            s += grass ? "VSOut main(VSIn i, uint iid : SV_InstanceID, uint vid : SV_VertexID) {\n"
+                       : "VSOut main(VSIn i, uint iid : SV_InstanceID) {\n";
             bodyStart = s.size();
             s += "  instanceId = iid;\n";
-        } else {
-            s += "VSOut main(VSIn i) {\n";
+            if (grass) s += "  grassVid = vid;\n";
+        } else if (!motion) {
+            s += grass ? "VSOut main(VSIn i, uint vid : SV_VertexID) {\n  grassVid = vid;\n" : "VSOut main(VSIn i) {\n";
         }
     }
+    const size_t bodyBegin = s.size();
     s += "  float4 worldPosition = 0;\n";
     for (int r = 0; r < 16; r++) {
         bool declared = false;
@@ -1029,6 +1049,7 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
                 if (grass && RegTypeOf(p[1]) == RT_TEMP) {
                     const std::string reg = VSRegister(p[1], 0);
                     s += "  if (grassParams.x > 0) " + reg + " = GrassPush(" + reg + ", v0.y);\n";
+                    s += "  if (grassThin.w > 0) " + reg + " = GrassThin(" + reg + ");\n";
                 }
                 s += "  worldPosition = " + S(1) + ";\n";
             }
@@ -1051,6 +1072,32 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
         std::string dst = VSRegister(p[0], 0);
         std::string mask = MaskOf(p[0]);
         s += "  " + dst + mask + " = (" + expr + ")" + (mask.empty() ? "" : mask) + ";\n";
+    }
+    if (motion) {
+        // Object motion (motion.cpp): the body runs once with this frame's constants and once with
+        // the previous frame's ones (each from the motion buffer), giving this and last frame's clip
+        // position of the vertex; the previous one already holds the previous camera.
+        const std::string body = s.substr(bodyBegin);
+        s.resize(bodyBegin);
+        s += "StructuredBuffer<float4> motionConsts : register(t24);\n"
+             "cbuffer Motion : register(b6) { uint4 motionInfo; };\n" // x this frame's window, y the previous one's, z registers
+             "float4 MC(int i) { uint u = (uint)i; return u < motionInfo.z ? motionConsts[motionInfo.x + u] : C(i); }\n"
+             "float4 MP(int i) { uint u = (uint)i; return u < motionInfo.z ? motionConsts[motionInfo.y + u] : C(i); }\n";
+        size_t from = s.size();
+        s += "float4 CurrentClip(VSIn i) {\n" + body + "  return oPos;\n}\n";
+        InstanceConstants(s, from, "MC");
+        from = s.size();
+        s += "float4 PreviousClip(VSIn i) {\n" + body + "  return oPos;\n}\n";
+        InstanceConstants(s, from, "MP");
+        s += "struct MotionOut { float4 pos : SV_Position; float4 current : TEXCOORD0; float4 previous : TEXCOORD1; };\n"
+             "MotionOut main(VSIn i) {\n"
+             "  MotionOut o;\n"
+             "  float4 p = CurrentClip(i);\n"
+             // The scene's jitter and pixel offset, so the pass rasterises the same pixels and depth.
+             "  o.pos = p; o.pos.xy += (pixelOffset.xy + pixelOffset.zw) * p.w;\n"
+             "  o.current = p; o.previous = PreviousClip(i);\n"
+             "  return o;\n}\n";
+        return s;
     }
 
     s += "  VSOut o;\n";
@@ -1147,7 +1194,7 @@ std::string AlphaTest(BYTE func, BYTE a2c = 0, bool mipAlpha = false)
     if (a2c && (func == 5 || func == 7))
         // Alpha-to-coverage: turn the test threshold into a one-pixel-wide ramp so MSAA coverage
         // gives foliage soft edges; fully opaque inside, nothing below the threshold.
-        return "  { float ref = alphaRef.x / 255.0; float w = max(fwidth(color.a), 1e-4);\n"
+        return "  { float ref = alphaRef.x * GrassRef(i) / 255.0; float w = max(fwidth(color.a), 1e-4);\n"
                "    color.a = saturate((color.a - ref) / w + 0.5); if (color.a <= 0) discard; }\n";
     std::string tested = "color.a";
     std::string s;
@@ -1159,7 +1206,7 @@ std::string AlphaTest(BYTE func, BYTE a2c = 0, bool mipAlpha = false)
              + Fmt("    mipAlpha = 1 + max(lod, 0) * %.3f; }\n", g_config.foliageMipAlpha);
         tested = "color.a * mipAlpha";
     }
-    return s + "  { int a = (int)round(saturate(" + tested + ") * 255.0); int r = (int)alphaRef.x;\n"
+    return s + "  { int a = (int)round(saturate(" + tested + ") * 255.0); int r = (int)round(alphaRef.x * GrassRef(i));\n"
          + "    if (!(" + cmp[func] + ")) discard; }\n";
 }
 

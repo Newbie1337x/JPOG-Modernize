@@ -22,6 +22,7 @@ struct Inputs {float inverse[4][4],previous[4][4],screen[4],flags[4],pushers[32]
 const char* InputCS=R"(
 cbuffer Inputs:register(b0){float4 inverse[4];float4 previous[4];float4 screen;float4 flags;float4 pushers[32];};
 Texture2D<float4> scene:register(t0);Texture2D<float> terrain:register(t2);SamplerState clampSampler:register(s0);
+Texture2D<float4> objectMotion:register(t3); // motion.cpp: alpha 1 where an animal's own vector was drawn
 RWTexture2D<float4> linearColor:register(u0);RWTexture2D<float> depthOut:register(u1);
 RWTexture2D<float2> motion:register(u2);RWTexture2D<float> reactive:register(u3);
 [numthreads(8,8,1)]void main(uint3 id:SV_DispatchThreadID){
@@ -36,7 +37,9 @@ RWTexture2D<float2> motion:register(u2);RWTexture2D<float> reactive:register(u3)
    float2 oldUV=float2(old.x/old.w*.5+.5,.5-old.y/old.w*.5);
    // Unjittered current UV -> unjittered previous UV, in normalized UV units.
    float2 baseUV=float2(xy.x*.5+.5,.5-xy.y*.5);mv=oldUV-baseUV;
-   if(any(abs(mv)>.5) || any(oldUV<0) || any(oldUV>1)){mv=0;r=1;}}
+   if(any(abs(mv)>.5) || any(oldUV<0) || any(oldUV>1)){mv=0;r=1;}
+   // Animals: their own motion replaces the camera's, and their history is kept (no reactive).
+   float4 om=objectMotion.Load(int3(p,0));if(om.a>.5){mv=om.xy;r=0;}}
  if(flags.y>.5 && finiteWorld){uint tw,th;terrain.GetDimensions(tw,th);
    float2 tu=(world.xz+.5)/float2(tw,th);
    if(any(tu<0) || any(tu>1))r=1;
@@ -199,10 +202,11 @@ bool Device::ResolveFsr31(){
     }
     memcpy(map.pData,&cb,sizeof(cb));m_ctx->Unmap(s.cb.Get(),0);
     ID3D11ShaderResourceView* none[16]={};m_ctx->PSSetShaderResources(0,16,none);m_ctx->OMSetRenderTargets(0,nullptr,nullptr);CopySceneColor();
-    ID3D11ShaderResourceView* inputs[3]={m_sceneCopySRV.Get(),m_autoDepth->m_srv.Get(),cb.flags[1]>0?m_waterTerrainSRV.Get():nullptr};
+    ID3D11ShaderResourceView* objectMotion=DrawObjectMotion(m_autoDepth->m_srv.Get(),s.samples,s.w,s.h);
+    ID3D11ShaderResourceView* inputs[4]={m_sceneCopySRV.Get(),m_autoDepth->m_srv.Get(),cb.flags[1]>0?m_waterTerrainSRV.Get():nullptr,objectMotion};
     ID3D11UnorderedAccessView* outputs[4]={s.color.uav.Get(),s.depth.uav.Get(),s.motion.uav.Get(),s.reactive.uav.Get()};
     m_ctx->CSSetShader(s.inputs.Get(),nullptr,0);m_ctx->CSSetConstantBuffers(0,1,s.cb.GetAddressOf());
-    m_ctx->CSSetSamplers(0,1,m_linearClamp.GetAddressOf());m_ctx->CSSetShaderResources(0,3,inputs);m_ctx->CSSetUnorderedAccessViews(0,4,outputs,nullptr);
+    m_ctx->CSSetSamplers(0,1,m_linearClamp.GetAddressOf());m_ctx->CSSetShaderResources(0,4,inputs);m_ctx->CSSetUnorderedAccessViews(0,4,outputs,nullptr);
     m_ctx->Dispatch((s.w+7)/8,(s.h+7)/8,1);
     ID3D11UnorderedAccessView* nullUav[64]={};m_ctx->CSSetUnorderedAccessViews(0,64,nullUav,nullptr);m_ctx->CSSetShaderResources(0,16,none);
     FfxFsr3UpscalerDispatchDescription d={};d.commandList=ffxGetCommandListDX11(m_ctx.Get());

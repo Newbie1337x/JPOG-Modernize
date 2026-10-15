@@ -29,7 +29,8 @@ extern const char* kVSOutputStruct;
 // by SV_VertexID/SV_InstanceID instead of the input assembler, and c4/c5 come from the section.
 // instanced: the instanced variant of skinned draws (skin_batch.cpp). Constants c[window] come from
 // the instance's copy in t23 (cbuffer b6: first element, window start, window size).
-std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& error, bool pulled = false, bool instanced = false);
+std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& error, bool pulled = false, bool instanced = false,
+                        bool motion = false);
 // Constant registers c0..n-1 the translated shader can read: every directly addressed source
 // plus three more rows (matrix instructions read up to four consecutive registers), at least
 // c0..c3 (our clip-axis code reads them). 256 when the shader uses relative addressing.
@@ -131,6 +132,7 @@ struct SunConstants {
     float gameSunDir[4];    // the game's own sun direction (grass relighting reference)
     float emissiveGlow[4];  // night emission of the bound stage-0 texture (rgb, already scaled)
     float nightGrade[4];    // night colour fade: tint rgb, strength (world draws, before emission)
+    float grassThin[4];     // distant grass: thinning start, end (xz distance), clumps kept at the end, w = 1 + alpha compensation on grass draws
 };
 
 struct WaterConstants {
