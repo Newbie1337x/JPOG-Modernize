@@ -41,6 +41,10 @@ static bool g_gameFastPaths = true;
 static bool g_fullWallView = true; // [Performance] FullWallView: walls over the whole view, not a 512-unit square
 static float g_drawDistanceScale = 2.0f;  // [Performance] DrawDistance: camera far clip and sky
 static float g_objectDistanceScale = 1.5f; // [Performance] ObjectDistance: model fade distances
+static bool g_fullTreeView = true;          // [Performance] FullTreeView: trees past the 512-unit square
+static float g_treeDistanceScale = 2.5f;   // [Performance] TreeDistance: tree fade distance
+static float g_fenceDistanceScale = 2.5f;  // [Performance] FenceDistance: fence and wall fade distance
+static float g_minFadeDistance = 2000.0f;  // [Performance] MinFadeDistance: no model fades out closer (0 = off)
 static float g_cameraResponse = 0.12f;
 static float g_dragPanSensitivity = 0.0015f;
 static float g_dragRotateSensitivity = 0.0018f;
@@ -1243,6 +1247,22 @@ static void LogTexMods(const char* fmt, const char* a, const char* b)
     fclose(f);
 }
 
+// JPOGMouseFix.log next to the game: what the patches found and did.
+static void PluginLog(const char* fmt, ...)
+{
+    static std::string logPath = GameDir() + "JPOGMouseFix.log";
+    static bool first = true;
+    FILE* f = nullptr;
+    if (fopen_s(&f, logPath.c_str(), first ? "w" : "a") != 0 || !f) return;
+    first = false;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+
 // Finds texture <name> in a .tml; returns pointer/size inside 'tml'.
 static bool FindTmlTexture(const std::vector<BYTE>& tml, const char* name, const BYTE** blob, UINT* size,
                            UINT* hdrW, UINT* hdrH)
@@ -1613,6 +1633,16 @@ static void LoadConfig(HMODULE self)
     GetPrivateProfileStringA("Performance", "ObjectDistance", "1.5", buf, sizeof(buf), path);
     g_objectDistanceScale = (float)atof(buf);
     if (!(g_objectDistanceScale >= 1.0f && g_objectDistanceScale <= 4.0f)) g_objectDistanceScale = 1.5f;
+    g_fullTreeView = GetPrivateProfileIntA("Performance", "FullTreeView", 1, path) != 0;
+    GetPrivateProfileStringA("Performance", "TreeDistance", "2.5", buf, sizeof(buf), path);
+    g_treeDistanceScale = (float)atof(buf);
+    if (!(g_treeDistanceScale >= 1.0f && g_treeDistanceScale <= 8.0f)) g_treeDistanceScale = 2.5f;
+    GetPrivateProfileStringA("Performance", "FenceDistance", "2.5", buf, sizeof(buf), path);
+    g_fenceDistanceScale = (float)atof(buf);
+    if (!(g_fenceDistanceScale >= 1.0f && g_fenceDistanceScale <= 8.0f)) g_fenceDistanceScale = 2.5f;
+    GetPrivateProfileStringA("Performance", "MinFadeDistance", "2000", buf, sizeof(buf), path);
+    g_minFadeDistance = (float)atof(buf);
+    if (!(g_minFadeDistance >= 0.0f && g_minFadeDistance <= 4000.0f)) g_minFadeDistance = 2000.0f;
     g_borderless = GetPrivateProfileIntA("Display", "Borderless", 1, path) != 0;
     g_forceWindowed = g_borderless; // borderless = forced windowed + no borders
     g_altF4 = GetPrivateProfileIntA("Display", "AltF4Quit", 1, path) != 0;
@@ -2409,6 +2439,8 @@ static DWORD __fastcall WallDestroy_Hook(BYTE* self, void*)
 namespace drawdist {
 constexpr int kLevels = 3, kRow = 0x58 / 4;
 constexpr int kFadeEnd = 14;   // floats 0..13: near/far fade pairs of the model categories
+constexpr int kTreeNear = 4, kTreeFar = 5;   // AFadeDist type 0 (LoadFadeData)
+constexpr int kFenceNear = 10, kFenceFar = 11; // AFadeDist type 1 (ReinitWallFadeDists)
 constexpr int kFarClip = 16;   // 14, 15: grass (left alone); 17..21: sky and water tessellation
 float* const kTable = (float*)0x8c5338;
 static float g_original[kLevels][kRow], g_written[kLevels][kRow];
@@ -2420,8 +2452,45 @@ static void Scale()
             if (i >= kFadeEnd && i < kFarClip) continue;
             float& v = kTable[level * kRow + i];
             if (v != g_written[level][i]) g_original[level][i] = v;
-            v = g_written[level][i] = g_original[level][i] * (i == kFarClip ? g_drawDistanceScale : g_objectDistanceScale);
+            const float scale = i == kFarClip ? g_drawDistanceScale
+                              : (i == kTreeNear || i == kTreeFar) && g_fullTreeView ? g_treeDistanceScale
+                              : (i == kFenceNear || i == kFenceFar) && g_fullWallView ? g_fenceDistanceScale : g_objectDistanceScale;
+            v = g_written[level][i] = g_original[level][i] * scale;
         }
+    // MinFadeDistance: the island is about 1000 units across and the camera can look at it from a
+    // corner and high above, so the game's fades (at most about 400 units) remove whole buildings,
+    // forests and fences. Each near/far pair keeps its own fade width, moved out to the minimum.
+    if (g_minFadeDistance > 0.0f)
+        for (int level = 0; level < kLevels; level++) {
+            float* row = kTable + level * kRow;
+            for (int i = 0; i + 1 < kFadeEnd; i += 2) {
+                const float width = row[i + 1] - row[i];
+                if (row[i + 1] >= g_minFadeDistance) continue;
+                row[i + 1] = g_written[level][i + 1] = g_minFadeDistance;
+                row[i] = g_written[level][i] = g_minFadeDistance - (width > 0.0f ? width : 0.0f);
+            }
+            float& farClip = row[kFarClip];
+            if (farClip < g_minFadeDistance + 100.0f) farClip = g_written[level][kFarClip] = g_minFadeDistance + 100.0f;
+        }
+    static int logged;
+    if (logged++ < 4)
+        for (int level = 0; level < kLevels; level++) {
+            const float* o = g_original[level];
+            const float* w = g_written[level];
+            PluginLog("draw distance level %d: far clip %.0f -> %.0f, trees %.0f-%.0f -> %.0f-%.0f, fences %.0f-%.0f -> %.0f-%.0f",
+                level, o[kFarClip], w[kFarClip], o[kTreeNear], o[kTreeFar], w[kTreeNear], w[kTreeFar],
+                o[kFenceNear], o[kFenceFar], w[kFenceNear], w[kFenceFar]);
+        }
+}
+}
+
+// The game's own far clip for the distance the renderer was given (the reflection keeps it).
+namespace drawdist {
+static float ReflectionFar(float farClip)
+{
+    for (int level = 0; level < kLevels; level++)
+        if (g_written[level][kFarClip] == farClip && g_original[level][kFarClip] > 0.0f) return g_original[level][kFarClip];
+    return farClip / g_drawDistanceScale;
 }
 }
 
@@ -2430,7 +2499,7 @@ static void Scale()
 typedef float(__thiscall* SetFar_t)(void* camera, float farClip);
 static float __fastcall ReflectionSetFar_Hook(void* camera, void*, float farClip)
 {
-    return (*(SetFar_t*)0x739fac)(camera, farClip / g_drawDistanceScale);
+    return (*(SetFar_t*)0x739fac)(camera, drawdist::ReflectionFar(farClip));
 }
 
 typedef void(__stdcall* ResetOptions_t)();
@@ -2441,9 +2510,89 @@ static void __stdcall ResetOptions_Hook()
     g_origResetOptions();
 }
 
+// Trees (FullTreeView). ATreeManager keeps the trees of 16x16-unit cells in a cache ring of 32x32
+// cells (self + 0xc4 mask, + 0x160 width, + 0x15c count), fills a cell from the tree distribution
+// when it becomes visible, and takes the nodes from a pool of 3200 (0x840bcc). Each frame
+// RenderScene walks a quadtree (CheckVis) from a 512x512 square around a point 128 units ahead of
+// the camera, and stops at 512 visible cells (0x200, the two lists at self + 0x9bc / 0x9c0). Past
+// that square the trees are gone, whatever their fade distance.
+//
+// Here the ring covers the whole map (64x64 cells of the 1008-unit island: every cell keeps its own
+// slot, so a cell is filled once instead of whenever the view moves), the pool and the visible
+// lists grow to match, and the quadtree starts from a square that reaches the tree fade distance
+// (AFadeDist type 0) around the camera.
+namespace trees {
+constexpr int kRing = 64, kCells = kRing * kRing;
+constexpr int kPool = 65536;               // tree nodes, 0x2c bytes each
+static unsigned short g_visible[2][kCells]; // replaces the two 512-entry lists in the object
+typedef void(__thiscall* CheckVis_t)(BYTE* self, float x, float z, float hx, float hz, void* planes, unsigned mask);
+static const CheckVis_t CheckVis = (CheckVis_t)0x5e0c30;
+float* const kTreeFadeFar = (float*)0x83d4c8; // AFadeDist::sm_afFadeDistFar[0]
+
+typedef bool(__fastcall* Create_t)(BYTE* self, void*);
+static Create_t g_origCreate;
+static bool __fastcall Create_Hook(BYTE* self, void*)
+{
+    // Read by CreateTreeData, which runs inside Create.
+    *(DWORD*)(self + 0xc4) = kRing - 1;
+    *(WORD*)(self + 0x160) = kRing;
+    *(WORD*)(self + 0x15c) = kCells;
+    *(int*)0x840bcc = kPool;
+    *(unsigned short**)(self + 0x9bc) = g_visible[0];
+    *(unsigned short**)(self + 0x9c0) = g_visible[1];
+    *(int*)(self + 0x9c4) = 0;
+    *(int*)(self + 0x9c8) = 0;
+    const bool ok = g_origCreate(self, nullptr);
+    PluginLog("trees: ATreeManager::Create %s, ring %d cells, pool %d nodes", ok ? "ok" : "FAILED", kCells, kPool);
+    return ok;
+}
+
+// RenderScene's call: the point ahead of the camera, cell aligned, and 256 x 256. The ring holds
+// every cell, so the quadtree starts from the whole map and the view planes do the culling.
+static void __fastcall RootCheckVis_Hook(BYTE* self, void*, float x, float z, float hx, float hz, void* planes, unsigned mask)
+{
+    const float half = kRing * 16 / 2;
+    CheckVis(self, half, half, half, half, planes, mask);
+    static unsigned frames;
+    if (frames++ % 1800 == 0)
+        PluginLog("trees: fade far %.0f, %d cells visible", *kTreeFadeFar, *(int*)(self + 0x9c8));
+}
+}
+
+static void InstallFullTreeView()
+{
+    if (!g_fullTreeView) return;
+    BYTE* create = (BYTE*)0x5d9f90;
+    static const unsigned char createSig[] = { 0x57, 0x53, 0x83, 0xEC, 0x0C, 0x8B, 0xF9, 0x83, 0xC4, 0xF8 };
+    BYTE* root = (BYTE*)0x5dc1ae; // MOV [ESP+8],256.0; MOV [ESP+0xc],256.0; MOV [ESP+0x10],EAX; MOV [ESP+0x14],ESI; CALL CheckVis
+    static const unsigned char rootSig[] = { 0xC7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x80, 0x43, 0xC7, 0x44, 0x24, 0x0C, 0x00, 0x00, 0x80, 0x43,
+                                             0x89, 0x44, 0x24, 0x10, 0x89, 0x74, 0x24, 0x14, 0xE8 };
+    BYTE* limitBlock = (BYTE*)0x5e10d5; // CMP EDX,0x200 (cells of a block inside the view)
+    static const unsigned char limitBlockSig[] = { 0x81, 0xFA, 0x00, 0x02, 0x00, 0x00, 0x76 };
+    BYTE* limitCell = (BYTE*)0x5e1210;  // CMP EAX,0x200 (one cell)
+    static const unsigned char limitCellSig[] = { 0x3D, 0x00, 0x02, 0x00, 0x00, 0x76 };
+    if (!BytesMatch(create, createSig, sizeof(createSig)) || !BytesMatch(root, rootSig, sizeof(rootSig)) ||
+        !BytesMatch(limitBlock, limitBlockSig, sizeof(limitBlockSig)) || !BytesMatch(limitCell, limitCellSig, sizeof(limitCellSig))) {
+        OutputDebugStringA("JPOG: full tree view: unknown ATreeManager, left alone\n");
+        PluginLog("full tree view: unknown ATreeManager, left alone");
+        g_fullTreeView = false;
+        return;
+    }
+    const DWORD limit = trees::kCells;
+    PatchBytes(limitBlock + 2, &limit, 4);
+    PatchBytes(limitCell + 1, &limit, 4);
+    WriteRel(root + 24, (void*)&trees::RootCheckVis_Hook, 0xE8, 5);
+    trees::g_origCreate = (trees::Create_t)MakeTrampoline(create, 7, (void*)&trees::Create_Hook);
+    char line[160];
+    sprintf_s(line, "JPOG: full tree view: %dx%d cell ring, %d tree nodes, tree distance x%.2f\n",
+        trees::kRing, trees::kRing, trees::kPool, g_treeDistanceScale);
+    OutputDebugStringA(line);
+    PluginLog("%s", line);
+}
+
 static void InstallDrawDistance()
 {
-    if (g_drawDistanceScale == 1.0f && g_objectDistanceScale == 1.0f) return;
+    if (g_drawDistanceScale == 1.0f && g_objectDistanceScale == 1.0f && !g_fullTreeView && g_minFadeDistance <= 0.0f) return;
     BYTE* reset = (BYTE*)0x47bce0;
     static const unsigned char resetSig[] = { 0x83, 0xEC, 0x34, 0xB9, 0x80, 0x85, 0x8B, 0x00, 0xC7, 0x04, 0x24, 0x02, 0x00, 0x00, 0x00 };
     if (!BytesMatch(reset, resetSig, sizeof(resetSig))) {
@@ -2514,6 +2663,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
         InstallTextureMods();
         InstallGameFastPaths();
         InstallDrawDistance();
+        InstallFullTreeView();
         if (g_borderless) {
             HANDLE t = CreateThread(nullptr, 0, BorderlessThread, nullptr, 0, nullptr);
             if (t) CloseHandle(t);
