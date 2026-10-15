@@ -134,6 +134,7 @@ struct Config {
     bool terrainBatching=true; // [Performance] TerrainBatching: consecutive terrain sections in one instanced draw (terrain_batch.cpp)
     bool hitchSampler=false; int hitchThresholdMs=60; // [Performance] HitchSampler, HitchThresholdMs (hitch_sampler.h)
     bool asyncShaders=true, prewarmShaders=true; // [Performance] AsyncShaders, PrewarmShaders (shader_jobs.h)
+    bool skinInstancing=true; // [Performance] SkinInstancing (skin_batch.cpp)
     bool taa=true, fsr1=true;
     bool fsr31=true; // experimental native-resolution temporal AA, not frame generation
     bool frameGeneration=false; // synchronous x2 prototype; requires native AA + VSync

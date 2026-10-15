@@ -884,7 +884,27 @@ static std::string PulledInput(const VSInput& in)
     }
 }
 
-std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& error, bool pulled)
+// Every constant read of the body (c[n], C(a0 + n)) goes through IC(), which takes the registers of
+// the instance window from the instance buffer.
+static void InstanceConstants(std::string& s, size_t from)
+{
+    for (size_t at = s.find("C(a0", from); at != std::string::npos; at = s.find("C(a0", at + 4))
+        if (at == 0 || !isalnum((unsigned char)s[at - 1])) { s.replace(at, 1, "IC"); at++; }
+    for (size_t at = s.find("c[", from); at != std::string::npos; at = s.find("c[", at + 1)) {
+        if (at > 0 && (isalnum((unsigned char)s[at - 1]) || s[at - 1] == '_')) continue;
+        int depth = 0;
+        size_t end = at + 1;
+        for (; end < s.size(); end++) {
+            if (s[end] == '[') depth++;
+            else if (s[end] == ']' && --depth == 0) break;
+        }
+        if (end >= s.size()) return;
+        s[end] = ')';
+        s.replace(at, 2, "IC(");
+    }
+}
+
+std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& error, bool pulled, bool instanced)
 {
     if ((func[0] & 0xFFFF0000) != 0xFFFE0000) { error = "not a vertex shader"; return ""; }
     std::vector<Instr> code;
@@ -941,7 +961,18 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
         for (const VSInput& in : decl.inputs)
             s += Fmt("  %s v%d : TEXCOORD%d;\n", inTypes[in.type & 7], in.reg, in.reg);
         s += "};\n";
-        s += "VSOut main(VSIn i) {\n";
+        if (instanced) {
+            s += "StructuredBuffer<float4> instanceConsts : register(t23);\n"
+                 "cbuffer Instances : register(b6) { uint4 instanceInfo; };\n" // x first element, y window start, z window size
+                 "static uint instanceId;\n"
+                 "float4 IC(int i) { uint u = (uint)(i - (int)instanceInfo.y);\n"
+                 "  return u < instanceInfo.z ? instanceConsts[instanceInfo.x + instanceId * instanceInfo.z + u] : C(i); }\n";
+            s += "VSOut main(VSIn i, uint iid : SV_InstanceID) {\n";
+            bodyStart = s.size();
+            s += "  instanceId = iid;\n";
+        } else {
+            s += "VSOut main(VSIn i) {\n";
+        }
     }
     s += "  float4 worldPosition = 0;\n";
     for (int r = 0; r < 16; r++) {
@@ -1062,6 +1093,7 @@ std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& erro
     if (WorldShaderKind(decl) == 4) s += "  o.t7 = float4(abs(v0.y), 0, 0, 1);\n";
     s += "  o.fog = oFog.x;\n";
     s += "  return o;\n}\n";
+    if (instanced) InstanceConstants(s, bodyStart);
     if (pulled) {
         // The section registers: c4 and c5 (position offset and height scale of the terrain).
         for (size_t at = s.find("c[4]", bodyStart); at != std::string::npos; at = s.find("c[4]", at)) s.replace(at, 4, "sec.r4");

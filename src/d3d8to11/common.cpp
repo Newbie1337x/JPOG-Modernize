@@ -243,6 +243,7 @@ void LoadConfig()
     if(g_config.hitchThresholdMs<5)g_config.hitchThresholdMs=5;
     g_config.asyncShaders=GetPrivateProfileIntA("Performance","AsyncShaders",1,ini.c_str())!=0;
     g_config.prewarmShaders=GetPrivateProfileIntA("Performance","PrewarmShaders",1,ini.c_str())!=0;
+    g_config.skinInstancing=GetPrivateProfileIntA("Performance","SkinInstancing",1,ini.c_str())!=0;
     g_config.threaded=GetPrivateProfileIntA("Performance","Threaded",0,ini.c_str())!=0;
     g_config.taa=GetPrivateProfileIntA("Antialiasing","TAA",1,ini.c_str())!=0;
     g_config.fsr31=GetPrivateProfileIntA("Antialiasing","FSR31",1,ini.c_str())!=0;
@@ -430,6 +431,7 @@ void SaveConfig()
     putInt("Performance","HitchThresholdMs",g_config.hitchThresholdMs);
     putInt("Performance","AsyncShaders",g_config.asyncShaders);
     putInt("Performance","PrewarmShaders",g_config.prewarmShaders);
+    putInt("Performance","SkinInstancing",g_config.skinInstancing);
     putInt("Performance","Threaded",g_config.threaded);
     putInt("Antialiasing","TAA",g_config.taa);
     putInt("Antialiasing","FSR31",g_config.fsr31);

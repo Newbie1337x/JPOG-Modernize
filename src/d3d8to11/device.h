@@ -22,6 +22,8 @@ struct VertexShader8 {
     bool failed = false;
     ComPtr<ID3D11VertexShader> pulled; // batched terrain variant (terrain_batch.cpp), built on first use
     int pulledState = 0;               // 0 not tried, 1 ready, -1 not batchable
+    ComPtr<ID3D11VertexShader> instanced; // instanced skinned variant (skin_batch.cpp), built on first use
+    int instancedState = 0;
 };
 
 struct PixelShader8 {
@@ -187,7 +189,8 @@ private:
     void LimitFrameRate();
     bool CreateSunResources();
     void UpdateSun(bool shadowPass);
-    void DrawSunShadow(bool indexed, UINT count, UINT start, INT base);
+    void DrawSunShadow(bool indexed, UINT count, UINT start, INT base, UINT instances = 1, const UINT* instanceInfo = nullptr,
+                       const float* instanceConsts = nullptr);
     bool CreateWaterResources();
     void PrepareWaterDraw();
     void UpdateWaterRegions();
@@ -501,6 +504,7 @@ private:
         ID3D11Buffer* ib; DXGI_FORMAT ibFormat; UINT ibOffset;
         ID3D11ShaderResourceView* srv[kMaxStages]; ID3D11SamplerState* sampler[kMaxStages];
         UINT vsFirst, sun, psc; bool indexed; UINT count, start; INT base;
+        UINT instances, instanceInfo[4]; // skin_batch.cpp: instanced casters
     };
     std::vector<ShadowDraw> m_shadowBatch;
     std::vector<ComPtr<IUnknown>> m_shadowKeep;
@@ -508,20 +512,47 @@ private:
     void KeepForShadow(int slot, IUnknown* p) { if (p && m_shadowKept[slot] != p) { m_shadowKeep.emplace_back(p); m_shadowKept[slot] = p; } }
     std::vector<SunConstants> m_shadowSuns;
     std::vector<PSConstants> m_shadowPS;
+    // Window constants of the recorded instanced casters, uploaded to m_shadowInstBuf by the flush,
+    // so the main instance buffer can be rewritten while casters are still recorded.
+    std::vector<float> m_shadowInstConsts;
+    ComPtr<ID3D11Buffer> m_shadowInstBuf;
+    ComPtr<ID3D11ShaderResourceView> m_shadowInstSRV;
+    UINT m_shadowInstElements = 0;
     ComPtr<ID3D11Buffer> m_shadowPSCB;
     UINT m_shadowBatchesFrame = 0;
 public:
     void FlushShadowBatch(); // also before game buffers and textures are written (resources.cpp)
-    // Draws the recorded terrain sections (terrain_batch.cpp). Called before anything that reads
-    // or replaces the state they were recorded with: every other draw, clears, copies, uploads.
-    void FlushTerrainBatch() { if (m_terrainBatchOpen) DrawTerrainBatch(); }
+    // Draws the recorded terrain sections (terrain_batch.cpp) and skinned instances (skin_batch.cpp).
+    // Called before anything that reads or replaces the state they were recorded with: every other
+    // draw, clears, copies, uploads.
+    void FlushBatches() { if (m_terrainBatchOpen) DrawTerrainBatch(); if (m_skinBatchOpen) DrawSkinBatch(); }
+    void FlushSkinBatch() { if (m_skinBatchOpen) DrawSkinBatch(); }
 private:
     // Terrain sections: the game draws each 8x8-unit quarter of every 16x16 section separately,
     // with the same shader, textures and states; only stream 0, the index range and c4/c5 change.
     // Those draws are recorded and drawn as one instanced draw of the pulled shader variant.
     struct BatchSection { float r4[4], r5[4]; UINT vertexBase, indexBase, indexCount; INT baseVertex; };
     struct PoolEntry { UINT64 revision; UINT offset, count; };
-    bool m_terrainBatchOpen = false; // any other state change draws it first (the setters call FlushTerrainBatch)
+    bool m_terrainBatchOpen = false; // any other state change draws it first (the setters call FlushBatches)
+    // Skinned draws of one mesh in a row: one instanced draw (skin_batch.cpp). Between the draws
+    // only the vertex constants c[m_skinLo, m_skinHi) change; each draw adds a copy of them.
+    bool m_skinBatchOpen = false, m_skinUnavailable = false;
+    DWORD m_skinType = 0;
+    UINT m_skinMinIndex = 0, m_skinNumVertices = 0, m_skinStart = 0, m_skinPrims = 0, m_skinCount = 0;
+    INT m_skinBase = 0;
+    D3D11_PRIMITIVE_TOPOLOGY m_skinTopo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    UINT m_skinLo = 0, m_skinHi = 0, m_skinInstances = 0, m_skinBufUsed = 0;
+    VertexShader8* m_skinVS = nullptr;
+    std::vector<float> m_skinConsts;
+    ComPtr<ID3D11Buffer> m_skinBuf, m_skinCB;
+    ComPtr<ID3D11ShaderResourceView> m_skinSRV;
+    UINT m_skinStatsFrame = 0, m_skinBatches = 0, m_skinBatchedDraws = 0, m_skinAppended = 0, m_skinLogged = 0;
+    bool CreateSkinBatchResources();
+    void SetSkinInstanceInfo(const UINT info[4], ID3D11ShaderResourceView* consts);
+    bool StartSkinBatch(DWORD type, UINT minIndex, UINT numVertices, UINT startIndex, UINT primCount,
+                        UINT writeLo, UINT writeHi, UINT count, D3D11_PRIMITIVE_TOPOLOGY topo);
+    bool AppendSkinBatch(DWORD type, UINT minIndex, UINT numVertices, UINT startIndex, UINT primCount);
+    void DrawSkinBatch();
     DWORD m_terrainType = 0;
     UINT m_terrainStride0 = 0, m_terrainMaxIndices = 0, m_terrainStream1[2] = {};
     VertexShader8* m_terrainVS = nullptr;

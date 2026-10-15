@@ -5,7 +5,7 @@
 // only stream 0 (the section's packed heights), the index buffer (one of a few shared LOD
 // patterns) and c4/c5 (the section's position and height scale) change. Those draws are recorded
 // here instead of drawn; the first one goes through PrepareDraw as usual and leaves every other
-// binding in place. The batch is drawn when anything else happens (FlushTerrainBatch) with the
+// binding in place. The batch is drawn when anything else happens (FlushBatches) with the
 // pulled variant of the terrain shader: SV_InstanceID picks the section record, SV_VertexID its
 // index, and the vertices are read from pools that hold a copy of each buffer.
 #include "device.h"

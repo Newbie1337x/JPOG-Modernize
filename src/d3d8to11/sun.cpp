@@ -778,7 +778,8 @@ void Device::UpdateSun(bool shadowPass)
     BindPSCB(1, 1, m_sunCB.GetAddressOf());
 }
 
-void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base)
+void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base, UINT instances, const UINT* instanceInfo,
+                           const float* instanceConsts)
 {
     CpuPerformanceScope cpu(m_perf,2);
     if (!g_config.effectsEnabled || !g_config.sunLighting || !m_worldCaster || !m_sunStarted || m_sunResolved || !m_sunDSV) return;
@@ -814,7 +815,8 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base)
         m_ctx->RSSetState(m_sunRaster.Get());
         m_ctx->OMSetDepthStencilState(m_sunDepth.Get(), 0);
         m_ctx->OMSetBlendState(m_noBlend.Get(), nullptr, 0xffffffff);
-        if (indexed) m_ctx->DrawIndexed(count, start, base); else m_ctx->Draw(count, start);
+        if (instances > 1) m_ctx->DrawIndexedInstanced(count, instances, start, base, 0); // instance data still bound
+        else if (indexed) m_ctx->DrawIndexed(count, start, base); else m_ctx->Draw(count, start);
         // Vertex/pixel shaders, streams and constants remain valid. PrepareDraw restores targets,
         // viewport and the sun-pass flag before the next game draw.
         m_rtDirty = m_viewportDirty = true;
@@ -860,6 +862,13 @@ void Device::DrawSunShadow(bool indexed, UINT count, UINT start, INT base)
     if (m_shadowPS.empty() || memcmp(&m_shadowPS.back(), &m_psConst, sizeof(m_psConst))) m_shadowPS.push_back(m_psConst);
     d.psc = (UINT)m_shadowPS.size() - 1;
     d.indexed = indexed; d.count = count; d.start = start; d.base = base;
+    d.instances = instances;
+    if (instances > 1) {
+        // Own copy of the window constants: x becomes the first element in m_shadowInstConsts.
+        memcpy(d.instanceInfo, instanceInfo, sizeof(d.instanceInfo));
+        d.instanceInfo[0] = (UINT)(m_shadowInstConsts.size() / 4);
+        m_shadowInstConsts.insert(m_shadowInstConsts.end(), instanceConsts, instanceConsts + (size_t)instances * instanceInfo[2] * 4);
+    }
     m_shadowBatch.push_back(d);
 }
 
@@ -875,6 +884,28 @@ void Device::FlushShadowBatch()
         if (FAILED(m_device->CreateBuffer(&bd, nullptr, &m_shadowPSCB))) { m_shadowBatch.clear(); return; }
     }
     PerformanceScope perf(m_perf, m_device.Get(), m_ctx.Get(), Performance::Shadow);
+    bool instancesReady = true;
+    if (!m_shadowInstConsts.empty()) {
+        const UINT elements = (UINT)(m_shadowInstConsts.size() / 4);
+        if (elements > m_shadowInstElements) {
+            UINT size = m_shadowInstElements ? m_shadowInstElements : 1u << 16;
+            while (size < elements) size *= 2;
+            D3D11_BUFFER_DESC bd = { size * 16, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0,
+                                     D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, 16 };
+            D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+            sd.Format = DXGI_FORMAT_UNKNOWN;
+            sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+            sd.Buffer.NumElements = size;
+            m_shadowInstBuf.Reset(); m_shadowInstSRV.Reset(); m_shadowInstElements = 0;
+            if (SUCCEEDED(m_device->CreateBuffer(&bd, nullptr, &m_shadowInstBuf)) &&
+                SUCCEEDED(m_device->CreateShaderResourceView(m_shadowInstBuf.Get(), &sd, &m_shadowInstSRV)))
+                m_shadowInstElements = size;
+        }
+        if (m_shadowInstElements) {
+            const D3D11_BOX box = { 0, 0, 0, elements * 16, 1, 1 };
+            m_ctx->UpdateSubresource(m_shadowInstBuf.Get(), 0, &box, m_shadowInstConsts.data(), 0, 0);
+        } else instancesReady = false;
+    }
     m_ctx->OMSetRenderTargets(0, nullptr, m_sunDSV.Get());
     D3D11_VIEWPORT vp = { 0, 0, (float)m_sunMapSize, (float)m_sunMapSize, 0, 1 };
     m_ctx->RSSetViewports(1, &vp);
@@ -892,6 +923,7 @@ void Device::FlushShadowBatch()
     ID3D11Buffer* ib = nullptr;
     UINT ibOffset = 0;
     const ShadowDraw* prev = nullptr;
+    const UINT* lastInfo = nullptr;
     for (const ShadowDraw& d : m_shadowBatch) {
         if (d.sun != sun) {
             sun = d.sun;
@@ -924,13 +956,18 @@ void Device::FlushShadowBatch()
         if (!prev || memcmp(prev->srv, d.srv, sizeof(d.srv))) m_ctx->PSSetShaderResources(0, kMaxStages, d.srv);
         if (!prev || memcmp(prev->sampler, d.sampler, sizeof(d.sampler))) m_ctx->PSSetSamplers(0, kMaxStages, d.sampler);
         prev = &d;
-        if (d.indexed) m_ctx->DrawIndexed(d.count, d.start, d.base); else m_ctx->Draw(d.count, d.start);
+        if (d.instances > 1) {
+            if (!instancesReady) continue;
+            if (!lastInfo || memcmp(lastInfo, d.instanceInfo, sizeof(d.instanceInfo))) { SetSkinInstanceInfo(d.instanceInfo, m_shadowInstSRV.Get()); lastInfo = d.instanceInfo; }
+            m_ctx->DrawIndexedInstanced(d.count, d.instances, d.start, d.base, 0);
+        } else if (d.indexed) m_ctx->DrawIndexed(d.count, d.start, d.base); else m_ctx->Draw(d.count, d.start);
     }
     m_shadowBatch.clear();
     m_shadowKeep.clear();
     memset(m_shadowKept, 0, sizeof(m_shadowKept));
     m_shadowSuns.clear();
     m_shadowPS.clear();
+    m_shadowInstConsts.clear();
     // Everything the game's draws had bound is rebound by the next PrepareDraw.
     InvalidateBindings();
     m_rtDirty = m_viewportDirty = true;
@@ -1188,7 +1225,7 @@ void Device::EndSunFrame()
         m_traceBuf.clear();
     }
     if (g_config.effectsEnabled && g_config.sunLighting && !m_traceDone && !m_trace) {
-        if (!m_traceAt && m_shadowDraws) m_traceAt = m_frame + 1000;
+        if (!m_traceAt && m_shadowDraws) m_traceAt = m_frame + 600;
         if (m_traceAt && m_frame + 1 >= m_traceAt) m_trace = true;
     }
     if (m_sunStarted && (m_earlyCasters || m_lateWorldDraws))

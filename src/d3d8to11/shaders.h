@@ -27,7 +27,9 @@ extern const char* kVSOutputStruct;
 
 // pulled: the batched terrain variant (terrain_batch.cpp). Vertices are read from the batch pools
 // by SV_VertexID/SV_InstanceID instead of the input assembler, and c4/c5 come from the section.
-std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& error, bool pulled = false);
+// instanced: the instanced variant of skinned draws (skin_batch.cpp). Constants c[window] come from
+// the instance's copy in t23 (cbuffer b6: first element, window start, window size).
+std::string TranslateVS(const DWORD* func, const VSDecl& decl, std::string& error, bool pulled = false, bool instanced = false);
 // Constant registers c0..n-1 the translated shader can read: every directly addressed source
 // plus three more rows (matrix instructions read up to four consecutive registers), at least
 // c0..c3 (our clip-axis code reads them). 256 when the shader uses relative addressing.

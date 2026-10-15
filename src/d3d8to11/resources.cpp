@@ -387,7 +387,7 @@ void Texture::Upload(UINT level)
         DecorateTexture(this);
     }
     const bool decompress = GetFormatInfo(m_format).blockBytes && m_info.dxgi == DXGI_FORMAT_B8G8R8A8_UNORM;
-    m_dev->FlushTerrainBatch();
+    m_dev->FlushBatches();
     m_dev->FlushShadowBatch();
     UploadLevel(m_dev->Ctx(), m_tex.Get(), level, m_format, m_info, decompress, m_shadow[level].data(),
                 MipSize(m_width, level), MipSize(m_height, level), 1);
@@ -505,7 +505,7 @@ void VolumeTexture::Upload(UINT level)
 {
     if (m_shadow[level].empty()) return;
     const bool decompress = GetFormatInfo(m_format).blockBytes != 0;
-    m_dev->FlushTerrainBatch();
+    m_dev->FlushBatches();
     m_dev->FlushShadowBatch();
     UploadLevel(m_dev->Ctx(), m_tex.Get(), level, m_format, m_info, decompress, m_shadow[level].data(),
                 MipSize(m_width, level), MipSize(m_height, level), MipSize(m_depth, level));
@@ -591,7 +591,7 @@ HRESULT BufferImpl::Unlock()
 HRESULT BufferImpl::UploadOnWorker(UINT lockOffset, UINT lockSize, DWORD lockFlags, const BYTE* data)
 {
     // data holds bytes [lockOffset, lockOffset + lockSize) of the buffer.
-    m_dev->FlushTerrainBatch(); // recorded terrain sections were drawn with the textures and buffers bound now
+    m_dev->FlushBatches(); // recorded terrain sections were drawn with the textures and buffers bound now
     m_dev->FlushShadowBatch(); // recorded shadow casters may read the old contents
     CpuPerformanceScope cpu(m_dev->m_perf,Performance::CpuGeometryUpload);
     ++m_revision;

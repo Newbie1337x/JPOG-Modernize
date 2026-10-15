@@ -347,7 +347,7 @@ HRESULT Device::GetCreationParameters(void* params)
 
 HRESULT Device::Reset(D3D8PresentParameters* pp)
 {
-    FlushTerrainBatch();
+    FlushBatches();
     InvalidateBindings();
     m_tessCache.clear();m_tessCacheBytes=0;
     if (!pp) return D8ERR_INVALIDCALL;
@@ -467,7 +467,7 @@ HRESULT Device::CopyRects(ID8Surface* src, const RECT* rects, UINT count, ID8Sur
     Surface* s = static_cast<Surface*>(src);
     Surface* d = static_cast<Surface*>(dst);
     if (!s || !d) return D8ERR_INVALIDCALL;
-    FlushTerrainBatch();
+    FlushBatches();
     if (s->Resource() && d->Resource() && !count) {
         if (d->m_samples > 1) { LogOnce("copyrects-ms", "CopyRects into the MSAA back buffer skipped"); return S_OK; }
         ID3D11Texture2D* source = s->m_samples > 1 ? s->ResolvedTexture() : s->Resource();
@@ -491,7 +491,7 @@ void Device::OnSurfaceReleased(Surface*) {}
 
 HRESULT Device::SetRenderTarget(ID8Surface* rt, ID8Surface* ds)
 {
-    FlushTerrainBatch();
+    FlushBatches();
     if (rt) SetRef(m_rt, static_cast<Surface*>(rt));
     SetRef(m_ds, static_cast<Surface*>(ds));
     TraceSun("SetRenderTarget rt %s %ux%u ds %s", m_rt == m_backBuffer ? "back" : "other",
@@ -537,7 +537,7 @@ UINT Device::SupportedSamples(int requested)
 // [Renderer] MSAA changed (overlay): rebuild the back buffer and depth behind the same Surfaces.
 void Device::ApplyMsaa()
 {
-    FlushTerrainBatch();
+    FlushBatches();
     const UINT want = SupportedSamples(g_config.EffectiveMsaa());
     if (want == m_msaaApplied || !m_backBuffer) return;
     m_ctx->OMSetRenderTargets(0, nullptr, nullptr);
@@ -577,7 +577,7 @@ HRESULT Device::SetViewport(const D3D8Viewport* vp)
 {
     if (!vp) return D8ERR_INVALIDCALL;
     if (m_recordingStateBlock) return S_OK;
-    if (memcmp(&m_viewport, vp, sizeof(*vp))) FlushTerrainBatch();
+    if (memcmp(&m_viewport, vp, sizeof(*vp))) FlushBatches();
     m_viewport = *vp;
     m_viewportDirty = true;
     return S_OK;
@@ -585,7 +585,7 @@ HRESULT Device::SetViewport(const D3D8Viewport* vp)
 
 HRESULT Device::Clear(DWORD count, const D3D8Rect* rects, DWORD flags, DWORD color, float z, DWORD stencil)
 {
-    FlushTerrainBatch();
+    FlushBatches();
     if((flags & D8CLEAR_ZBUFFER) && m_ds==m_autoDepth) m_waterSnapshotReady=false;
     TraceSun("Clear flags %lu z %.3f rt %s ds %s viewport %ux%u", flags, z, m_rt == m_backBuffer ? "back" : "other",
              m_ds == m_autoDepth ? "auto" : "other", m_viewport.Width, m_viewport.Height);
@@ -732,7 +732,7 @@ HRESULT Device::SetRenderState(DWORD state, DWORD value)
     if (state >= RS_COUNT) return D8ERR_INVALIDCALL;
     if (m_recordingStateBlock) return S_OK;
     if (m_rs[state] == value) { ++m_perf.redundantRenderStates; return S_OK; }
-    FlushTerrainBatch();
+    FlushBatches();
     m_rs[state] = value;
     switch (state) {
     case RS_TEXTUREFACTOR: ColorToFloat4(value, m_psConst.textureFactor); m_psConstDirty = true; break;
@@ -789,7 +789,7 @@ HRESULT Device::SetTexture(DWORD stage, ID8BaseTexture* tex)
 {
     if (stage >= kMaxStages) return D8ERR_INVALIDCALL;
     if (m_recordingStateBlock) return S_OK;
-    if (m_textures[stage] != tex) FlushTerrainBatch();
+    if (m_textures[stage] != tex) FlushBatches();
     SetRef(m_textures[stage], tex);
     return S_OK;
 }
@@ -806,7 +806,7 @@ HRESULT Device::SetTextureStageState(DWORD stage, DWORD type, DWORD value)
     if (stage >= kMaxStages || type >= TSS_COUNT) return D8ERR_INVALIDCALL;
     if (m_recordingStateBlock) return S_OK;
     if (m_tss[stage][type] == value) { ++m_perf.redundantTextureStates; return S_OK; }
-    FlushTerrainBatch();
+    FlushBatches();
     m_tss[stage][type] = value;
     switch (type) {
     case TSS_ADDRESSU: case TSS_ADDRESSV: case TSS_ADDRESSW: case TSS_MAGFILTER: case TSS_MINFILTER: case TSS_MIPFILTER:
@@ -871,7 +871,7 @@ bool Device::BuildVertexShader(VertexShader8& vs, DWORD handle)
 HRESULT Device::SetVertexShader(DWORD handle)
 {
     if (m_recordingStateBlock) return S_OK;
-    if (m_vsHandle != handle) FlushTerrainBatch();
+    if (m_vsHandle != handle) FlushBatches();
     m_vsHandle = handle;
     if (handle & 1) {
         size_t idx = handle >> 1;
@@ -882,7 +882,7 @@ HRESULT Device::SetVertexShader(DWORD handle)
                 if (c.first + count <= kMaxVSConst &&
                     CopyConstantsIfChanged(m_vsConst[c.first], c.second.data(), count * 16)) {
                     m_vsConstDirty = true;
-                    FlushTerrainBatch();
+                    FlushBatches();
                 }
                 if (c.first + count <= kMaxVSConst && c.first + count > m_vsConstUsed) { m_vsConstUsed = c.first + count; m_vsConstDirty = true; }
             }
@@ -893,7 +893,7 @@ HRESULT Device::SetVertexShader(DWORD handle)
 
 HRESULT Device::DeleteVertexShader(DWORD handle)
 {
-    FlushTerrainBatch();
+    FlushBatches();
     size_t idx = handle >> 1;
     if (!(handle & 1) || idx >= m_vertexShaders.size() || !m_vertexShaders[idx]) return D8ERR_INVALIDCALL;
     delete m_vertexShaders[idx];
@@ -907,7 +907,12 @@ HRESULT Device::SetVertexShaderConstant(DWORD reg, const void* data, DWORD count
     if (m_terrainBatchOpen) {
         // The recorded terrain sections differ only in c4/c5 (kept with each section).
         for (DWORD r = reg; r < reg + count; r++)
-            if ((r < 4 || r > 5) && memcmp(m_vsConst[r], (const BYTE*)data + (r - reg) * 16, 16)) { FlushTerrainBatch(); break; }
+            if ((r < 4 || r > 5) && memcmp(m_vsConst[r], (const BYTE*)data + (r - reg) * 16, 16)) { FlushBatches(); break; }
+    }
+    if (m_skinBatchOpen) {
+        // The instances differ only in the window registers (kept with each instance).
+        for (DWORD r = reg; r < reg + count; r++)
+            if ((r < m_skinLo || r >= m_skinHi) && memcmp(m_vsConst[r], (const BYTE*)data + (r - reg) * 16, 16)) { FlushSkinBatch(); break; }
     }
     if (CopyConstantsIfChanged(m_vsConst[reg], data, count * 16)) m_vsConstDirty = true;
     else ++m_perf.duplicateConstants;
@@ -973,14 +978,14 @@ HRESULT Device::CreatePixelShader(const DWORD* func, DWORD* handle)
 HRESULT Device::SetPixelShader(DWORD handle)
 {
     if (m_recordingStateBlock) return S_OK;
-    if (m_psHandle != handle) FlushTerrainBatch();
+    if (m_psHandle != handle) FlushBatches();
     m_psHandle = handle;
     return S_OK;
 }
 
 HRESULT Device::DeletePixelShader(DWORD handle)
 {
-    FlushTerrainBatch();
+    FlushBatches();
     if (handle == 0 || handle > m_pixelShaders.size() || !m_pixelShaders[handle - 1]) return D8ERR_INVALIDCALL;
     delete m_pixelShaders[handle - 1];
     m_pixelShaders[handle - 1] = nullptr;
@@ -990,7 +995,7 @@ HRESULT Device::DeletePixelShader(DWORD handle)
 HRESULT Device::SetPixelShaderConstant(DWORD reg, const void* data, DWORD count)
 {
     if (!data || reg + count > kMaxPSConst) return D8ERR_INVALIDCALL;
-    if (m_terrainBatchOpen && memcmp(m_psConst.c[reg], data, count * 16)) FlushTerrainBatch();
+    if ((m_terrainBatchOpen || m_skinBatchOpen) && memcmp(m_psConst.c[reg], data, count * 16)) FlushBatches();
     if (CopyConstantsIfChanged(m_psConst.c[reg], data, count * 16)) m_psConstDirty = true;
     else ++m_perf.duplicateConstants;
     return S_OK;
@@ -1020,7 +1025,8 @@ HRESULT Device::SetStreamSource(UINT stream, ID8VertexBuffer* vb, UINT stride)
     if (stream >= kMaxStreams) return D8ERR_INVALIDCALL;
     if (m_recordingStateBlock) return S_OK;
     // Stream 0 is per terrain section (recorded with it); the others belong to the whole batch.
-    if (stream && (m_streams[stream].vb != vb || m_streams[stream].stride != stride)) FlushTerrainBatch();
+    if (stream && (m_streams[stream].vb != vb || m_streams[stream].stride != stride)) FlushBatches();
+    else if (!stream && (m_streams[0].vb != vb || m_streams[0].stride != stride)) FlushSkinBatch(); // per instance batch, not per section
     SetRef(m_streams[stream].vb, static_cast<VertexBuffer*>(vb));
     m_streams[stream].stride = stride;
     return S_OK;
@@ -1038,6 +1044,7 @@ HRESULT Device::GetStreamSource(UINT stream, ID8VertexBuffer** vb, UINT* stride)
 HRESULT Device::SetIndices(ID8IndexBuffer* ib, UINT baseVertex)
 {
     if (m_recordingStateBlock) return S_OK;
+    if (m_indices != ib || m_baseVertex != baseVertex) FlushSkinBatch();
     SetRef(m_indices, static_cast<IndexBuffer*>(ib));
     m_baseVertex = baseVertex;
     return S_OK;
@@ -1329,7 +1336,7 @@ void Device::BindPSCB(UINT s, UINT n, ID3D11Buffer* const* v)
 
 bool Device::PrepareDraw()
 {
-    FlushTerrainBatch(); // before this draw binds anything
+    FlushBatches(); // before this draw binds anything
     m_perf.enabled=g_config.performanceGPU;
     CpuPerformanceScope cpu(m_perf,0);
     CpuPerformanceScope detail(m_perf,Performance::CpuSetup);
@@ -1681,9 +1688,24 @@ HRESULT Device::DrawIndexedPrimitive(DWORD type, UINT minIndex, UINT numVertices
     m_drawFirstVertex=m_baseVertex+minIndex;
     if (m_terrainBatchOpen) {
         if (primCount && m_indices && AppendTerrainBatch(type, startIndex, primCount)) return S_OK;
-        FlushTerrainBatch();
+        FlushBatches();
     }
+    if (m_skinBatchOpen) {
+        if (primCount && m_indices && AppendSkinBatch(type, minIndex, numVertices, startIndex, primCount)) return S_OK;
+        FlushSkinBatch();
+    }
+    const UINT writeLo = m_vsWriteLo, writeHi = m_vsWriteHi; // PrepareDraw resets them
     if (!primCount || !m_indices || !PrepareDraw()) return S_OK;
+    if (m_trace && m_worldKind == 1) {
+        // What changes from one skinned draw to the next (for instancing trees and props).
+        auto hash = [&](int lo, int hi) { DWORD h = 0; for (int r = lo; r < hi; r++) for (int k = 0; k < 4; k++) h = h * 31 + *(const DWORD*)&m_vsConst[r][k]; return h; };
+        TraceSun("  skinned draw: type %lu vb %p/%u ib %p base %u min %u verts %u start %u prims %u vs %lx ps %lx tex %p %p %p %p "
+                 "written c%u-c%u c0-3 %08lx c4 %g %g %g %g c5-95 %08lx",
+                 type, (void*)m_streams[0].vb, m_streams[0].stride, (void*)m_indices, m_baseVertex, minIndex, numVertices,
+                 startIndex, primCount, m_vsHandle, m_psHandle, (void*)m_textures[0], (void*)m_textures[1], (void*)m_textures[2],
+                 (void*)m_textures[3], writeLo, writeHi, hash(0, 4), m_vsConst[4][0], m_vsConst[4][1], m_vsConst[4][2], m_vsConst[4][3],
+                 hash(5, 96));
+    }
     if (m_trace && m_worldKind == 2) {
         // What changes from one terrain section to the next (for merging their draws).
         DWORD consts = 0;
@@ -1699,6 +1721,7 @@ HRESULT Device::DrawIndexedPrimitive(DWORD type, UINT minIndex, UINT numVertices
     UINT count;
     D3D11_PRIMITIVE_TOPOLOGY topo;
     if (!DrawWithTopology(type, primCount, count, topo)) return D8ERR_INVALIDCALL;
+    if (StartSkinBatch(type, minIndex, numVertices, startIndex, primCount, writeLo, writeHi, count, topo)) return S_OK;
     const bool tess = BeginTessellation(type, topo);
     m_ctx->IASetPrimitiveTopology(topo);
     const DXGI_FORMAT fmt = m_indices->m_format == D8FMT_INDEX32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
@@ -1744,7 +1767,7 @@ HRESULT Device::DrawIndexedPrimitive(DWORD type, UINT minIndex, UINT numVertices
 
 HRESULT Device::DrawPrimitiveUP(DWORD type, UINT primCount, const void* data, UINT stride)
 {
-    FlushTerrainBatch();
+    FlushBatches();
     m_drawFirstVertex=0;
     if (!data || !primCount) return D8ERR_INVALIDCALL;
     UINT count;
@@ -1772,7 +1795,7 @@ HRESULT Device::DrawPrimitiveUP(DWORD type, UINT primCount, const void* data, UI
 HRESULT Device::DrawIndexedPrimitiveUP(DWORD type, UINT minIndex, UINT numVertices, UINT primCount,
                                        const void* indices, DWORD indexFmt, const void* data, UINT stride)
 {
-    FlushTerrainBatch();
+    FlushBatches();
     m_drawFirstVertex=0;
     if (!data || !indices || !primCount) return D8ERR_INVALIDCALL;
     UINT count;
@@ -1834,7 +1857,7 @@ void Device::LimitFrameRate()
 HRESULT Device::Present(const RECT*, const RECT*, HWND, const RGNDATA*)
 {
     if (!m_csmt.OnWorker()) hitch_sampler::FramePresented(); // threaded: the game thread reports in csmt_device.cpp
-    FlushTerrainBatch();
+    FlushBatches();
     m_perf.enabled=g_config.performanceGPU;
     m_perf.Begin(m_device.Get(),m_ctx.Get());
     m_perf.Tick((double)m_qpcFreq.QuadPart);
