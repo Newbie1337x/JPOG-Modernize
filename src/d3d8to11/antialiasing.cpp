@@ -110,8 +110,7 @@ void Device::ResolveTemporal()
     if(!EnsureTemporal() || !EnsureSceneCopy())return;
     PerformanceScope scope(m_perf,m_device.Get(),m_ctx.Get(),Performance::Temporal);
     if(m_taaFrame+1!=m_frame)m_taaValid=false;
-    float cameraChange=0;for(int r=0;r<4;r++)for(int c=0;c<4;c++)cameraChange+=std::fabs(m_waterViewProjection[r][c]-m_taaPrevVP[r][c]);
-    if(cameraChange>.5f)m_taaValid=false;
+    if(CameraCut(m_waterViewProjection,m_taaPrevVP,m_sun.camera,m_taaPrevCamera))m_taaValid=false;
     float jitterX=0,jitterY=0;TemporalJitter(jitterX,jitterY);
     TemporalConstants cb={};memcpy(cb.inverse,m_sun.clipToWorld,sizeof(cb.inverse));memcpy(cb.previous,m_taaPrevVP,sizeof(cb.previous));
     cb.screen[0]=1.f/m_taaW;cb.screen[1]=1.f/m_taaH;
@@ -132,7 +131,7 @@ void Device::ResolveTemporal()
     FullscreenPass(m_aaCopyPS.Get(),m_backBuffer->Rtv(),m_taaW,m_taaH);
     ID3D11ShaderResourceView* result=m_taaColorSRV[next].Get();m_ctx->PSSetShaderResources(0,1,&result);m_ctx->Draw(3,0);m_ctx->PSSetShaderResources(0,4,nulls);
     m_taaIndex=next;m_taaValid=true;m_taaFrame=m_frame;
-    memcpy(m_taaPrevVP,m_waterViewProjection,sizeof(m_taaPrevVP));m_taaPrevOffset[0]=-cb.screen[0];m_taaPrevOffset[1]=cb.screen[1];
+    memcpy(m_taaPrevVP,m_waterViewProjection,sizeof(m_taaPrevVP));memcpy(m_taaPrevCamera,m_sun.camera,sizeof(m_taaPrevCamera));m_taaPrevOffset[0]=-cb.screen[0];m_taaPrevOffset[1]=cb.screen[1];
     m_rtDirty=m_viewportDirty=true;m_lastVS=nullptr;m_lastPS=nullptr;m_lastLayout=nullptr;
     m_lastBlend=nullptr;m_lastDepth=nullptr;m_lastRaster=nullptr;
 }

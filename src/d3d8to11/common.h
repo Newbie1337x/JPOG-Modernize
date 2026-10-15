@@ -34,6 +34,7 @@ struct Config {
     int EffectiveVSync() const { return effectsEnabled ? syncInterval : 0; }
     int EffectiveAnisotropy() const { return effectsEnabled ? forceAnisotropy : 0; }
     bool alphaToCoverage = false; // [Renderer] AlphaToCoverage: smooth alpha-tested foliage under MSAA
+    float foliageMipAlpha = 0.25f; // [Renderer] FoliageMipAlpha: alpha-test alpha raised per mip level (0 = off)
     bool debugLayer = false;    // [Debug] D3D11DebugLayer
     bool dumpShaders = false;   // [Debug] DumpShaders (writes generated HLSL to d3d8to11_shaders\)
     bool sunLighting = true;        // [Lighting] Enabled: sun shadows

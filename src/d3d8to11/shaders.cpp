@@ -1135,7 +1135,10 @@ std::string SampleExpr(int stage, const BYTE* dims, const std::string& coord)
     return "float4(0, 0, 0, 1)";
 }
 
-std::string AlphaTest(BYTE func, BYTE a2c = 0)
+// mipAlpha: stage 0 is a 2D texture read at i.t0. Its averaged mips make alpha-tested leaves thinner
+// at every level, until they break into specks that flicker with the slightest camera move; the
+// tested alpha is raised by FoliageMipAlpha per level (the level from the uv derivatives).
+std::string AlphaTest(BYTE func, BYTE a2c = 0, bool mipAlpha = false)
 {
     // D3DCMPFUNC: 1 NEVER, 2 LESS, 3 EQUAL, 4 LESSEQUAL, 5 GREATER, 6 NOTEQUAL, 7 GREATEREQUAL, 8 ALWAYS.
     // Compared at 8-bit precision like the hardware does.
@@ -1146,7 +1149,17 @@ std::string AlphaTest(BYTE func, BYTE a2c = 0)
         // gives foliage soft edges; fully opaque inside, nothing below the threshold.
         return "  { float ref = alphaRef.x / 255.0; float w = max(fwidth(color.a), 1e-4);\n"
                "    color.a = saturate((color.a - ref) / w + 0.5); if (color.a <= 0) discard; }\n";
-    return std::string("  { int a = (int)round(saturate(color.a) * 255.0); int r = (int)alphaRef.x;\n")
+    std::string tested = "color.a";
+    std::string s;
+    if (mipAlpha && (func == 5 || func == 7) && g_config.foliageMipAlpha > 0) {
+        s += "  float mipAlpha = 1;\n"
+             "  { float2 size; tex0.GetDimensions(size.x, size.y);\n"
+             "    float2 dx = ddx(i.t0.xy * size), dy = ddy(i.t0.xy * size);\n"
+             "    float lod = 0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1e-8));\n"
+             + Fmt("    mipAlpha = 1 + max(lod, 0) * %.3f; }\n", g_config.foliageMipAlpha);
+        tested = "color.a * mipAlpha";
+    }
+    return s + "  { int a = (int)round(saturate(" + tested + ") * 255.0); int r = (int)alphaRef.x;\n"
          + "    if (!(" + cmp[func] + ")) discard; }\n";
 }
 
@@ -1350,7 +1363,7 @@ std::string TranslatePS(const DWORD* func, const PSVariant& v, std::string& erro
     }
     flush();
     s += "  float4 color = saturate(r0);\n";
-    s += AlphaTest(v.alphaFunc, v.a2c);
+    s += AlphaTest(v.alphaFunc, v.a2c, v.texDim[0] == 2);
     if (v.shadowOnly) s += "  return;\n}\n";
     else {
         if (v.water) s += "  color = ApplyWater(color,i,t0,t2.rgb);\n";

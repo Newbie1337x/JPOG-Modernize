@@ -65,6 +65,12 @@ void LoadConfig()
     g_config.applyGamma = GetPrivateProfileIntA("Renderer", "ApplyGammaRamp", 1, ini.c_str()) != 0;
     g_config.msaa = GetPrivateProfileIntA("Renderer", "MSAA", 8, ini.c_str());
     g_config.alphaToCoverage = GetPrivateProfileIntA("Renderer", "AlphaToCoverage", 0, ini.c_str()) != 0;
+    {
+        char value[64];
+        GetPrivateProfileStringA("Renderer", "FoliageMipAlpha", "0.25", value, sizeof(value), ini.c_str());
+        g_config.foliageMipAlpha = (float)atof(value);
+    }
+    if (!(g_config.foliageMipAlpha >= 0.0f && g_config.foliageMipAlpha <= 1.0f)) g_config.foliageMipAlpha = 0.25f;
     g_config.debugLayer = GetPrivateProfileIntA("Debug", "D3D11DebugLayer", 0, ini.c_str()) != 0;
     g_config.dumpShaders = GetPrivateProfileIntA("Debug", "DumpShaders", 0, ini.c_str()) != 0;
     g_config.sunLighting = GetPrivateProfileIntA("Lighting", "Enabled", 1, ini.c_str()) != 0;
@@ -311,6 +317,7 @@ void SaveConfig()
     putInt("Renderer", "ApplyGammaRamp", g_config.applyGamma);
     putInt("Renderer", "MSAA", g_config.msaa);
     putInt("Renderer", "AlphaToCoverage", g_config.alphaToCoverage);
+    putFloat("Renderer", "FoliageMipAlpha", g_config.foliageMipAlpha);
     putInt("Lighting", "Enabled", g_config.sunLighting);
     putInt("Lighting", "ShadowResolution", g_config.shadowResolution);
     putFloat("Lighting", "ShadowDistance", g_config.shadowDistance);

@@ -126,7 +126,7 @@ struct Device::Fsr31State {
     ComPtr<ID3D11ComputeShader> inputs;
     ComPtr<ID3D11PixelShader> copy;
     ComPtr<ID3D11Buffer> cb;
-    float previousVP[4][4]={};ULONGLONG tick=0;
+    float previousVP[4][4]={},previousCamera[3]={};ULONGLONG tick=0;
     std::unique_ptr<FrameGenState> fg;
     ~Fsr31State(){fg.reset();if(created)ffxFsr3UpscalerContextDestroy(context.get());free(scratch);}
 };
@@ -183,8 +183,12 @@ bool Device::ResolveFsr31(){
     if(!EnsureFsr31() || !EnsureSceneCopy())return false;
     auto& s=*m_fsr31;PerformanceScope scope(m_perf,m_device.Get(),m_ctx.Get(),Performance::Temporal);
     bool reset=!m_taaValid || m_fsr31Frame+1!=m_frame;
-    float change=0;for(int r=0;r<4;r++)for(int c=0;c<4;c++)change+=std::fabs(m_waterViewProjection[r][c]-s.previousVP[r][c]);
-    reset|=change>.5f;
+    reset|=CameraCut(m_waterViewProjection,s.previousVP,m_sun.camera,s.previousCamera);
+    m_temporalResets+=reset;
+    if(++m_temporalFrames>=600){
+        if(m_temporalResetLogs<30){++m_temporalResetLogs;Log("FSR31: %u history resets in the last %u frames",m_temporalResets,m_temporalFrames);}
+        m_temporalResets=m_temporalFrames=0;
+    }
     float jx=0,jy=0;Fsr31Jitter(jx,jy);
     Inputs cb={};memcpy(cb.inverse,m_sun.clipToWorld,sizeof(cb.inverse));memcpy(cb.previous,s.previousVP,sizeof(cb.previous));
     cb.screen[0]=float(s.w);cb.screen[1]=float(s.h);cb.screen[2]=-1.f/s.w+jx;cb.screen[3]=1.f/s.h+jy;
@@ -240,7 +244,7 @@ bool Device::ResolveFsr31(){
         FullscreenPass(s.copy.Get(),m_backBuffer->Rtv(),s.w,s.h);
         auto* output=g_config.frameGenerationDebug && m_frameGenReady && s.fg ? s.fg->generated.srv.Get():s.output.srv.Get();
         m_ctx->PSSetShaderResources(0,1,&output);m_ctx->Draw(3,0);m_ctx->PSSetShaderResources(0,16,none);
-        memcpy(s.previousVP,m_waterViewProjection,sizeof(s.previousVP));s.tick=now;m_taaValid=true;m_fsr31Frame=m_frame;
+        memcpy(s.previousVP,m_waterViewProjection,sizeof(s.previousVP));memcpy(s.previousCamera,m_sun.camera,sizeof(s.previousCamera));s.tick=now;m_taaValid=true;m_fsr31Frame=m_frame;
     }
     m_rtDirty=m_viewportDirty=true;m_lastVS=nullptr;m_lastPS=nullptr;m_lastLayout=nullptr;
     m_lastBlend=nullptr;m_lastDepth=nullptr;m_lastRaster=nullptr;

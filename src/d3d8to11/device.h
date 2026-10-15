@@ -304,6 +304,21 @@ private:
     UINT64 m_frame = 0;
     bool EnsureTemporal();
     struct Fsr31State;
+    // Temporal AA / FSR history reset: a camera cut is a jump of the eye or a sharp turn between two
+    // frames. (Summing the change of every view-projection entry also counted the translation
+    // column, hundreds of units in world space, so any camera move reset the history each frame.)
+    static bool CameraCut(const float vp[4][4], const float prevVP[4][4], const float cam[3], const float prevCam[3])
+    {
+        float d2 = 0, f = 0, pf = 0, dot = 0;
+        for (int k = 0; k < 3; k++) {
+            d2 += (cam[k] - prevCam[k]) * (cam[k] - prevCam[k]);
+            f += vp[3][k] * vp[3][k]; pf += prevVP[3][k] * prevVP[3][k]; dot += vp[3][k] * prevVP[3][k];
+        }
+        if (!(f > 1e-12f && pf > 1e-12f)) return true;
+        return d2 > 40.0f * 40.0f || dot / std::sqrt(f * pf) < 0.94f; // 40 units or about 20 degrees
+    }
+    float m_taaPrevCamera[3] = {};
+    UINT m_temporalResets = 0, m_temporalFrames = 0, m_temporalResetLogs = 0;
     Fsr31State* m_fsr31=nullptr;
     bool m_fsr31Failed=false;
     UINT64 m_fsr31Frame=~UINT64(0);
