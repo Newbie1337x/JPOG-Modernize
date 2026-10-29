@@ -350,9 +350,56 @@ private:
     void EvaluateTimeOfDay();
     void TickClock();
     LARGE_INTEGER m_clockLast = {};
+    // Volumetric clouds (sun.cpp kCloudMain): half-resolution colour + transmittance of the cloud
+    // layer on sky pixels, composited by the resolve; a tileable 3D noise shapes them.
+    ComPtr<ID3D11PixelShader> m_cloudPS, m_cloudPSMS;
+    ComPtr<ID3D11Texture3D> m_cloudNoise;
+    ComPtr<ID3D11ShaderResourceView> m_cloudNoiseSRV, m_cloudSRV;
+    ComPtr<ID3D11Texture2D> m_cloudTex;
+    ComPtr<ID3D11RenderTargetView> m_cloudRTV;
+    ComPtr<ID3D11SamplerState> m_cloudWrap;
+    UINT m_cloudW = 0, m_cloudH = 0;
+    bool m_cloudFault = false;
+    double m_cloudTime = 0; // seconds of cloud drift
+    // Cloud shadow map (kCloudShadowMain): transmittance toward the key light of the cloud layer,
+    // seen from above over kCloudShadowSize units around the camera. Shades the ground and lights
+    // the air for the volumetric shafts.
+    static const UINT kCloudShadowRes = 512;
+    ComPtr<ID3D11PixelShader> m_cloudShadowPS;
+    ComPtr<ID3D11Texture2D> m_cloudShadowTex;
+    ComPtr<ID3D11RenderTargetView> m_cloudShadowRTV;
+    ComPtr<ID3D11ShaderResourceView> m_cloudShadowSRV;
+    bool EnsureClouds();
+    // God rays (sun.cpp kRaysMain): half-resolution radial march toward the light's place on
+    // screen over the sky showing through (clouds' transmittance), added by the resolve.
+    ComPtr<ID3D11PixelShader> m_raysPS, m_raysPSMS;
+    ComPtr<ID3D11Texture2D> m_raysTex;
+    ComPtr<ID3D11RenderTargetView> m_raysRTV;
+    ComPtr<ID3D11ShaderResourceView> m_raysSRV;
+    UINT m_raysW = 0, m_raysH = 0;
+    bool m_raysFault = false;
+    bool EnsureRays();
+    // Volumetric fog (sun.cpp kFogMain): half-resolution in-scattered light + transmittance.
+    ComPtr<ID3D11PixelShader> m_fogPS, m_fogPSMS;
+    ComPtr<ID3D11Texture2D> m_fogTex;
+    ComPtr<ID3D11RenderTargetView> m_fogRTV;
+    ComPtr<ID3D11ShaderResourceView> m_fogSRV;
+    UINT m_fogW = 0, m_fogH = 0;
+    bool m_fogFault = false;
+    bool EnsureFog();
+    float m_fogHillFloor = 0, m_fogHillTop = 0; // terrain height percentiles (park floor, highest hills)
+    ULONGLONG m_fogHillScan = ~0ull;            // m_terrainRefresh they were taken at
+    // Fog pools (kFogPoolMain): per terrain sample, the height the fog fills up to and its strength.
+    ComPtr<ID3D11PixelShader> m_fogPoolPS;
+    ComPtr<ID3D11Texture2D> m_fogPoolTex;
+    ComPtr<ID3D11RenderTargetView> m_fogPoolRTV;
+    ComPtr<ID3D11ShaderResourceView> m_fogPoolSRV;
+    float m_fogPoolHills = -1;                  // VolumeHills the pools were made with
+    bool m_fogPoolDirty = true;
     bool ProceduralSkyActive() const { return g_config.replaceLighting && g_config.proceduralSky; }
     struct TimeOfDay { bool active = false; float dir[3] = {}, light[3] = {}, ambient[3] = {}, sky[3] = {}, fog[3] = {}, surface[3] = {}, sunDir[3] = {}; float sunLight = 1, procSky = 0, moon = 0, rim = 0, exposure = 1, dayW = 1, sheen = 0, shadowStrength = 0, shadowTint[3] = {};
-        float moonDir[3] = {}, moonAge = 0, moonLit = 0, moonAbove = 0, moonGlitter = 0, starAngle = 0; } m_tod;
+        float golden = 0, glowColor[3] = {}, moonDir[3] = {}, moonAge = 0, moonLit = 0, moonAbove = 0, moonGlitter = 0, starAngle = 0;
+        float cloudKey[3] = {}, cloudKeyDir[3] = {}, cloudSky[3] = {}, cloudGround[3] = {}; } m_tod;
     void BindTerrainHeights();
     bool TerrainHeightsActive() const { return m_terrainReady && m_terrainHeightSRV && g_config.heightfieldLighting; }
     ComPtr<ID3D11Texture2D> m_terrainHeightTex;
@@ -713,6 +760,7 @@ private:
     UINT m_pusherCount = 0, m_lastBones = 0;
     bool m_grassUploaded = false;
     bool m_grassApplied = false;
+    float m_shadowSunDir[3] = {}; bool m_shadowSunValid = false; // the stepped shadow direction ([Lighting] ShadowStep)
     float m_grassFar = 0, m_grassFarNext = 0; // farthest grass patch drawn (xz), last frame / this frame
     UINT m_vsWriteLo = 0, m_vsWriteHi = 0;
     size_t m_vsRingValid = 0; // bytes of the current ring window copied from m_vsConst
@@ -753,6 +801,29 @@ private:
     ComPtr<ID3D11Texture2D> m_waterDepthCopy, m_waterColorCopy;
     ComPtr<ID3D11ShaderResourceView> m_waterDepthSRV, m_waterColorSRV;
     ComPtr<ID3D11SamplerState> m_waterSampler;
+    // FFT ocean (ocean.cpp): looping wave slopes, built on first use. Bound at t25 / s12.
+    static const int kOceanSize = 128, kOceanFrames = 48, kOceanMips = 8;
+    static constexpr float kOceanPeriod = 12.0f;
+    ComPtr<ID3D11Texture2D> m_oceanTex;
+    ComPtr<ID3D11ShaderResourceView> m_oceanSRV;
+    ComPtr<ID3D11SamplerState> m_oceanSampler;
+    bool m_oceanFault = false;
+    bool EnsureOcean();
+    // The time-of-day sky the water reflects (sun.cpp kSkyEnvMain): 128x64 over the upper
+    // hemisphere with mips for rough water, drawn by the resolve, read by next frame's water (t26).
+    ComPtr<ID3D11Texture2D> m_skyEnvTex;
+    ComPtr<ID3D11RenderTargetView> m_skyEnvRTV;
+    ComPtr<ID3D11ShaderResourceView> m_skyEnvSRV;
+    ComPtr<ID3D11PixelShader> m_skyEnvPS;
+    bool m_skyEnvFault = false, m_skyEnvReady = false;
+    bool EnsureSkyEnv();
+    // Distant islands (islands.cpp): eroded mountain height fields, raymarched by the resolve on the
+    // sky past the sea's edge (sun.cpp DistantIslands). Bound at t11.
+    static const int kIslandSize = 512, kIslandShapes = 4;
+    ComPtr<ID3D11Texture2D> m_islandTex;
+    ComPtr<ID3D11ShaderResourceView> m_islandSRV;
+    bool m_islandFault = false;
+    bool EnsureIslands();
     bool m_waterDraw = false, m_waterSnapshotReady = false;
     bool m_waterShaderDraw = false; // current draw uses the water pixel shader (set before UpdateSun)
     UINT m_waterW = 0, m_waterH = 0, m_waterSamples = 0;

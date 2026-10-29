@@ -81,6 +81,14 @@ struct Config {
     float nightAmbient[3] = { 0.346f, 0.397f, 0.46f };
     float duskAmbient[3] = { 0.62f, 0.68f, 0.88f };
     float lowSunColor[3] = { 1.0f, 0.55f, 0.24f };
+    // [TimeOfDay] TerrainTint / TerrainMatch: the bare terrain past the grass is a pure, saturated green
+    // next to the yellowish grass blades; its green parts are tinted toward them (output colour
+    // multiplier, applied by TerrainMatch 0..1; earth and rock untouched)
+    float terrainTint[3] = { 1.45f, 1.03f, 1.25f };
+    float terrainMatch = 1.0f;
+    // [TimeOfDay] GrassTint: the grass blades lit by the sun turn to straw; a multiplier on them (by
+    // day, faded out at night like TerrainTint) so they meet the tinted terrain in a fresher green
+    float grassTint[3] = { 0.84f, 1.08f, 0.90f };
     float maxExposure = 1.0f;
     float nightSky = 1.35f;         // brightness of the procedural night sky
     float nightExposure = 0.6f;     // exposure under the moon (after eye adaptation)
@@ -95,6 +103,50 @@ struct Config {
     float timeOfDayDay = 3.0f;      // [TimeOfDay] Day: day of the moon cycle (3 with the default cycle: full moon at midnight)
     float moonlessLight = 0.4f;     // [TimeOfDay] MoonlessLight: night light without the moon (sky glow), share of a full moon's
     float sunDisc = 1.0f;           // [TimeOfDay] SunDisc: brightness of the sun's disc in the sky
+    float sunGlow = 1.0f;           // [TimeOfDay] SunGlow: the night's bright outlines by day, in the sun's colour (strongest at golden hour)
+    // Day colour, after the filmic curve and faded out toward night (sun.cpp kResolveMain): the curve
+    // crushes the game's dark greens and saturates them; by day the picture wants to be airy.
+    float dayBrightness = 1.08f;    // [TimeOfDay] DayBrightness
+    float dayLift = 0.25f;          // [TimeOfDay] DayLift: raises the darks (less contrast), 0 = the curve as is
+    float daySaturation = 0.85f;    // [TimeOfDay] DaySaturation
+    // By day these replace ShadowStrength, SunBoost and AOStrength (which keep the dusk and night
+    // look), blended by the day weight
+    float dayShadowStrength = 0.62f; // [TimeOfDay] DayShadowStrength
+    float daySunBoost = 0.30f;       // [TimeOfDay] DaySunBoost
+    float dayAO = 0.85f;             // [TimeOfDay] DayAO
+    // [Clouds] volumetric cloud layer, ray marched on sky pixels at half resolution (sun.cpp kCloudMain)
+    bool clouds = true;             // [Clouds] Enabled (with the time of day)
+    float cloudCoverage = 0.45f;    // [Clouds] Coverage: share of the sky covered
+    float cloudDensity = 1.0f;      // [Clouds] Density
+    float cloudHeight = 600.0f;     // [Clouds] Height: cloud base above the sea (world units)
+    float cloudThickness = 700.0f;  // [Clouds] Thickness
+    float cloudWind = 8.0f;         // [Clouds] Wind: drift (world units per second)
+    // [Fog] atmospheric perspective (with the time of day): the air between the camera and the
+    // world, by distance and thicker low down, in the colour of the sky toward that direction and
+    // warmer toward the sun (sun.cpp resolve)
+    bool fog = true;                // [Fog] Enabled
+    float fogDensity = 0.00025f;    // [Fog] Density: per world unit, everywhere
+    float fogHeightDensity = 0.0004f; // [Fog] HeightDensity: per world unit at FogBase, fading upward
+    float fogHeightFalloff = 30.0f; // [Fog] HeightFalloff: height over which the low fog thins to a third
+    float fogBase = 0.0f;           // [Fog] Base: height of the low fog's floor (world units above y = 0)
+    float fogSun = 0.6f;            // [Fog] SunScatter: warm glow of the air toward the sun
+    // [Fog] volumetric fog: pools in the hollows and valleys between the hills (not on their slopes
+    // or tops, not on the flat park),
+    // patchy and drifting, lit by the sun or moon through the shadows of trees, hills and clouds
+    // (sun.cpp kFogMain; needs the terrain height field of the replacement lighting)
+    bool volumeFog = true;          // [Fog] Volumetric
+    float volumeDensity = 0.04f;    // [Fog] VolumeDensity: per world unit inside a pool
+    float volumeHeight = 8.0f;      // [Fog] VolumeHeight: softness of the pools' surface (world units)
+    float volumeHills = 0.35f;      // [Fog] VolumeHills: how high the hills around a hollow must rise, between the park's floor (0) and its highest hills (1)
+    float volumePatches = 0.7f;     // [Fog] VolumePatches: 0 = even layer, 1 = drifting banks with gaps
+    bool godRays = true;            // [Fog] GodRays: rays from the sun (or the moon) through clouds and trees, from its true place on screen
+    float godRayStrength = 1.0f;    // [Fog] GodRayStrength
+    // [Islands] distant islands on the horizon (sun.cpp DistantIslands), drawn on the sky over the
+    // sea's edge: Enabled, Height (multiplier on their size), Haze (0 = clear, up to 3)
+    bool islands = true;
+    float islandHeight = 1.0f, islandHaze = 0.6f;
+    float islandClouds = 0.6f; // [Islands] Clouds: big clouds drifting past them (0 = none, up to 2)
+    float horizonHaze = 0.55f;      // [Clouds] HorizonHaze: share of the view distance where the far world starts fading into the sky (1 = off)
     bool relightTonemap = true;     // [Lighting] RelightTonemap: soft shoulder for values above 0.8
     bool sunFromGame = true;        // [Lighting] SunSource=game (else SunX/Y/Z)
     bool grassShadows = false;      // [Lighting] GrassShadows
@@ -107,6 +159,9 @@ struct Config {
     bool shadowCache = true;
     int shadowCacheFrames = 4;
     float shadowCacheNear = 100.0f;
+    // [Lighting] ShadowStep: the shadows' sun direction moves in steps of this many degrees as the
+    // clock runs (0 = every frame): a light box turning every frame makes every shadow edge shimmer
+    float shadowStep = 0.4f;
     float shadowDistance = 250.0f;  // farthest point from the camera that receives shadows
     float sunAmbient = 0.60f, sunDirect = 0.55f, shadowStrength = 0.25f;
     float sunMinElevation = 0.35f;  // minimum sun height (sin of elevation), avoids endless shadows
@@ -142,6 +197,14 @@ struct Config {
     int waterSurfaceMode=0; // 0 native connectivity, 1 force lagoon, 2 force ocean
     float waterLagoonFoam=.03f,waterLagoonRipples=.25f,waterOceanRipples=1.4f;
     float waterSwellAmplitude=.65f,waterSwellLength=1.f,waterSwellCoastDepth=3.f,waterCrestFoam=.35f;
+    // [Water] Ocean: FFT wave slopes (ocean.cpp) instead of the noise ripples; OceanScale: the
+    // larger tile's size in world units; OceanStrength: slope multiplier; SunGlitter: brightness of
+    // the sun's and moon's GGX reflection; SkyReflection: the water mirrors the time-of-day sky
+    bool waterOcean=true, waterSkyReflection=true;
+    float waterOceanScale=48.f, waterOceanStrength=1.f, waterSunGlitter=1.5f;
+    // [Water] OceanColor: the deep sea's own colour (r,g,b); SkyTint: multiplier on the reflected
+    // sky (its pale horizon haze turns the sea grey otherwise)
+    float waterOceanColor[3]={.03f,.13f,.28f}, waterSkyTint[3]={.82f,.93f,1.05f};
     bool performanceLog=true, performanceGPU=true;
     bool threaded=false;    // [Performance] Threaded: Direct3D 8 calls run on a render thread (csmt.h); needs a restart
     bool constantRing=true; // [Performance] ConstantRing: vertex constants through a no-overwrite ring (0 = one buffer, discard)

@@ -134,6 +134,10 @@ struct SunConstants {
     float nightGrade[4];    // night colour fade: tint rgb, strength (world draws, before emission)
     float grassThin[4];     // distant grass: thinning start, end (xz distance), clumps kept at the end, w = 1 + alpha compensation on grass draws
     float moonDir[4];       // time of day: toward the moon (renderer Y-down), w = moonlight on water (phase, above the horizon, night)
+    float rimStyle[4];      // rim light: thin bright line weight (moon at night, low sun by day)
+    float terrainTint[4];   // terrain: multiplier on its green parts (toward the grass colour), w = strength
+    float grassTint[4];     // grass blades: colour multiplier, w = strength
+    float skySun[4];        // toward the true sun in the sky (renderer Y-down; not raised like sunDirection), w = its glitter on water
 };
 
 struct WaterConstants {
@@ -148,6 +152,10 @@ struct WaterConstants {
     float optical[4]; // reflection, transparency, distortion pixels, time
     float misc[4];    // debug mode, reserved
     float motion[4];  // ripple count, interaction strength, unscaled time, reserved
+    float ocean[4];   // FFT ocean on, tile size (world), slope strength, loop period (s)
+    float env[4];     // sky reflection on, its last mip, FFT frame count, sun/moon glitter brightness
+    float deep[4];    // the deep sea's colour
+    float skyTint[4]; // multiplier on the reflected time-of-day sky
     float contacts[64][4]; // x, feet Y (downward positive), z, birth time
     float rings[64][4];    // amplitude, initial radius, expansion speed, lifetime
 };

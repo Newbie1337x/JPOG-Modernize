@@ -90,6 +90,18 @@ void Device::PrepareWaterDraw()
         c.misc[0]=(float)g_config.waterDebug;
         c.misc[1]=g_config.waterRipples;
         c.motion[1]=g_config.waterInteractionStrength;
+        const bool ocean=g_config.waterOcean && EnsureOcean();
+        c.ocean[0]=ocean ? 1.f:0.f; c.ocean[1]=g_config.waterOceanScale;
+        c.ocean[2]=g_config.waterOceanStrength; c.ocean[3]=kOceanPeriod;
+        c.env[0]=g_config.waterSkyReflection && m_skyEnvReady && m_tod.active ? 1.f:0.f;
+        c.env[1]=6; c.env[2]=(float)kOceanFrames; c.env[3]=g_config.waterSunGlitter;
+        for(int k=0;k<3;k++){c.deep[k]=g_config.waterOceanColor[k];c.skyTint[k]=g_config.waterSkyTint[k];}
+        if(ocean || c.env[0]>0) {
+            // Above the binding cache's range: set directly, only for water draws.
+            ID3D11ShaderResourceView* extra[2]={ocean ? m_oceanSRV.Get():nullptr,c.env[0]>0 ? m_skyEnvSRV.Get():nullptr};
+            m_ctx->PSSetShaderResources(25,2,extra);
+            if(ocean) m_ctx->PSSetSamplers(12,1,m_oceanSampler.GetAddressOf());
+        }
         c.motion[2]=m_waterFrameTime;
         if(g_config.waterInteraction) {
             unsigned n=0;

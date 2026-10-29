@@ -34,12 +34,13 @@ static bool InfoSafe(const Bridge& b,Info& i){
         return i.w>=2 && i.h>=2 && i.w<=4096 && i.h<=4096 && UINT64(i.w)*i.h<=1048576;
     }__except(EXCEPTION_EXECUTE_HANDLER){return false;}
 }
+// Samples first .. first + count - 1 (row-major) into out[0 .. count - 1].
 static bool HeightsSafe(const Bridge& b,const Info& i,float* out,unsigned first,unsigned count){
     __try{
         for(unsigned n=first;n<first+count;n++){
             float h=b.sample(i.field,n%i.w,n/i.w);
             if(!std::isfinite(h) || std::fabs(h)>100000)return false;
-            out[n]=h;
+            out[n-first]=h;
         }
         return true;
     }__except(EXCEPTION_EXECUTE_HANDLER){return false;}

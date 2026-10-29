@@ -245,7 +245,7 @@ void Device::DrawOverlay()
         ImGui::TextDisabled("Ajustes en vivo | Insert abre y cierra este panel");
         ImGui::Separator();
         static int tab = 0;
-        const char* tabs[] = { "Graficos", "Agua y pasto", "Camara", "Rendimiento", "Experimental" };
+        const char* tabs[] = { "Graficos", "Agua y pasto", "Camara", "Rendimiento", "Experimental", "Cielo y clima" };
         if (ImGui::BeginTabBar("Categorias", ImGuiTabBarFlags_FittingPolicyScroll)) {
             for (int i = 0; i < IM_ARRAYSIZE(tabs); ++i) {
                 if (ImGui::BeginTabItem(tabs[i])) { tab = i; ImGui::EndTabItem(); }
@@ -363,6 +363,8 @@ void Device::DrawOverlay()
         }
 
         if (tab == 0 && ImGui::CollapsingHeader("Direccion del sol")) {
+            ImGui::SliderFloat("Paso de las sombras", &g_config.shadowStep, 0, 2, "%.2f grados");
+            ImGui::SetItemTooltip("Con el reloj corriendo, las sombras siguen al sol a saltitos de estos grados en vez de girar cada cuadro (eso las hace temblar). 0 = cada cuadro.");
             int source = g_config.sunFromGame ? 0 : 1;
             bool changed = ImGui::RadioButton("Seguir al juego", &source, 0);
             ImGui::SameLine();
@@ -383,8 +385,10 @@ void Device::DrawOverlay()
                 g_config.sunMinElevation = std::sin(minDeg * 3.14159265f / 180);
             ImGui::SetItemTooltip("Un sol mas bajo genera sombras mas largas. Este valor limita su elevacion minima.");
             ImGui::Text("Direccion solar: %.2f %.2f %.2f", m_sun.direction[0], -m_sun.direction[1], m_sun.direction[2]);
+        }
+        if (tab == 5 && ImGui::CollapsingHeader("Hora y luna", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Dia y noche (en pruebas)", &g_config.timeOfDay);
-            ImGui::SetItemTooltip("Mueve el sol y la luna. Funciona mejor con la iluminacion por pixel de la pestana Experimental.");
+            ImGui::SetItemTooltip("Mueve el sol y la luna. Funciona mejor con la iluminacion por pixel de la pestana Experimental. Las nubes y la niebla lo necesitan.");
             ImGui::BeginDisabled(!g_config.timeOfDay);
             int hh = (int)g_config.timeOfDayHour, mm = (int)((g_config.timeOfDayHour - hh) * 60);
             char label[32]; sprintf_s(label, "%02d:%02d", hh, mm);
@@ -406,7 +410,60 @@ void Device::DrawOverlay()
             }
             ImGui::EndDisabled();
         }
-        if (tab == 0 && ImGui::CollapsingHeader("Dia y noche: ajustes avanzados")) {
+        if (tab == 5 && ImGui::CollapsingHeader("Islas lejanas", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Islas en el horizonte", &g_config.islands);
+            ImGui::BeginDisabled(!g_config.islands);
+            ImGui::SliderFloat("Altura de las islas", &g_config.islandHeight, 0.2f, 4, "x%.2f");
+            ImGui::SliderFloat("Bruma sobre las islas", &g_config.islandHaze, 0, 3, "%.2f");
+            ImGui::SliderFloat("Nubes en las islas", &g_config.islandClouds, 0, 2, "%.2f");
+            ImGui::EndDisabled();
+        }
+        if (tab == 5 && ImGui::CollapsingHeader("Nubes", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::BeginDisabled(!g_config.timeOfDay);
+            ImGui::Checkbox("Nubes volumetricas", &g_config.clouds);
+            ImGui::SetItemTooltip("Capa de nubes calculada solo donde se ve el cielo, a media resolucion.");
+            ImGui::BeginDisabled(!g_config.clouds);
+            ImGui::SliderFloat("Cobertura de nubes", &g_config.cloudCoverage, 0, 1, "%.2f");
+            ImGui::SliderFloat("Densidad de nubes", &g_config.cloudDensity, 0.05f, 4, "%.2f");
+            ImGui::SliderFloat("Altura de nubes", &g_config.cloudHeight, 50, 5000, "%.0f");
+            ImGui::SliderFloat("Grosor de nubes", &g_config.cloudThickness, 50, 5000, "%.0f");
+            ImGui::SliderFloat("Viento de nubes", &g_config.cloudWind, 0, 200, "%.0f");
+            ImGui::SliderFloat("Bruma del horizonte", &g_config.horizonHaze, 0.05f, 1, "%.2f");
+            ImGui::SetItemTooltip("Desde que parte de la distancia visible lo lejano se funde con el cielo (1 = apagado).");
+            ImGui::Checkbox("Haces de luz entre las nubes", &g_config.shafts);
+            ImGui::SetItemTooltip("Haces volumetricos: el aire iluminado entre las sombras de las nubes, visibles desde cualquier angulo. Intensidad en Graficos, rayos de luz.");
+            ImGui::EndDisabled();
+            ImGui::EndDisabled();
+        }
+        if (tab == 5 && ImGui::CollapsingHeader("Niebla atmosferica", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::BeginDisabled(!g_config.timeOfDay);
+            ImGui::Checkbox("Niebla encendida", &g_config.fog);
+            ImGui::SetItemTooltip("Lo lejano toma el color del cielo, mas en lo bajo (valles, mar) y mas calido hacia el sol.");
+            ImGui::BeginDisabled(!g_config.fog);
+            ImGui::SliderFloat("Densidad de niebla", &g_config.fogDensity, 0, 0.003f, "%.5f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("Niebla baja", &g_config.fogHeightDensity, 0, 0.01f, "%.5f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("Altura de niebla baja", &g_config.fogHeightFalloff, 1, 300, "%.0f");
+            ImGui::SliderFloat("Piso de niebla", &g_config.fogBase, -100, 100, "%.0f");
+            ImGui::SliderFloat("Brillo hacia el sol", &g_config.fogSun, 0, 4, "%.2f");
+            ImGui::EndDisabled();
+            ImGui::Checkbox("Niebla volumetrica", &g_config.volumeFog);
+            ImGui::SetItemTooltip("Niebla que se junta en los huecos y valles entre los cerros, iluminada por el sol o la luna a traves de las sombras.");
+            ImGui::BeginDisabled(!g_config.volumeFog);
+            ImGui::SliderFloat("Densidad volumetrica", &g_config.volumeDensity, 0, 0.5f, "%.4f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("Suavidad del borde", &g_config.volumeHeight, 1, 60, "%.1f");
+            ImGui::SliderFloat("Desde que altura", &g_config.volumeHills, 0, 1, "%.2f");
+            ImGui::SetItemTooltip("Que tan altos tienen que ser los cerros alrededor de un hueco: 0 = el piso del parque, 1 = los cerros mas altos.");
+            ImGui::SliderFloat("Bancos de niebla", &g_config.volumePatches, 0, 1, "%.2f");
+            ImGui::SetItemTooltip("0 = capa pareja, 1 = bancos que se mueven con huecos.");
+            ImGui::EndDisabled();
+            ImGui::Checkbox("Rayos del sol y la luna", &g_config.godRays);
+            ImGui::SetItemTooltip("Rayos desde la posicion real del sol (o la luna) donde el cielo asoma entre nubes, arboles y cerros.");
+            ImGui::BeginDisabled(!g_config.godRays);
+            ImGui::SliderFloat("Intensidad de los rayos", &g_config.godRayStrength, 0, 8, "%.2f");
+            ImGui::EndDisabled();
+            ImGui::EndDisabled();
+        }
+        if (tab == 5 && ImGui::CollapsingHeader("Dia y noche: ajustes avanzados")) {
             ImGui::TextDisabled("Noche");
             ImGui::ColorEdit3("Color de la luna", g_config.moonColor, ImGuiColorEditFlags_Float);
             ImGui::SliderFloat("Luz lunar", &g_config.moonIntensity, 0, 3, "%.2f");
@@ -427,6 +484,17 @@ void Device::DrawOverlay()
             ImGui::SliderFloat("Luz sin luna", &g_config.moonlessLight, 0, 1, "%.2f");
             ImGui::SetItemTooltip("Luz de la noche cuando la luna esta baja o es fina, en proporcion a la luna llena.");
             ImGui::SliderFloat("Disco solar", &g_config.sunDisc, 0, 4, "%.2f");
+            ImGui::SliderFloat("Brillo dorado", &g_config.sunGlow, 0, 4, "%.2f");
+            ImGui::SetItemTooltip("De dia el sol marca los bordes de hojas, piel y pasto como la luna de noche, con su color. Mas fuerte al amanecer y al atardecer.");
+            ImGui::TextDisabled("Color de dia (la noche no cambia)");
+            ImGui::SliderFloat("Brillo de dia", &g_config.dayBrightness, 0.5f, 2, "%.2f");
+            ImGui::SliderFloat("Levantar oscuros", &g_config.dayLift, 0, 1, "%.2f");
+            ImGui::SetItemTooltip("Aclara las zonas oscuras (pasto, sombras) y baja el contraste. 0 = como antes.");
+            ImGui::SliderFloat("Saturacion de dia", &g_config.daySaturation, 0, 2, "%.2f");
+            ImGui::SliderFloat("Sombras de dia", &g_config.dayShadowStrength, 0, 1, "%.2f");
+            ImGui::SetItemTooltip("Intensidad de las sombras de dia. La de 'Sombras solares' queda para el atardecer y la noche.");
+            ImGui::SliderFloat("Luz solar de dia", &g_config.daySunBoost, 0, 1, "%.2f");
+            ImGui::SliderFloat("Oclusion de dia", &g_config.dayAO, 0, 1, "%.2f");
             ImGui::TextDisabled("Amanecer y atardecer");
             ImGui::ColorEdit3("Color del sol bajo", g_config.lowSunColor, ImGuiColorEditFlags_Float);
             ImGui::ColorEdit3("Ambiente del atardecer", g_config.duskAmbient, ImGuiColorEditFlags_Float);
@@ -486,6 +554,15 @@ void Device::DrawOverlay()
             ImGui::SliderFloat("Espuma de lagunas",&g_config.waterLagoonFoam,0,1,"x%.2f");
             ImGui::SliderFloat("Ondas de lagunas",&g_config.waterLagoonRipples,0,2,"x%.2f");
             ImGui::SliderFloat("Ondas del oceano",&g_config.waterOceanRipples,0,3,"x%.2f");
+            ImGui::Checkbox("Oceano FFT",&g_config.waterOcean);
+            ImGui::SetItemTooltip("Olas de un espectro de oleaje real (como los juegos actuales) en vez del ruido.");
+            ImGui::SliderFloat("Tamano de las olas",&g_config.waterOceanScale,8,400,"%.0f unidades");
+            ImGui::SliderFloat("Fuerza de las olas",&g_config.waterOceanStrength,0,3,"x%.2f");
+            ImGui::Checkbox("Reflejar el cielo",&g_config.waterSkyReflection);
+            ImGui::SetItemTooltip("El agua refleja el cielo de la hora del dia (azul, atardecer, noche) en vez de la textura original.");
+            ImGui::SliderFloat("Brillo del sol en el agua",&g_config.waterSunGlitter,0,10,"%.2f");
+            ImGui::ColorEdit3("Color del mar",g_config.waterOceanColor,ImGuiColorEditFlags_Float);
+            ImGui::ColorEdit3("Tinte del cielo reflejado",g_config.waterSkyTint,ImGuiColorEditFlags_Float|ImGuiColorEditFlags_HDR);
             ImGui::SliderFloat("Altura del oleaje",&g_config.waterSwellAmplitude,0,2,"%.2f unidades");
             ImGui::SetItemTooltip("Desplaza vertices del oceano; 0 desactiva. Auto: frentes hacia la costa segun distancia a tierra. Lagunas sin desplazamiento. Limitado por la malla original.");
             ImGui::SliderFloat("Longitud de olas",&g_config.waterSwellLength,.5f,4,"x%.2f");
@@ -697,6 +774,11 @@ void Device::DrawOverlay()
             ImGui::SliderFloat("Exposicion cinematografica", &g_config.filmicExposure, 0.2f, 4, "%.2f");
             ImGui::SliderFloat("Saturacion del pasto", &g_config.grassSaturation, 0, 2, "%.2f");
             ImGui::SliderFloat("Brillo del pasto", &g_config.grassBrightness, 0, 2, "%.2f");
+            ImGui::SliderFloat("Terreno como el pasto", &g_config.terrainMatch, 0, 1, "%.2f");
+            ImGui::SetItemTooltip("Lleva el verde del terreno pelado (donde ya no hay pasto) al verde amarillento del pasto.");
+            ImGui::ColorEdit3("Tinte del terreno", g_config.terrainTint, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+            ImGui::ColorEdit3("Tinte del pasto", g_config.grassTint, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+            ImGui::SetItemTooltip("Color de las matas de pasto (con 'Terreno como el pasto'). Menos rojo = verde mas fresco, menos paja.");
             ImGui::SetItemTooltip("Resalta las siluetas a contraluz del sol. La luna tiene su propio control.");
             ImGui::SliderFloat("Detalle de luz original", &g_config.bakedTerrainDetail, 0, 1, "%.2f");
             ImGui::SetItemTooltip("Conserva parte de las sombras pintadas en la textura del terreno.");

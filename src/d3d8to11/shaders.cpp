@@ -157,7 +157,7 @@ const char* kVSOutputStruct =
 
 namespace {
 std::string WaterBlock(int slot) {
-    return Fmt("cbuffer Water : register(b%d) { float4 waterClip[4]; float4 waterProject[4]; float4 waterReflection; float4 waterRegions; float4 waterProfiles; float4 waterSwell; float4 waterScreen; float4 waterParams; float4 waterOptical; float4 waterMisc; float4 waterMotion; float4 waterContacts[64]; float4 waterRings[64]; };\n",slot);
+    return Fmt("cbuffer Water : register(b%d) { float4 waterClip[4]; float4 waterProject[4]; float4 waterReflection; float4 waterRegions; float4 waterProfiles; float4 waterSwell; float4 waterScreen; float4 waterParams; float4 waterOptical; float4 waterMisc; float4 waterMotion; float4 waterOcean; float4 waterEnv; float4 waterDeep; float4 waterSkyTint; float4 waterContacts[64]; float4 waterRings[64]; };\n",slot);
 }
 // Shared VS/PS field: identical phase in world space across all water batches.
 std::string WaterSurfaceCode(){
@@ -185,23 +185,29 @@ std::string WaterSurfaceCode(){
         " return smoothstep(.15,max(.3,waterSwell.z),depth);}\n"
         // Height is positive UP; renderer Y is positive DOWN. Wavelengths are
         // deliberately long for the legacy mesh. This is analytic, not fluid simulation.
-        "float4 WaterSwellAt(float3 p){\n"
+        // foot: the pixel's footprint on the water (world units; 0 in the vertex shader). Waves
+        // shorter than about two pixels are faded out instead of aliasing into moire.
+        "float4 WaterSwellAt(float3 p,float foot=0){\n"
         " float a=waterSwell.x*WaterOceanAt(p)*WaterCoastFade(p);if(a<=0)return 0;\n"
         " float scale=1/max(.5,waterSwell.y),t=waterOptical.w;\n"
-        " float2 d0=float2(.93969,.34202),d1=float2(.81915,.57358),d2=float2(.57358,.81915);\n"
         " float k0=.15708*scale,k1=.29920*scale,k2=.48332*scale;\n"
-        " float q0=dot(p.xz,d0)*k0-t*1.05,q1=dot(p.xz,d1)*k1-t*1.38+1.1,q2=dot(p.xz,d2)*k2-t*1.74+2.0;\n"
+        " float f0=1-smoothstep(.6,2.2,foot*k0),f1=1-smoothstep(.6,2.2,foot*k1),f2=1-smoothstep(.6,2.2,foot*k2);\n"
+        // Open sea: no swell (a few long regular ridges read as stripes across the whole sea from the
+        // park's camera; the noise ripples carry it). The ridges are kept for the breakers.
+        " float h=0,crest=0;float2 g=0;\n"
+        // Right at the shore the ridges roll in toward it; any farther out (past about 12 units) they
+        // draw rings around every islet.
         " float coastDist=WaterShoreDistance(p.xz);\n"
-        " if(coastDist<4096){\n"
-        "   float2 g=-WaterShoreGradient(p.xz);d0=g;d1=g;d2=g;\n"
-        "   q0=-coastDist*k0-t*1.05;q1=-coastDist*k1-t*1.38+1.1;q2=-coastDist*k2-t*1.74+2.0;}\n"
-        // Dominant travelling ridges, not crossing-wave isolated maxima. A mild
-        // second harmonic sharpens the profile; its derivative is kept in sync.
-        " float h=.80*(sin(q0)+.16*sin(2*q0))/1.16+.15*sin(q1)+.05*sin(q2);\n"
-        " float2 gradient=.80*k0*(cos(q0)+.32*cos(2*q0))/1.16*d0+.15*k1*cos(q1)*d1+.05*k2*cos(q2)*d2;\n"
-        // A narrow moving leading crest, not foam wherever total height is high.
-        " float crest=smoothstep(.92,.99,sin(q0))*(1-smoothstep(-.04,.22,cos(q0)));\n"
-        " return float4(h*a,gradient*a,crest*WaterCoastFade(p)*WaterOceanAt(p));}\n";
+        " float near=1-smoothstep(4,12,coastDist);\n"
+        " if(near>0){\n"
+        "   float2 sg=-WaterShoreGradient(p.xz);\n"
+        "   float r0=-coastDist*k0-t*1.05,r1=-coastDist*k1-t*1.38+1.1,r2=-coastDist*k2-t*1.74+2.0;\n"
+        "   float hr=.80*(sin(r0)+.16*sin(2*r0))/1.16+.15*sin(r1)+.05*sin(r2);\n"
+        "   float2 gr=(.80*k0*(cos(r0)+.32*cos(2*r0))/1.16*f0+.15*k1*cos(r1)*f1+.05*k2*cos(r2)*f2)*sg;\n"
+        "   float cr=smoothstep(.92,.99,sin(r0))*(1-smoothstep(-.04,.22,cos(r0)));\n"
+        "   h=lerp(h,hr,near);g=lerp(g,gr,near);crest=lerp(crest,cr,near);\n"
+        " }\n"
+        " return float4(h*a,g*a,crest*WaterCoastFade(p)*WaterOceanAt(p));}\n";
 }
 std::string WaterPixelCode(int samples) {
     std::string s = WaterBlock(2);
@@ -232,19 +238,64 @@ std::string WaterPixelCode(int samples) {
         "    slope+=delta/distance*gradient;\n"
         "  }\n"
         "  return clamp(slope*waterMotion.y,-0.30,0.30); }\n"
-        // The legacy t0 is a simulation/lookup field, not a validated world
-        // normal map. Generate one continuous gradient field across all UV tiles.
+        // The legacy t0 is a simulation/lookup field, not a validated world normal map: the surface
+        // comes from the FFT ocean (ocean.cpp), or drifting noise without it.
+        "Texture2DArray<float4> waterFFT : register(t25); Texture2D<float4> waterSky : register(t26);\n"
+        "SamplerState waterWrap : register(s12);\n"
+        // Slope variance lost to filtering at this pixel (FFT mips, faded noise octaves): it becomes
+        // GGX roughness, so far water turns smooth with a broad sun/moon path, not a moire.
+        "static float gWaterVar=0;\n"
+        // Value noise with its analytic gradient (xy) and value (z).
+        "float WaterHash(float2 c){c=frac(c*float2(.1031,.1030));c+=dot(c,c.yx+33.33);return frac((c.x+c.y)*c.x);}\n"
+        "float3 WaterNoiseD(float2 x){float2 c=floor(x),f=frac(x),u=f*f*(3-2*f),du=6*f*(1-f);\n"
+        " float a=WaterHash(c),b=WaterHash(c+float2(1,0)),e=WaterHash(c+float2(0,1)),g=WaterHash(c+1),k=a-b-e+g;\n"
+        " return float3(du*(float2(b-a,e-a)+k*u.yx),a+(b-a)*u.x+(e-a)*u.y+k*u.x*u.y);}\n"
+        // FFT slopes and their squares at uv, between the two animation frames around f.
+        "float4 WaterFFTAt(float2 uv,float f){\n"
+        "  float f0=floor(f),f1=fmod(f0+1,waterEnv.z);\n"
+        "  return lerp(waterFFT.Sample(waterWrap,float3(uv,f0)),waterFFT.Sample(waterWrap,float3(uv,f1)),f-f0);}\n"
         "float4 WaterWave(VSOut i) {\n"
-        "  float2 d0=float2(0.93969,0.34202),d1=float2(-0.52992,0.84805),d2=float2(0.25882,-0.96593);\n"
         "  float ocean=WaterOcean(i);float2 p=i.world.xz; float t=waterOptical.w*lerp(.55,1,ocean);\n"
-        "  float2 slope=d0*(0.035*0.9*cos(dot(p,d0)*0.9-t*0.8))\n"
-        "              +d1*(0.016*1.7*cos(dot(p,d1)*1.7+t*1.1))\n"
-        "              +d2*(0.006*2.8*cos(dot(p,d2)*2.8-t*1.35));\n"
-        "  slope*=waterMisc.y*lerp(waterProfiles.y,waterProfiles.z,ocean);\n"
-        "  slope+=WaterSwellAt(i.world).yz;\n"
+        "  float foot=max(length(ddx(p)),length(ddy(p)));\n"
+        "  float amp=waterMisc.y*lerp(waterProfiles.y,waterProfiles.z,ocean);\n"
+        "  float2 slope=0;float var=0;\n"
+        "  if(waterOcean.x>.5){\n"
+        // Two tiles of the same looping ocean: a large one and a smaller one turned and half a loop
+        // apart, so neither repeat shows.
+        "    const float2x2 r=float2x2(.8,-.6,.6,.8);\n"
+        "    float f=frac(t/waterOcean.w)*waterEnv.z;\n"
+        "    float4 o1=WaterFFTAt(p/waterOcean.y,f);\n"
+        "    float4 o2=WaterFFTAt(mul(r,p)/(waterOcean.y*.29)+.37,fmod(f+waterEnv.z*.5,waterEnv.z));\n"
+        "    float s=.05*waterOcean.z*amp;\n"
+        "    slope=(o1.xy+mul(o2.xy,r)*.45)*s;\n"
+        "    var=(max(o1.z+o1.w-dot(o1.xy,o1.xy),0)+max(o2.z+o2.w-dot(o2.xy,o2.xy),0)*.2)*s*s;\n"
+        "  } else {\n"
+        // Without it: eight octaves of drifting noise, each faded out while its cells are still
+        // several pixels wide (finer, it shimmers).
+        "    [unroll] for(int k=0;k<8;k++){\n"
+        "      float ang=k*2.39996+.35;float2x2 r=float2x2(cos(ang),-sin(ang),sin(ang),cos(ang));\n"
+        "      float fr=.04*pow(1.9,k),a=.03*pow(.85,k);\n" // a: slope amplitude
+        "      if(k<3)a*=lerp(.25,1,ocean);\n" // lagoons: no big waves
+        "      float fil=1-smoothstep(.05,.22,foot*fr);\n"
+        "      float2 drift=float2(cos(.35+k*.7),sin(.35+k*.7))*t*.35/sqrt(fr);\n"
+        "      float2 g=WaterNoiseD(mul(r,p)*fr+drift+k*17.3).xy;\n"
+        "      slope+=mul(g,r)*(a*fil);\n"
+        "      var+=a*a*.6*(1-fil*fil);\n"
+        "    }\n"
+        "    slope*=amp;var*=amp*amp;\n"
+        "  }\n"
+        "  gWaterVar=var;\n"
+        "  slope+=WaterSwellAt(i.world,foot).yz;\n"
         "  slope+=WaterInteractionSlope(i);\n"
         "  float3 n=normalize(float3(slope,1));\n"
         "  return float4(n*0.5+0.5,1); }\n"
+        // GGX reflection of a light (sun or moon) toward the camera: roughness from the slope variance.
+        "float WaterGGX(float3 N,float3 V,float3 L,float a2){\n"
+        "  float3 H=normalize(L+V);float nl=saturate(dot(N,L)),nv=max(abs(dot(N,V)),1e-3),nh=saturate(dot(N,H)),vh=saturate(dot(V,H));\n"
+        "  float d=nh*nh*(a2-1)+1,D=a2/(3.14159*d*d);\n"
+        "  float F=.02+.98*pow(1-vh,5);\n"
+        "  float k=sqrt(a2)*.5,vis=.25/((nl*(1-k)+k)*(nv*(1-k)+k));\n"
+        "  return min(D*F*vis*nl,12); }\n"
         "float3 WaterUnproject(float2 pixel,float d) {\n"
         "  float2 ndc=float2(pixel.x*waterScreen.x*2-1,1-pixel.y*waterScreen.y*2)-waterScreen.zw;\n"
         "  float4 q=float4(ndc,d,1);\n"
@@ -301,7 +352,13 @@ std::string WaterPixelCode(int samples) {
         "  float3 eye=sunCamera.xyz-i.world;\n"
         "  float3 V=dot(eye,eye)>1e-8 ? normalize(eye) : float3(0,-1,0);\n"
         "  float4 sceneReflection=WaterSceneReflection(i,N,V);\n"
-        "  reflected*=fogTint.rgb;\n" // the game's sky texture, toward the night sky
+        "  float a2=saturate(.003+gWaterVar);\n"  // GGX roughness squared
+        // The time-of-day sky (sun.cpp kSkyEnvMain) along the reflected ray, blurrier on rougher water;
+        // rays turned below the horizon by a wave see the horizon.
+        "  if(waterEnv.x>.5){\n"
+        "    float3 R=reflect(-V,N),d=normalize(float3(R.x,max(-R.y,.015),R.z));\n"
+        "    reflected=waterSky.SampleLevel(waterClamp,float2(atan2(d.z,d.x)*.1591549+.5,acos(d.y)*.6366198),sqrt(sqrt(a2))*waterEnv.y).rgb*waterSkyTint.rgb;\n"
+        "  } else reflected*=fogTint.rgb;\n" // the game's sky texture, toward the night sky
         "  reflected=lerp(reflected,sceneReflection.rgb,sceneReflection.a);\n"
         "  float fresnel=0.02+0.98*pow(1-saturate(abs(dot(N,V))),5);\n"
         "  float2 uv=(pixel+0.5)*waterScreen.xy;\n"
@@ -311,7 +368,7 @@ std::string WaterPixelCode(int samples) {
         "  float3 behind=waterScene.SampleLevel(waterClamp,warped,0).rgb;\n"
         "  float amount=depth/max(waterParams.y,0.01);\n"
         "  float3 transmission=exp(-amount*float3(1.6,0.65,0.40));\n"
-        "  float3 deepTint=lerp(float3(.045,.145,.095),float3(.025,.11,.14),ocean);\n"
+        "  float3 deepTint=lerp(float3(.045,.145,.095),waterDeep.rgb,ocean);\n"
         "  float3 tint=lerp(float3(0.16,0.32,0.24),deepTint,saturate(amount));\n"
         "  if(todNight.w>.5)tint*=todNight.rgb;\n"
         "  float clarity=lerp(1,waterOptical.y,saturate(amount*2));\n"
@@ -328,12 +385,17 @@ std::string WaterPixelCode(int samples) {
         "  surface*=lerp(1,bodyLight,ocean);\n"
         "  float3 halfVector=L+V;float3 H=halfVector/max(length(halfVector),.001);\n"
         "  float nh=saturate(dot(N,H)), moon=specParams.z;\n"
-        "  float glint=pow(nh,96)*(.08+.24*fresnel)*waterOptical.x*lerp(ocean,1,moon)*lerp(1,moonDir.w,moon);\n"
-        "  surface+=glint*lerp(float3(1,.96,.86),rimColor.rgb,moon);\n"
-        // Moonlight on water: the moon's mirror image broken into glitter on the wave facets, plus a
-        // soft path toward it. From the moon itself (its phase, above the horizon), not the night light.
-        "  float3 moonHalf=moonDir.xyz+V;float mh=saturate(dot(N,moonHalf/max(length(moonHalf),.001)));\n"
-        "  surface+=moonDir.w*rimColor.rgb*(pow(mh,900)*1.6+pow(mh,140)*0.05)*(.35+.65*fresnel)*waterOptical.x;\n"
+        "  float sp=2/(2.0/98+2*gWaterVar)-2;\n"
+        "  float glint=pow(nh,sp)*(sp+2)/98*(.08+.24*fresnel)*waterOptical.x*lerp(ocean,1,moon)*lerp(1,moonDir.w,moon);\n"
+        "  surface+=glint*(1-skySun.w)*lerp(float3(1,.96,.86),rimColor.rgb,moon);\n"
+        // GGX sun and moon: their mirror images where they are in the sky, spread by the waves and by
+        // the slope variance filtered out at a distance into a path toward them (golden when low).
+        "  float3 sunGlow=lerp(float3(1,.58,.28),float3(1,.96,.88),saturate(-skySun.y*4));\n"
+        "  surface+=WaterGGX(N,V,skySun.xyz,a2)*skySun.w*sunGlow*waterEnv.w*waterOptical.x;\n"
+        // A faint wide lobe as well (the sea's rougher patches): with the sun high, a soft sheen still
+        // runs toward it on the far water instead of the glitter falling outside the view.
+        "  surface+=WaterGGX(N,V,skySun.xyz,saturate(a2+.06))*skySun.w*sunGlow*waterEnv.w*.3*waterOptical.x;\n"
+        "  surface+=WaterGGX(N,V,moonDir.xyz,a2)*moonDir.w*rimColor.rgb*waterEnv.w*.4*waterOptical.x;\n"
         // Advancing/receding depth-space fronts plus drifting porous foam, no
         // permanent uniform white outline. Footprint waves remain independent.
         "  float phase=waterOptical.w*1.4+FoamNoise(i.world.xz*.09)*2;\n"
@@ -365,7 +427,7 @@ std::string WaterPixelCode(int samples) {
 }
 std::string SunBlock(int slot) {
     return Fmt("cbuffer Sun : register(b%d) { float4 sunRead[4]; float4 sunWrite[4]; float4 clipToWorld[4]; float4 sunDirection; float4 sunSettings; float4 sunFlags; float4 sunControl; float4 sunCamera;"
-               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; float4 specParams; float4 gameSunDir; float4 emissiveGlow; float4 nightGrade; float4 grassThin; float4 moonDir; };\n"
+               " float4 gameAmbient; float4 gameSun; float4 relightParams; float4 terrainMap; float4 todSun; float4 todAmbient; float4 todNight; float4 rimColor; float4 fogTint; float4 grassGrade; float4 specParams; float4 gameSunDir; float4 emissiveGlow; float4 nightGrade; float4 grassThin; float4 moonDir; float4 rimStyle; float4 terrainTint; float4 grassTint; float4 skySun; };\n"
                // Distant grass keeps a share of its clumps (vertex shader); the rest are drawn fuller.
                "float GrassKeep(float2 xz) {\n"
                "  float t = saturate((length(xz - sunCamera.xz) - grassThin.x) / max(grassThin.y - grassThin.x, 1e-3));\n"
@@ -645,10 +707,10 @@ std::string SunPixelCodeBase() {
         "  float edge = pow(1 - nv, 3);\n"
         "  float facing = saturate(nl * 0.7 + 0.3), back = saturate(dot(-V, L) * 0.5 + 0.5);\n"
         "  float soft = edge * facing * lerp(0.5, 1.5, back);\n"
-        // Moonlight (specParams.z): a thin bright line only on the edges that face the moon
-        // (back, head, tail, leaf rims), strongest against the light.
+        // Moonlight and the low sun (rimStyle.x): a thin bright line only on the edges that face the
+        // light (back, head, tail, leaf rims), strongest against it.
         "  float thin = smoothstep(1 - specParams.w, 1, 1 - nv) * saturate(nl * 2.5) * lerp(0.4, 2, back);\n"
-        "  return rimColor.rgb * lerp(soft, thin, specParams.z) * todAmbient.w; }\n"
+        "  return rimColor.rgb * lerp(soft, thin, rimStyle.x) * todAmbient.w; }\n"
         "float4 RelightSurface(float4 color, VSOut i) {\n"
         "  if (sunFlags.x < 0.5 || sunFlags.y > 0.5 || sunControl.x < 0.5) return color;\n"
         "  bool grass = sunFlags.w == 4 && sunFlags.z > 0.5;\n"
@@ -759,7 +821,13 @@ std::string SunPixelCodeBase() {
         "  }\n"
         // Grass: the game's grass is a much more saturated green than its terrain.
         "  if (sunFlags.w == 4 && sunFlags.y < 0.5 && grassGrade.w > 0.5)\n"
-        "    lit.rgb = lerp(dot(lit.rgb, float3(0.2126, 0.7152, 0.0722)).xxx, lit.rgb, grassGrade.x) * grassGrade.y;\n"
+        "    lit.rgb = lerp(dot(lit.rgb, float3(0.2126, 0.7152, 0.0722)).xxx, lit.rgb, grassGrade.x) * grassGrade.y\n"
+        "              * lerp(1, grassTint.rgb, grassTint.w);\n"
+        // Terrain: its green toward the grass blades' yellowish green (bare ground past the grass).
+        "  if (sunFlags.w == 2 && sunFlags.y < 0.5 && terrainTint.w > 0) {\n"
+        "    float green = saturate((lit.g - max(lit.r, lit.b)) / max(lit.g, 1e-3) * 3);\n"
+        "    lit.rgb *= lerp(1, terrainTint.rgb, green * terrainTint.w);\n"
+        "  }\n"
         "  if (nightGrade.w > 0 && sunFlags.x > 0.5) lit.rgb = NightGrade(lit.rgb);\n"
         "  lit.rgb += pointExtra;\n"
         "  return lit; }\n";

@@ -94,6 +94,7 @@ void LoadConfig()
     g_config.shadowCache = GetPrivateProfileIntA("Lighting", "ShadowCache", 1, ini.c_str()) != 0;
     g_config.shadowCacheFrames = (std::max)(1, (std::min)(16, (int)GetPrivateProfileIntA("Lighting", "ShadowCacheFrames", 4, ini.c_str())));
     g_config.shadowCacheNear = readFloat("ShadowCacheNear", 100, 0, 16384);
+    g_config.shadowStep = readFloat("ShadowStep", 0.4f, 0, 5);
     g_config.sunAmbient = readFloat("Ambient", 0.60f, 0.1f, 2);
     g_config.sunDirect = readFloat("SunIntensity", 0.55f, 0, 2);
     g_config.relightSun = readFloat("RelightSun", 1.35f, 0, 4);
@@ -146,6 +147,9 @@ void LoadConfig()
     readColor("DuskAmbient", g_config.duskAmbient);
     readColor("LowSunColor", g_config.lowSunColor);
     readColor("NightTint", g_config.nightTint);
+    readColor("TerrainTint", g_config.terrainTint);
+    readColor("GrassTint", g_config.grassTint);
+    g_config.terrainMatch = readTod("TerrainMatch", g_config.terrainMatch, 0, 1);
     g_config.moonIntensity = readTod("MoonIntensity", g_config.moonIntensity, 0, 3);
     g_config.moonRim = readTod("MoonRim", g_config.moonRim, 0, 8);
     g_config.moonRimWidth = readTod("MoonRimWidth", g_config.moonRimWidth, 0.05f, 1);
@@ -168,6 +172,55 @@ void LoadConfig()
     if (g_config.timeOfDayDay >= g_config.moonCycleDays) g_config.timeOfDayDay = std::fmod(g_config.timeOfDayDay, g_config.moonCycleDays);
     g_config.moonlessLight = readTod("MoonlessLight", g_config.moonlessLight, 0, 1);
     g_config.sunDisc = readTod("SunDisc", g_config.sunDisc, 0, 4);
+    g_config.sunGlow = readTod("SunGlow", g_config.sunGlow, 0, 4);
+    g_config.dayBrightness = readTod("DayBrightness", g_config.dayBrightness, 0.5f, 2);
+    g_config.dayLift = readTod("DayLift", g_config.dayLift, 0, 1);
+    g_config.daySaturation = readTod("DaySaturation", g_config.daySaturation, 0, 2);
+    g_config.dayShadowStrength = readTod("DayShadowStrength", g_config.dayShadowStrength, 0, 1);
+    g_config.daySunBoost = readTod("DaySunBoost", g_config.daySunBoost, 0, 1);
+    g_config.dayAO = readTod("DayAO", g_config.dayAO, 0, 1);
+    auto readCloud = [&](const char* key, float fallback, float lo, float hi) {
+        char value[64];
+        GetPrivateProfileStringA("Clouds", key, "", value, sizeof(value), ini.c_str());
+        float f = value[0] ? (float)atof(value) : fallback;
+        return f >= lo && f <= hi ? f : fallback;
+    };
+    g_config.clouds = GetPrivateProfileIntA("Clouds", "Enabled", g_config.clouds ? 1 : 0, ini.c_str()) != 0;
+    g_config.cloudCoverage = readCloud("Coverage", g_config.cloudCoverage, 0, 1);
+    g_config.cloudDensity = readCloud("Density", g_config.cloudDensity, 0.05f, 4);
+    g_config.cloudHeight = readCloud("Height", g_config.cloudHeight, 50, 5000);
+    g_config.cloudThickness = readCloud("Thickness", g_config.cloudThickness, 50, 5000);
+    g_config.cloudWind = readCloud("Wind", g_config.cloudWind, 0, 200);
+    g_config.horizonHaze = readCloud("HorizonHaze", g_config.horizonHaze, 0.05f, 1);
+    g_config.islands = GetPrivateProfileIntA("Islands", "Enabled", g_config.islands ? 1 : 0, ini.c_str()) != 0;
+    {
+        char value[32];
+        GetPrivateProfileStringA("Islands", "Height", "", value, sizeof(value), ini.c_str());
+        if (value[0]) { float f = (float)atof(value); if (f >= 0.2f && f <= 4) g_config.islandHeight = f; }
+        GetPrivateProfileStringA("Islands", "Haze", "", value, sizeof(value), ini.c_str());
+        if (value[0]) { float f = (float)atof(value); if (f >= 0 && f <= 3) g_config.islandHaze = f; }
+        GetPrivateProfileStringA("Islands", "Clouds", "", value, sizeof(value), ini.c_str());
+        if (value[0]) { float f = (float)atof(value); if (f >= 0 && f <= 2) g_config.islandClouds = f; }
+    }
+    auto readFog = [&](const char* key, float fallback, float lo, float hi) {
+        char value[64];
+        GetPrivateProfileStringA("Fog", key, "", value, sizeof(value), ini.c_str());
+        float f = value[0] ? (float)atof(value) : fallback;
+        return f >= lo && f <= hi ? f : fallback;
+    };
+    g_config.fog = GetPrivateProfileIntA("Fog", "Enabled", g_config.fog ? 1 : 0, ini.c_str()) != 0;
+    g_config.fogDensity = readFog("Density", g_config.fogDensity, 0, 0.01f);
+    g_config.fogHeightDensity = readFog("HeightDensity", g_config.fogHeightDensity, 0, 0.05f);
+    g_config.fogHeightFalloff = readFog("HeightFalloff", g_config.fogHeightFalloff, 1, 1000);
+    g_config.fogBase = readFog("Base", g_config.fogBase, -500, 500);
+    g_config.fogSun = readFog("SunScatter", g_config.fogSun, 0, 4);
+    g_config.godRays = GetPrivateProfileIntA("Fog", "GodRays", g_config.godRays ? 1 : 0, ini.c_str()) != 0;
+    g_config.volumeFog = GetPrivateProfileIntA("Fog", "Volumetric", g_config.volumeFog ? 1 : 0, ini.c_str()) != 0;
+    g_config.volumeDensity = readFog("VolumeDensity", g_config.volumeDensity, 0, 0.5f);
+    g_config.volumeHeight = readFog("VolumeHeight", g_config.volumeHeight, 1, 1000);
+    g_config.volumeHills = readFog("VolumeHills", g_config.volumeHills, 0, 1);
+    g_config.volumePatches = readFog("VolumePatches", g_config.volumePatches, 0, 1);
+    g_config.godRayStrength = readFog("GodRayStrength", g_config.godRayStrength, 0, 8);
     g_config.bakedTerrainDetail = readFloat("BakedTerrainDetail", 1, 0, 1);
     g_config.shadowStrength = readFloat("ShadowStrength", 0.25f, 0, 1);
     g_config.sunMinElevation = readFloat("SunMinHeight", 0.35f, 0.05f, 1);
@@ -246,6 +299,17 @@ void LoadConfig()
     g_config.waterSwellLength=readWater("SwellLength",1.f,.5f,4);
     g_config.waterSwellCoastDepth=readWater("SwellCoastDepth",3.f,.5f,10);
     g_config.waterCrestFoam=readWater("CrestFoam",.35f,0,1);
+    g_config.waterOcean=GetPrivateProfileIntA("Water","Ocean",1,ini.c_str())!=0;
+    g_config.waterSkyReflection=GetPrivateProfileIntA("Water","SkyReflection",1,ini.c_str())!=0;
+    g_config.waterOceanScale=readWater("OceanScale",48,8,400);
+    g_config.waterOceanStrength=readWater("OceanStrength",1,0,3);
+    g_config.waterSunGlitter=readWater("SunGlitter",1.5f,0,10);
+    auto readWaterColor=[&](const char* key,float* c){
+        char value[96];GetPrivateProfileStringA("Water",key,"",value,sizeof(value),ini.c_str());
+        float r,g,b;if(sscanf_s(value,"%f , %f , %f",&r,&g,&b)==3 && r>=0 && g>=0 && b>=0 && r<=4 && g<=4 && b<=4){c[0]=r;c[1]=g;c[2]=b;}
+    };
+    readWaterColor("OceanColor",g_config.waterOceanColor);
+    readWaterColor("SkyTint",g_config.waterSkyTint);
     g_config.waterSSRStrength=readWater("SceneReflectionStrength",1,0,1);
     g_config.waterSSRDistance=readWater("SceneReflectionDistance",80,5,250);
     g_config.waterSSRSteps=GetPrivateProfileIntA("Water","SceneReflectionSteps",24,ini.c_str());
@@ -340,6 +404,7 @@ void SaveConfig()
     putInt("Lighting", "ShadowCache", g_config.shadowCache);
     putInt("Lighting", "ShadowCacheFrames", g_config.shadowCacheFrames);
     putFloat("Lighting", "ShadowCacheNear", g_config.shadowCacheNear);
+    putFloat("Lighting", "ShadowStep", g_config.shadowStep);
     putFloat("Lighting", "ShadowStrength", g_config.shadowStrength);
     put("Lighting", "SunSource", g_config.sunFromGame ? "game" : "fixed");
     putFloat("Lighting", "SunX", g_config.sunDirection[0]);
@@ -389,6 +454,9 @@ void SaveConfig()
     putColor("NightAmbient", g_config.nightAmbient);
     putColor("DuskAmbient", g_config.duskAmbient);
     putColor("LowSunColor", g_config.lowSunColor);
+    putColor("TerrainTint", g_config.terrainTint);
+    putColor("GrassTint", g_config.grassTint);
+    putFloat("TimeOfDay", "TerrainMatch", g_config.terrainMatch);
     putColor("NightTint", g_config.nightTint);
     putFloat("TimeOfDay", "MoonIntensity", g_config.moonIntensity);
     putFloat("TimeOfDay", "MoonRim", g_config.moonRim);
@@ -411,6 +479,37 @@ void SaveConfig()
     putFloat("TimeOfDay", "Day", g_config.timeOfDayDay);
     putFloat("TimeOfDay", "MoonlessLight", g_config.moonlessLight);
     putFloat("TimeOfDay", "SunDisc", g_config.sunDisc);
+    putFloat("TimeOfDay", "SunGlow", g_config.sunGlow);
+    putFloat("TimeOfDay", "DayBrightness", g_config.dayBrightness);
+    putFloat("TimeOfDay", "DayLift", g_config.dayLift);
+    putFloat("TimeOfDay", "DaySaturation", g_config.daySaturation);
+    putFloat("TimeOfDay", "DayShadowStrength", g_config.dayShadowStrength);
+    putFloat("TimeOfDay", "DaySunBoost", g_config.daySunBoost);
+    putFloat("TimeOfDay", "DayAO", g_config.dayAO);
+    putInt("Clouds", "Enabled", g_config.clouds);
+    putFloat("Clouds", "Coverage", g_config.cloudCoverage);
+    putFloat("Clouds", "Density", g_config.cloudDensity);
+    putFloat("Clouds", "Height", g_config.cloudHeight);
+    putFloat("Clouds", "Thickness", g_config.cloudThickness);
+    putFloat("Clouds", "Wind", g_config.cloudWind);
+    putFloat("Clouds", "HorizonHaze", g_config.horizonHaze);
+    putInt("Islands", "Enabled", g_config.islands);
+    putFloat("Islands", "Height", g_config.islandHeight);
+    putFloat("Islands", "Haze", g_config.islandHaze);
+    putFloat("Islands", "Clouds", g_config.islandClouds);
+    putInt("Fog", "Enabled", g_config.fog);
+    put("Fog", "Density", [] { char b[32]; sprintf_s(b, "%.6f", g_config.fogDensity); return std::string(b); }().c_str());
+    put("Fog", "HeightDensity", [] { char b[32]; sprintf_s(b, "%.6f", g_config.fogHeightDensity); return std::string(b); }().c_str());
+    putFloat("Fog", "HeightFalloff", g_config.fogHeightFalloff);
+    putFloat("Fog", "Base", g_config.fogBase);
+    putFloat("Fog", "SunScatter", g_config.fogSun);
+    putInt("Fog", "GodRays", g_config.godRays);
+    putInt("Fog", "Volumetric", g_config.volumeFog);
+    put("Fog", "VolumeDensity", [] { char b[32]; sprintf_s(b, "%.6f", g_config.volumeDensity); return std::string(b); }().c_str());
+    putFloat("Fog", "VolumeHeight", g_config.volumeHeight);
+    putFloat("Fog", "VolumeHills", g_config.volumeHills);
+    putFloat("Fog", "VolumePatches", g_config.volumePatches);
+    putFloat("Fog", "GodRayStrength", g_config.godRayStrength);
     putFloat("Lighting", "BakedTerrainDetail", g_config.bakedTerrainDetail);
     putFloat("Lighting", "Ambient", g_config.sunAmbient);
     putFloat("Lighting", "SunIntensity", g_config.sunDirect);
@@ -452,6 +551,14 @@ void SaveConfig()
     putFloat("Water","LagoonRipples",g_config.waterLagoonRipples);
     putFloat("Water","OceanRipples",g_config.waterOceanRipples);
     putFloat("Water","SwellAmplitude",g_config.waterSwellAmplitude);
+    putInt("Water","Ocean",g_config.waterOcean);
+    putInt("Water","SkyReflection",g_config.waterSkyReflection);
+    putFloat("Water","OceanScale",g_config.waterOceanScale);
+    putFloat("Water","OceanStrength",g_config.waterOceanStrength);
+    putFloat("Water","SunGlitter",g_config.waterSunGlitter);
+    for(const auto& wc:{std::make_pair("OceanColor",g_config.waterOceanColor),std::make_pair("SkyTint",g_config.waterSkyTint)}){
+        char b[96];sprintf_s(b,"%.3f,%.3f,%.3f",wc.second[0],wc.second[1],wc.second[2]);put("Water",wc.first,b);
+    }
     putFloat("Water","SwellLength",g_config.waterSwellLength);
     putFloat("Water","SwellCoastDepth",g_config.waterSwellCoastDepth);
     putFloat("Water","CrestFoam",g_config.waterCrestFoam);
