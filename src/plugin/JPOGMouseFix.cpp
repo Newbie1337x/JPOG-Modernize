@@ -1009,13 +1009,52 @@ static void MakeBorderless(HWND hwnd)
                  SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
 }
 
+// Windows refuses SetForegroundWindow from a process that is not in front; attaching to the input
+// queue of the current foreground window lets the game come up in front instead of behind.
+static void BringToFront(HWND hwnd)
+{
+    if (IsIconic(hwnd))
+        ShowWindow(hwnd, SW_RESTORE);
+    HWND fg = GetForegroundWindow();
+    const DWORD fgThread = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
+    const DWORD myThread = GetCurrentThreadId();
+    const bool attach = fgThread && fgThread != myThread;
+    if (attach)
+        AttachThreadInput(myThread, fgThread, TRUE);
+    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    BringWindowToTop(hwnd);
+    SetForegroundWindow(hwnd);
+    SetFocus(hwnd);
+    if (attach)
+        AttachThreadInput(myThread, fgThread, FALSE);
+}
+
 static DWORD WINAPI BorderlessThread(LPVOID)
 {
+    HWND focused = nullptr;
     for (;;) {
         HWND hwnd = nullptr;
         EnumWindows(FindGameWindowProc, (LPARAM)&hwnd);
-        if (hwnd)
+        if (hwnd) {
             MakeBorderless(hwnd);
+            // The game can leave its window parked far off screen (x = 32767): bring it back.
+            RECT wr;
+            if (!IsIconic(hwnd) && GetWindowRect(hwnd, &wr) &&
+                !MonitorFromRect(&wr, MONITOR_DEFAULTTONULL)) {
+                MONITORINFO mi = { sizeof(mi) };
+                if (GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mi)) {
+                    const RECT& r = mi.rcMonitor;
+                    SetWindowPos(hwnd, HWND_TOP, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                                 SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+                    BringToFront(hwnd);
+                }
+            }
+            if (hwnd != focused) { // once per window: do not steal focus on later alt-tabs
+                BringToFront(hwnd);
+                focused = hwnd;
+            }
+        }
         Sleep(500);
     }
 }
